@@ -146,13 +146,6 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
     "Name": "External ID App 1",
     "Enabled": true
   },
-  "PasswordPolicy": {
-    "MinLength": 8,
-    "RequireUppercase": true,
-    "RequireLowercase": true,
-    "RequireDigit": true,
-    "RequireSpecialCharacter": true
-  }
 }
 ```
 
@@ -2075,7 +2068,7 @@ Each configuration file has a **single, dedicated app registration**:
 - Solution: Check for duplicate users, use `B2CObjectId` to correlate
 
 **Error: "Password does not meet complexity requirements"**
-- Solution: Review `PasswordPolicy` settings and B2C password requirements
+- Solution: External ID enforces its own password policy; ensure your tenant's policy aligns with B2C requirements
 
 ### Debugging Tips
 

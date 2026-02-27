@@ -7,6 +7,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.Net.Http.Json;
 using System.Text.RegularExpressions;
+using System.Linq;
 
 namespace B2CMigrationKit.Core.Services.Infrastructure;
 
@@ -109,7 +110,9 @@ public class AuthenticationService : IAuthenticationService
             result.MeetsLengthRequirement = true;
         }
 
-        if (policy.RequireUppercase && !Regex.IsMatch(password, "[A-Z]"))
+        // Use Unicode category patterns (\p{Lu}/\p{Ll}) so that non-ASCII letters
+        // such as Ñ, É, Ü are recognised as uppercase/lowercase respectively.
+        if (policy.RequireUppercase && !Regex.IsMatch(password, @"\p{Lu}"))
         {
             errors.Add("Password must contain at least one uppercase letter");
         }
@@ -118,7 +121,7 @@ public class AuthenticationService : IAuthenticationService
             result.HasUppercase = true;
         }
 
-        if (policy.RequireLowercase && !Regex.IsMatch(password, "[a-z]"))
+        if (policy.RequireLowercase && !Regex.IsMatch(password, @"\p{Ll}"))
         {
             errors.Add("Password must contain at least one lowercase letter");
         }
@@ -138,7 +141,11 @@ public class AuthenticationService : IAuthenticationService
 
         if (policy.RequireSpecialCharacter)
         {
-            var specialChars = Regex.Escape(policy.AllowedSpecialCharacters);
+            // Regex.Escape is designed for full patterns, not for the interior of a
+            // character class [...].  Escape each character individually so that
+            // meta-characters like ], ^, - and \ are handled correctly inside [...].
+            var specialChars = string.Concat(
+                policy.AllowedSpecialCharacters.Select(c => Regex.Escape(c.ToString())));
             if (!Regex.IsMatch(password, $"[{specialChars}]"))
             {
                 errors.Add("Password must contain at least one special character");

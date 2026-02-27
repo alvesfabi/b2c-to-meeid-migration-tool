@@ -128,7 +128,7 @@ public class JitMigrationService
             {
                 _logger.LogInformation("[JIT Migration] Step 2/3: Validating password complexity for External ID");
                 
-                if (!IsPasswordComplex(password))
+                if (!_authService.ValidatePasswordComplexity(password).IsValid)
                 {
                     step2Duration = (DateTimeOffset.UtcNow - step2Start).TotalMilliseconds;
                     _logger.LogWarning(
@@ -210,26 +210,7 @@ public class JitMigrationService
         }
     }
 
-    /// <summary>
-    /// Validates password complexity for External ID requirements.
-    /// </summary>
-    private bool IsPasswordComplex(string password)
-    {
-        if (string.IsNullOrEmpty(password))
-            return false;
 
-        // External ID password requirements:
-        // - At least 8 characters
-        // - Contains uppercase letter
-        // - Contains lowercase letter
-        // - Contains digit
-        // - Contains special character (non-alphanumeric)
-        return password.Length >= 8 &&
-               password.Any(char.IsUpper) &&
-               password.Any(char.IsLower) &&
-               password.Any(char.IsDigit) &&
-               password.Any(ch => !char.IsLetterOrDigit(ch));
-    }
 }
 
 /// <summary>

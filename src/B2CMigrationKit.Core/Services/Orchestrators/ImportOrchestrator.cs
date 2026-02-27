@@ -555,16 +555,11 @@ public class ImportOrchestrator : IOrchestrator<ExecutionResult>
 
     private void EnsureEmailIdentity(UserProfile user)
     {
-        // Determine which identity type to create based on configuration
-        var targetSignInType = _options.Import.MigrationAttributes.UseEmailOtp 
-            ? "federated"      // Email OTP (passwordless)
-            : "emailaddress";  // Email + Password (with JIT migration)
+        // Check if user already has an emailAddress identity
+        var hasEmailIdentity = user.Identities?.Any(i =>
+            string.Equals(i.SignInType, "emailAddress", StringComparison.OrdinalIgnoreCase)) ?? false;
 
-        // Check if user already has the target identity type
-        var hasTargetIdentity = user.Identities?.Any(i =>
-            i.SignInType?.ToLower() == targetSignInType.ToLower()) ?? false;
-
-        if (!hasTargetIdentity)
+        if (!hasEmailIdentity)
         {
             // Determine email to use:
             // 1. Prefer mail field if available
@@ -584,45 +579,18 @@ public class ImportOrchestrator : IOrchestrator<ExecutionResult>
                 }
             }
 
-            // Add the appropriate identity based on configuration
+            // Add emailAddress identity for Email + Password (with JIT migration)
             user.Identities ??= new List<ObjectIdentity>();
+            user.Identities.Add(new ObjectIdentity
+            {
+                SignInType = "emailAddress",
+                Issuer = _options.ExternalId.TenantDomain,
+                IssuerAssignedId = email
+            });
             
-            if (_options.Import.MigrationAttributes.UseEmailOtp)
+            if (_options.VerboseLogging)
             {
-                // Email OTP (passwordless) - uses federated identity with issuer="mail"
-                user.Identities.Add(new ObjectIdentity
-                {
-                    SignInType = "federated",
-                    Issuer = "mail",  // Special issuer for Email OTP
-                    IssuerAssignedId = email
-                });
-
-                // Ensure the Mail property is populated — native OTP users always
-                // have it set, and External ID may rely on it for sign-in.
-                if (string.IsNullOrEmpty(user.Mail))
-                {
-                    user.Mail = email;
-                }
-                
-                if (_options.VerboseLogging)
-                {
-                    _logger.LogDebug("Added Email OTP identity (federated): {Email}", email);
-                }
-            }
-            else
-            {
-                // Email + Password (with JIT migration)
-                user.Identities.Add(new ObjectIdentity
-                {
-                    SignInType = "emailAddress",
-                    Issuer = _options.ExternalId.TenantDomain,
-                    IssuerAssignedId = email
-                });
-                
-                if (_options.VerboseLogging)
-                {
-                    _logger.LogDebug("Added email identity (password-based): {Email}", email);
-                }
+                _logger.LogDebug("Added email identity (password-based): {Email}", email);
             }
         }
     }

@@ -1369,7 +1369,7 @@ string b2cUpn = "user@b2cprod.onmicrosoft.com";
 
 **Code Location**: `ImportOrchestrator.cs:EnsureEmailIdentity()`
 
-**Important**: External ID requires all users to have an email identity for authentication (Email+Password or Email OTP). The import logic ensures every user gets an email identity.
+**Important**: External ID requires all users to have an email identity for authentication. The import logic ensures every user gets an email identity for the Email+Password flow with JIT migration.
 
 ```csharp
 // Decision tree:
@@ -1436,32 +1436,6 @@ string b2cUpn = "user@b2cprod.onmicrosoft.com";
   ]
 }
 ```
-
-**Email OTP (Passwordless) Configuration**:
-
-Set `Migration.Import.MigrationAttributes.UseEmailOtp = true` to use Email OTP instead of Email+Password:
-
-```json
-{
-  "Migration": {
-    "Import": {
-      "MigrationAttributes": {
-        "UseEmailOtp": true  // Creates federated identity (issuer="mail") instead of emailAddress
-      }
-    }
-  }
-}
-```
-
-When `UseEmailOtp = true`:
-- Creates `signInType = "federated"` with `issuer = "mail"` (Email OTP / passwordless)
-- Users login with OTP sent to email (no password migration needed)
-- JIT password migration is NOT used (no password to migrate)
-
-When `UseEmailOtp = false` (default):
-- Creates `signInType = "emailAddress"` (Email+Password)
-- Users login with email and password
-- JIT password migration validates password on first login
 
 **Identity Preservation Rules**:
 

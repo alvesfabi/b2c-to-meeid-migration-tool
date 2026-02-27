@@ -596,6 +596,13 @@ public class ImportOrchestrator : IOrchestrator<ExecutionResult>
                     Issuer = "mail",  // Special issuer for Email OTP
                     IssuerAssignedId = email
                 });
+
+                // Ensure the Mail property is populated — native OTP users always
+                // have it set, and External ID may rely on it for sign-in.
+                if (string.IsNullOrEmpty(user.Mail))
+                {
+                    user.Mail = email;
+                }
                 
                 if (_options.VerboseLogging)
                 {

@@ -436,7 +436,7 @@ private string GenerateRandomPassword()
 
 **Option A: Use automation script (recommended)**
 ```powershell
-.\scripts\New-JitRsaKeyPair.ps1 -OutputPath ".\B2C\local-keys"
+.\scripts\New-LocalJitRsaKeyPair.ps1 -OutputPath ".\scripts\keys"
 ```
 
 **Option B: Manual with OpenSSL**
@@ -450,11 +450,13 @@ openssl rsa -in private_key.pem -pubout -out public_key.pem
 
 **Verify keys created:**
 ```powershell
-Get-ChildItem .\B2C\local-keys\
+Get-ChildItem .\scripts\keys\
 
 # Expected output:
-# private_key.pem  (RSA private key - NEVER commit to Git)
-# public_key.pem   (RSA public key - safe to share)
+# jit-private-key.pem       (RSA private key - NEVER commit to Git)
+# jit-public-key.jwk.json   (Public key in JWK format)
+# jit-certificate.txt       (X.509 certificate for Custom Extension)
+# jit-public-key-x509.txt   (Public key in X.509 format)
 ```
 
 ---

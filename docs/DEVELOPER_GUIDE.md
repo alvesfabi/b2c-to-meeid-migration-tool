@@ -470,36 +470,40 @@ Create or update `src/B2CMigrationKit.Function/local.settings.json`:
   "IsEncrypted": false,
   "Values": {
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
-    "FUNCTIONS_WORKER_RUNTIME": "dotnet"
-  },
-  "Migration": {
-    "JitAuthentication": {
-      "UseKeyVault": false,
-      "TestMode": true,
-      "InlineRsaPrivateKey": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC...\n-----END PRIVATE KEY-----",
-      "TimeoutSeconds": 1.5,
-      "CachePrivateKey": true
-    },
-    "B2C": {
-      "TenantId": "your-b2c-tenant.onmicrosoft.com",
-      "ClientId": "your-ropc-app-client-id",
-      "ClientSecret": "your-client-secret",
-      "PolicyName": "B2C_1_ROPC"
-    },
-    "ExternalId": {
-      "TenantId": "your-external-id-tenant-id",
-      "ClientId": "your-app-client-id",
-      "ClientSecret": "your-client-secret",
-      "ExtensionAppId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-    }
+    "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
+
+    "Migration__B2C__TenantId": "YOUR_B2C_TENANT_ID_GUID",
+    "Migration__B2C__TenantDomain": "YOUR_B2C_TENANT.onmicrosoft.com",
+    "Migration__B2C__AppRegistration__ClientId": "YOUR_ENTRA_APP_CLIENT_ID",
+    "Migration__B2C__AppRegistration__ClientSecret": "YOUR_ENTRA_APP_CLIENT_SECRET",
+    "Migration__B2C__AppRegistration__Name": "B2C Entra ROPC App (JIT Auth)",
+    "Migration__B2C__AppRegistration__Enabled": "true",
+
+    "Migration__ExternalId__TenantId": "YOUR_EXTERNAL_ID_TENANT_ID",
+    "Migration__ExternalId__TenantDomain": "YOUR_EXTERNAL_ID_TENANT.onmicrosoft.com",
+    "Migration__ExternalId__ExtensionAppId": "YOUR_EXTENSION_APP_ID_WITHOUT_DASHES",
+    "Migration__ExternalId__AppRegistration__ClientId": "YOUR_EXTERNAL_ID_CLIENT_ID",
+    "Migration__ExternalId__AppRegistration__ClientSecret": "YOUR_EXTERNAL_ID_CLIENT_SECRET",
+    "Migration__ExternalId__AppRegistration__Name": "External ID App Registration",
+    "Migration__ExternalId__AppRegistration__Enabled": "true",
+
+    "Migration__JitAuthentication__UseKeyVault": "false",
+    "Migration__JitAuthentication__TestMode": "true",
+    "Migration__JitAuthentication__RsaKeyName": "JIT-RSA-PrivateKey",
+    "Migration__JitAuthentication__MigrationAttributeName": "RequiresMigration",
+    "Migration__JitAuthentication__InlineRsaPrivateKey": "-----BEGIN PRIVATE KEY-----\nYOUR_RSA_PRIVATE_KEY_HERE\n-----END PRIVATE KEY-----",
+    "Migration__JitAuthentication__CachePrivateKey": "true",
+    "Migration__JitAuthentication__TimeoutSeconds": "1.5"
   }
 }
 ```
 
+> **Note:** Azure Functions `local.settings.json` uses flat keys with `__` as separator (not nested JSON objects). See `local.settings.example.json` for a complete template.
+
 **Key Configuration Notes:**
-- **UseKeyVault: false** → Uses inline RSA key for local development (set to true for production with Key Vault in v2.0)
+- **UseKeyVault: false** → Uses inline RSA key for local development (set to true for production with Key Vault)
 - **TestMode: true** → Skips B2C validation (for testing without B2C access)
-- **InlineRsaPrivateKey** → Paste entire private key content (including headers) for local development
+- **InlineRsaPrivateKey** → Paste entire private key content (including headers), replacing newlines with `\n`
 
 ---
 

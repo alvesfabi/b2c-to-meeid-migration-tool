@@ -12,6 +12,7 @@ This comprehensive guide provides detailed information for developers implementi
   - [Building the Solution](#building-the-solution)
   - [Running Tests](#running-tests)
   - [Debugging JIT Function with ngrok](#debugging-jit-function-with-ngrok)
+  - [VS Code Debugging Setup](#step-3b-set-up-vs-code-debugging)
 - [Attribute Mapping Configuration](#attribute-mapping-configuration)
 - [Import Audit Logs](#import-audit-logs)
 - [Testing Strategy](#testing-strategy)
@@ -116,7 +117,6 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
 "B2C": {
   "TenantId": "your-b2c-tenant-id",
   "TenantDomain": "yourtenant.onmicrosoft.com",
-  "RopcPolicyName": "B2C_1_ROPC",
   "AppRegistration": {
     "ClientId": "app-id-1",
     "ClientSecretName": "B2CAppSecret1",
@@ -249,9 +249,14 @@ The toolkit supports dual telemetry output: console logging (local development) 
    # .NET 8.0 SDK
    dotnet --version  # Should be 8.0+
 
+   # Azure Functions Core Tools v4
+   func --version  # Should be 4.x
+
    # Azure CLI (for authentication)
    az login
    ```
+
+   **IDE:** [Visual Studio Code](https://code.visualstudio.com/) with the [C# Dev Kit](https://marketplace.visualstudio.com/items?itemName=ms-dotnettools.csdevkit) extension. The repository includes `.vscode/launch.json` and `.vscode/tasks.json` for debugging Azure Functions locally.
 
 2. **Configure Local Settings**
    
@@ -310,6 +315,7 @@ The JIT authentication function integrates with External ID Custom Authenticatio
 #### Prerequisites
 
 **Required Tools:**
+- [Visual Studio Code](https://code.visualstudio.com/) with the [C# Dev Kit](https://marketplace.visualstudio.com/items?itemName=ms-dotnettools.csdevkit) extension
 - .NET 8+ SDK
 - Azure Functions Core Tools v4 (`func --version`)
 - ngrok (free tier: [ngrok.com](https://ngrok.com))
@@ -540,6 +546,61 @@ func start
 - ngrok tunnel active with public HTTPS URL
 - No errors about missing RSA key
 - Logs show "Using inline RSA private key"
+
+---
+
+**Step 3b: Set Up VS Code Debugging**
+
+The repository includes pre-configured VS Code debug files in `.vscode/` that let you attach the debugger to the running Azure Function process. This is essential for setting breakpoints in the JIT authentication flow.
+
+**`.vscode/launch.json`** — Debugger attach configuration:
+```jsonc
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Attach to .NET Functions",
+      "type": "coreclr",
+      "request": "attach",
+      "processId": "${command:pickProcess}"
+    }
+  ]
+}
+```
+
+**`.vscode/tasks.json`** — Build task:
+```jsonc
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build-function",
+      "type": "process",
+      "command": "dotnet",
+      "args": [
+        "build",
+        "${workspaceFolder}/src/B2CMigrationKit.Function/B2CMigrationKit.Function.csproj",
+        "--configuration",
+        "Debug"
+      ],
+      "problemMatcher": "$msCompile",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    }
+  ]
+}
+```
+
+**To debug:**
+1. Start the function with `start-local.ps1` (or manually with `func start`)
+2. In VS Code, press **F5** (or **Run → Start Debugging**)
+3. Select **"Attach to .NET Functions"** from the configuration dropdown
+4. Pick the **`dotnet`** process running the function (look for `B2CMigrationKit.Function.dll`)
+5. Set breakpoints in `JitAuthenticationFunction.cs` and trigger a login flow
+
+> **Tip:** The `start-local.ps1` script starts the function in the foreground so you can see logs in the terminal while the debugger is attached via VS Code.
 
 ---
 

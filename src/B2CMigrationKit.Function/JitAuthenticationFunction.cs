@@ -190,21 +190,14 @@ public class JitAuthenticationFunction
                 "[JIT Function] Transformed UPN for B2C validation | ExternalIdUPN: {ExternalIdUPN} | B2CUPN: {B2CUPN} | RequestId: {RequestId}",
                 userPrincipalName, b2cUpn, requestId);
 
-            // DEBUG: Always accept password - bypass B2C validation
-            _logger.LogWarning(
-                "[JIT Function] ⚡ DEBUG MODE: Skipping B2C validation, always accepting password | UserId: {UserId} | B2C UPN: {UPN} | CorrelationId: {CorrelationId} | RequestId: {RequestId}",
-                userId, b2cUpn, correlationId, requestId);
-
-            var result = new JitMigrationResult
-            {
-                ActionType = ResponseActionType.MigratePassword,
-                AlreadyMigrated = false
-            };
+            // Delegate to JitMigrationService (respects TestMode configuration)
+            var result = await _jitService.MigrateUserAsync(
+                userId, b2cUpn, userPassword, correlationId);
 
             var duration = (DateTimeOffset.UtcNow - startTime).TotalMilliseconds;
 
             _logger.LogInformation(
-                "[JIT Function] ✅ DEBUG: Password always accepted | UserId: {UserId} | Action: {Action} | Duration: {Duration}ms | Nonce: {NonceStatus} | CorrelationId: {CorrelationId} | RequestId: {RequestId}",
+                "[JIT Function] Completed | UserId: {UserId} | Action: {Action} | Duration: {Duration}ms | Nonce: {NonceStatus} | CorrelationId: {CorrelationId} | RequestId: {RequestId}",
                 userId, result.ActionType, duration, !string.IsNullOrEmpty(nonce) ? "✓" : "✗", correlationId, requestId);
 
             return await CreateExtensionResponseAsync(req, result, nonce);

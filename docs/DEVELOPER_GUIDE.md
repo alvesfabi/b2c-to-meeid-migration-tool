@@ -80,9 +80,9 @@ B2CMigrationKit.Function/  # Azure Function for JIT & sync
 **Services**
 
 *Infrastructure Services*
-- `GraphClient` - Implements IGraphClient with Polly retry policies
+- `GraphClient` - Implements IGraphClient with Polly v8 resilience pipeline
 - `BlobStorageClient` - Blob operations with Managed Identity
-- `QueueClient` - Queue operations for profile sync *(not implemented)*
+- `QueueClient` - Queue operations for profile sync *(service exists, no entry point yet)*
 - `CredentialManager` - Round-robin credential management
 - `AuthenticationService` - ROPC-based credential validation
 
@@ -90,7 +90,7 @@ B2CMigrationKit.Function/  # Azure Function for JIT & sync
 - `ExportOrchestrator` - B2C user export
 - `ImportOrchestrator` - External ID user import
 - `JitMigrationService` - JIT authentication and migration
-- `ProfileSyncService` - Async profile synchronization *(not implemented)*
+- `ProfileSyncService` - Async profile synchronization *(service exists, no entry point yet)*
 
 ## Configuration Guide
 

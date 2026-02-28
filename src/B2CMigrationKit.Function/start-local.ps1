@@ -1,6 +1,6 @@
 param(
     [int]$Port = 7071,
-    [string]$NgrokDomain = "your-ngrok-domai"
+    [string]$NgrokDomain = "transferable-nonglazed-trevor.ngrok-free.dev"
 )
 
 $ErrorActionPreference = "Stop"

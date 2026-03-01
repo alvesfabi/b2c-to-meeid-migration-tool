@@ -65,13 +65,4 @@ public class MigrationAttributesOptions
     /// Default: false
     /// </summary>
     public bool OverwriteExtensionAttributes { get; set; } = false;
-
-    /// <summary>
-    /// Gets or sets whether to use Email OTP (passwordless) instead of Email+Password.
-    /// When true, creates federated identity (issuer="mail") instead of emailAddress identity.
-    /// This is for users who will authenticate via Email OTP in External ID.
-    /// When false, creates emailAddress identity for password-based authentication with JIT migration.
-    /// Default: false (use Email+Password with JIT migration)
-    /// </summary>
-    public bool UseEmailOtp { get; set; } = false;
 }

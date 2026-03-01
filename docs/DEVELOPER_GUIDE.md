@@ -12,6 +12,7 @@ This comprehensive guide provides detailed information for developers implementi
   - [Building the Solution](#building-the-solution)
   - [Running Tests](#running-tests)
   - [Debugging JIT Function with ngrok](#debugging-jit-function-with-ngrok)
+  - [VS Code Debugging Setup](#step-3b-set-up-vs-code-debugging)
 - [Attribute Mapping Configuration](#attribute-mapping-configuration)
 - [Import Audit Logs](#import-audit-logs)
 - [Testing Strategy](#testing-strategy)
@@ -79,9 +80,9 @@ B2CMigrationKit.Function/  # Azure Function for JIT & sync
 **Services**
 
 *Infrastructure Services*
-- `GraphClient` - Implements IGraphClient with Polly retry policies
+- `GraphClient` - Implements IGraphClient with Polly v8 resilience pipeline
 - `BlobStorageClient` - Blob operations with Managed Identity
-- `QueueClient` - Queue operations for profile sync *(not implemented)*
+- `QueueClient` - Queue operations for profile sync *(service exists, no entry point yet)*
 - `CredentialManager` - Round-robin credential management
 - `AuthenticationService` - ROPC-based credential validation
 
@@ -89,7 +90,7 @@ B2CMigrationKit.Function/  # Azure Function for JIT & sync
 - `ExportOrchestrator` - B2C user export
 - `ImportOrchestrator` - External ID user import
 - `JitMigrationService` - JIT authentication and migration
-- `ProfileSyncService` - Async profile synchronization *(not implemented)*
+- `ProfileSyncService` - Async profile synchronization *(service exists, no entry point yet)*
 
 ## Configuration Guide
 
@@ -116,7 +117,6 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
 "B2C": {
   "TenantId": "your-b2c-tenant-id",
   "TenantDomain": "yourtenant.onmicrosoft.com",
-  "RopcPolicyName": "B2C_1_ROPC",
   "AppRegistration": {
     "ClientId": "app-id-1",
     "ClientSecretName": "B2CAppSecret1",
@@ -146,13 +146,6 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
     "Name": "External ID App 1",
     "Enabled": true
   },
-  "PasswordPolicy": {
-    "MinLength": 8,
-    "RequireUppercase": true,
-    "RequireLowercase": true,
-    "RequireDigit": true,
-    "RequireSpecialCharacter": true
-  }
 }
 ```
 
@@ -256,9 +249,14 @@ The toolkit supports dual telemetry output: console logging (local development) 
    # .NET 8.0 SDK
    dotnet --version  # Should be 8.0+
 
+   # Azure Functions Core Tools v4
+   func --version  # Should be 4.x
+
    # Azure CLI (for authentication)
    az login
    ```
+
+   **IDE:** [Visual Studio Code](https://code.visualstudio.com/) with the [C# Dev Kit](https://marketplace.visualstudio.com/items?itemName=ms-dotnettools.csdevkit) extension. The repository includes `.vscode/launch.json` and `.vscode/tasks.json` for debugging Azure Functions locally.
 
 2. **Configure Local Settings**
    
@@ -317,6 +315,7 @@ The JIT authentication function integrates with External ID Custom Authenticatio
 #### Prerequisites
 
 **Required Tools:**
+- [Visual Studio Code](https://code.visualstudio.com/) with the [C# Dev Kit](https://marketplace.visualstudio.com/items?itemName=ms-dotnettools.csdevkit) extension
 - .NET 8+ SDK
 - Azure Functions Core Tools v4 (`func --version`)
 - ngrok (free tier: [ngrok.com](https://ngrok.com))
@@ -437,7 +436,7 @@ private string GenerateRandomPassword()
 
 **Option A: Use automation script (recommended)**
 ```powershell
-.\scripts\New-JitRsaKeyPair.ps1 -OutputPath ".\B2C\local-keys"
+.\scripts\New-LocalJitRsaKeyPair.ps1 -OutputPath ".\scripts\keys"
 ```
 
 **Option B: Manual with OpenSSL**
@@ -451,11 +450,13 @@ openssl rsa -in private_key.pem -pubout -out public_key.pem
 
 **Verify keys created:**
 ```powershell
-Get-ChildItem .\B2C\local-keys\
+Get-ChildItem .\scripts\keys\
 
 # Expected output:
-# private_key.pem  (RSA private key - NEVER commit to Git)
-# public_key.pem   (RSA public key - safe to share)
+# jit-private-key.pem       (RSA private key - NEVER commit to Git)
+# jit-public-key.jwk.json   (Public key in JWK format)
+# jit-certificate.txt       (X.509 certificate for Custom Extension)
+# jit-public-key-x509.txt   (Public key in X.509 format)
 ```
 
 ---
@@ -469,36 +470,40 @@ Create or update `src/B2CMigrationKit.Function/local.settings.json`:
   "IsEncrypted": false,
   "Values": {
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
-    "FUNCTIONS_WORKER_RUNTIME": "dotnet"
-  },
-  "Migration": {
-    "JitAuthentication": {
-      "UseKeyVault": false,
-      "TestMode": true,
-      "InlineRsaPrivateKey": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC...\n-----END PRIVATE KEY-----",
-      "TimeoutSeconds": 1.5,
-      "CachePrivateKey": true
-    },
-    "B2C": {
-      "TenantId": "your-b2c-tenant.onmicrosoft.com",
-      "ClientId": "your-ropc-app-client-id",
-      "ClientSecret": "your-client-secret",
-      "PolicyName": "B2C_1_ROPC"
-    },
-    "ExternalId": {
-      "TenantId": "your-external-id-tenant-id",
-      "ClientId": "your-app-client-id",
-      "ClientSecret": "your-client-secret",
-      "ExtensionAppId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-    }
+    "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
+
+    "Migration__B2C__TenantId": "YOUR_B2C_TENANT_ID_GUID",
+    "Migration__B2C__TenantDomain": "YOUR_B2C_TENANT.onmicrosoft.com",
+    "Migration__B2C__AppRegistration__ClientId": "YOUR_ENTRA_APP_CLIENT_ID",
+    "Migration__B2C__AppRegistration__ClientSecret": "YOUR_ENTRA_APP_CLIENT_SECRET",
+    "Migration__B2C__AppRegistration__Name": "B2C Entra ROPC App (JIT Auth)",
+    "Migration__B2C__AppRegistration__Enabled": "true",
+
+    "Migration__ExternalId__TenantId": "YOUR_EXTERNAL_ID_TENANT_ID",
+    "Migration__ExternalId__TenantDomain": "YOUR_EXTERNAL_ID_TENANT.onmicrosoft.com",
+    "Migration__ExternalId__ExtensionAppId": "YOUR_EXTENSION_APP_ID_WITHOUT_DASHES",
+    "Migration__ExternalId__AppRegistration__ClientId": "YOUR_EXTERNAL_ID_CLIENT_ID",
+    "Migration__ExternalId__AppRegistration__ClientSecret": "YOUR_EXTERNAL_ID_CLIENT_SECRET",
+    "Migration__ExternalId__AppRegistration__Name": "External ID App Registration",
+    "Migration__ExternalId__AppRegistration__Enabled": "true",
+
+    "Migration__JitAuthentication__UseKeyVault": "false",
+    "Migration__JitAuthentication__TestMode": "true",
+    "Migration__JitAuthentication__RsaKeyName": "JIT-RSA-PrivateKey",
+    "Migration__JitAuthentication__MigrationAttributeName": "RequiresMigration",
+    "Migration__JitAuthentication__InlineRsaPrivateKey": "-----BEGIN PRIVATE KEY-----\nYOUR_RSA_PRIVATE_KEY_HERE\n-----END PRIVATE KEY-----",
+    "Migration__JitAuthentication__CachePrivateKey": "true",
+    "Migration__JitAuthentication__TimeoutSeconds": "1.5"
   }
 }
 ```
 
+> **Note:** Azure Functions `local.settings.json` uses flat keys with `__` as separator (not nested JSON objects). See `local.settings.example.json` for a complete template.
+
 **Key Configuration Notes:**
-- **UseKeyVault: false** → Uses inline RSA key for local development (set to true for production with Key Vault in v2.0)
+- **UseKeyVault: false** → Uses inline RSA key for local development (set to true for production with Key Vault)
 - **TestMode: true** → Skips B2C validation (for testing without B2C access)
-- **InlineRsaPrivateKey** → Paste entire private key content (including headers) for local development
+- **InlineRsaPrivateKey** → Paste entire private key content (including headers), replacing newlines with `\n`
 
 ---
 
@@ -547,6 +552,61 @@ func start
 - ngrok tunnel active with public HTTPS URL
 - No errors about missing RSA key
 - Logs show "Using inline RSA private key"
+
+---
+
+**Step 3b: Set Up VS Code Debugging**
+
+The repository includes pre-configured VS Code debug files in `.vscode/` that let you attach the debugger to the running Azure Function process. This is essential for setting breakpoints in the JIT authentication flow.
+
+**`.vscode/launch.json`** — Debugger attach configuration:
+```jsonc
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Attach to .NET Functions",
+      "type": "coreclr",
+      "request": "attach",
+      "processId": "${command:pickProcess}"
+    }
+  ]
+}
+```
+
+**`.vscode/tasks.json`** — Build task:
+```jsonc
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build-function",
+      "type": "process",
+      "command": "dotnet",
+      "args": [
+        "build",
+        "${workspaceFolder}/src/B2CMigrationKit.Function/B2CMigrationKit.Function.csproj",
+        "--configuration",
+        "Debug"
+      ],
+      "problemMatcher": "$msCompile",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    }
+  ]
+}
+```
+
+**To debug:**
+1. Start the function with `start-local.ps1` (or manually with `func start`)
+2. In VS Code, press **F5** (or **Run → Start Debugging**)
+3. Select **"Attach to .NET Functions"** from the configuration dropdown
+4. Pick the **`dotnet`** process running the function (look for `B2CMigrationKit.Function.dll`)
+5. Set breakpoints in `JitAuthenticationFunction.cs` and trigger a login flow
+
+> **Tip:** The `start-local.ps1` script starts the function in the foreground so you can see logs in the terminal while the debugger is attached via VS Code.
 
 ---
 
@@ -1369,7 +1429,7 @@ string b2cUpn = "user@b2cprod.onmicrosoft.com";
 
 **Code Location**: `ImportOrchestrator.cs:EnsureEmailIdentity()`
 
-**Important**: External ID requires all users to have an email identity for authentication (Email+Password or Email OTP). The import logic ensures every user gets an email identity.
+**Important**: External ID requires all users to have an email identity for authentication. The import logic ensures every user gets an email identity for the Email+Password flow with JIT migration.
 
 ```csharp
 // Decision tree:
@@ -1436,32 +1496,6 @@ string b2cUpn = "user@b2cprod.onmicrosoft.com";
   ]
 }
 ```
-
-**Email OTP (Passwordless) Configuration**:
-
-Set `Migration.Import.MigrationAttributes.UseEmailOtp = true` to use Email OTP instead of Email+Password:
-
-```json
-{
-  "Migration": {
-    "Import": {
-      "MigrationAttributes": {
-        "UseEmailOtp": true  // Creates federated identity (issuer="mail") instead of emailAddress
-      }
-    }
-  }
-}
-```
-
-When `UseEmailOtp = true`:
-- Creates `signInType = "federated"` with `issuer = "mail"` (Email OTP / passwordless)
-- Users login with OTP sent to email (no password migration needed)
-- JIT password migration is NOT used (no password to migrate)
-
-When `UseEmailOtp = false` (default):
-- Creates `signInType = "emailAddress"` (Email+Password)
-- Users login with email and password
-- JIT password migration validates password on first login
 
 **Identity Preservation Rules**:
 
@@ -2101,7 +2135,7 @@ Each configuration file has a **single, dedicated app registration**:
 - Solution: Check for duplicate users, use `B2CObjectId` to correlate
 
 **Error: "Password does not meet complexity requirements"**
-- Solution: Review `PasswordPolicy` settings and B2C password requirements
+- Solution: External ID enforces its own password policy; ensure your tenant's policy aligns with B2C requirements
 
 ### Debugging Tips
 

@@ -118,7 +118,7 @@ External ID sets password + marks migrated → Complete authentication
 Profile Update (B2C or External ID) → Queue → Sync Function → Update Other Tenant
 ```
 
-> **⚠️ Note**: Profile synchronization is part of the architecture design but is not implemented in the current version. This phase will be developed in a future release to support bidirectional profile updates during tenant coexistence.
+> **⚠️ Note**: Profile synchronization service code exists (`ProfileSyncService.cs`) and is registered in DI, but has no entry point (trigger/command) yet. A future release will add the trigger to support bidirectional profile updates during tenant coexistence.
 
 ---
 

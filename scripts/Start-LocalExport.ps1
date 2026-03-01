@@ -176,9 +176,6 @@ if (-not $SkipAzurite -and $needsAzurite) {
             az storage container create --name "user-exports" --connection-string $connectionString --only-show-errors 2>&1 | Out-Null
             az storage container create --name "migration-errors" --connection-string $connectionString --only-show-errors 2>&1 | Out-Null
 
-            # Create queue
-            az storage queue create --name "profile-updates" --connection-string $connectionString --only-show-errors 2>&1 | Out-Null
-
             Write-Success "✓ Storage containers initialized"
         }
         else {

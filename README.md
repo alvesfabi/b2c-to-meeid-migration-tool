@@ -54,19 +54,9 @@ graph TB
         JIT -->|Update real password| ExtID
     end
 
-    subgraph "Phase 3: Coexistence"
-        Queue[(Azure Queue)]
-        Sync[4. Profile Sync<br/>Queue Trigger]
-
-        B2C -->|Profile updates| Queue
-        Queue -->|Process changes| Sync
-        Sync -->|Replicate updates| ExtID
-    end
-
     style Export fill:#0078d4,color:#fff
     style Import fill:#0078d4,color:#fff
     style JIT fill:#107c10,color:#fff
-    style Sync fill:#107c10,color:#fff
 ```
 
 ---
@@ -95,7 +85,7 @@ This migration kit includes two comprehensive guides:
 ### [Architecture Guide](docs/ARCHITECTURE_GUIDE.md)
 Complete architectural overview for solutions architects, technical leads, and security reviewers:
 - Executive summary and system design
-- Component architecture (Export, Import, JIT, Profile Sync)
+- Component architecture (Export, Import, JIT)
 - Security architecture and compliance patterns
 - Scalability, performance benchmarks, and multi-instance deployments
 - Deployment topologies and operational considerations
@@ -122,7 +112,6 @@ This repository currently focuses on exemplifying the implementation of the [Jus
 
 - **Automated Infrastructure Deployment**: Alignment with Secure Future Initiative (SFI) standards through automated deployment templates (Bicep/Terraform)
 - **Production-Ready Security**: Full integration with Private Endpoints, VNet integration, and Managed Identity
-- **Profile Synchronization**: Queue-based bidirectional sync during coexistence phase
 
 These features are planned for upcoming releases to provide a complete enterprise-grade migration solution.
 

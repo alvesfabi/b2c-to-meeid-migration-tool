@@ -64,7 +64,6 @@ B2CMigrationKit.Function/  # Azure Function for JIT & sync
 - `IOrchestrator<T>` - Base interface for orchestration
 - `IGraphClient` - Microsoft Graph operations
 - `IBlobStorageClient` - Blob Storage operations
-- `IQueueClient` - Queue Storage operations
 - `ITelemetryService` - Telemetry operations
 - `ICredentialManager` - Multi-app credential rotation
 - `IAuthenticationService` - Credential validation
@@ -82,7 +81,6 @@ B2CMigrationKit.Function/  # Azure Function for JIT & sync
 *Infrastructure Services*
 - `GraphClient` - Implements IGraphClient with Polly v8 resilience pipeline
 - `BlobStorageClient` - Blob operations with Managed Identity
-- `QueueClient` - Queue operations for profile sync *(service exists, no entry point yet)*
 - `CredentialManager` - Round-robin credential management
 - `AuthenticationService` - ROPC-based credential validation
 
@@ -90,7 +88,6 @@ B2CMigrationKit.Function/  # Azure Function for JIT & sync
 - `ExportOrchestrator` - B2C user export
 - `ImportOrchestrator` - External ID user import
 - `JitMigrationService` - JIT authentication and migration
-- `ProfileSyncService` - Async profile synchronization *(service exists, no entry point yet)*
 
 ## Configuration Guide
 
@@ -160,7 +157,6 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
 "Storage": {
   "ConnectionStringOrUri": "https://yourstorage.blob.core.windows.net",
   "ExportContainerName": "user-exports",
-  "ProfileSyncQueueName": "profile-updates",  // For future profile sync feature
   "UseManagedIdentity": true
 }
 ```
@@ -320,7 +316,7 @@ The JIT authentication function integrates with External ID Custom Authenticatio
 - Azure Functions Core Tools v4 (`func --version`)
 - ngrok (free tier: [ngrok.com](https://ngrok.com))
 - PowerShell 7+
-- OpenSSL (for RSA key generation)
+- OpenSSL (only if generating RSA keys manually instead of using the PowerShell script)
 
 **Required Access:**
 - Azure AD B2C tenant with test users
@@ -2134,8 +2130,6 @@ Each configuration file has a **single, dedicated app registration**:
 **Error: "User already exists"**
 - Solution: Check for duplicate users, use `B2CObjectId` to correlate
 
-**Error: "Password does not meet complexity requirements"**
-- Solution: External ID enforces its own password policy; ensure your tenant's policy aligns with B2C requirements
 
 ### Debugging Tips
 

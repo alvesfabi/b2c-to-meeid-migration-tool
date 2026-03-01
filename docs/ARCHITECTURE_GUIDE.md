@@ -34,7 +34,6 @@ The **B2C Migration Kit** is a sample solution for migrating user identities fro
 
 ### What will be added in the future?
 
-- **Asynchronous Profile Sync**: Keep user profiles synchronized during coexistence
 - **Enterprise Security Architecture**: SFI-compliant design patterns with private endpoints, Managed Identity, and Key Vault integration - architecture is ready for SFI but not yet implemented in this sample.
 
 
@@ -65,14 +64,13 @@ The **B2C Migration Kit** is a sample solution for migrating user identities fro
 ┌─────────────────────────────────────────────────────────────────┐
 │                    Azure Subscription                           │
 │                                                                 │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
-│  │ Console App  │  │Azure Function│  │Azure Function│          │
-│  │(Export/Import│  │(JIT Auth)    │  │(Profile Sync)│          │
-│  │              │  │              │  │  *Future*    │          │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘          │
-│         │                 │                 │                   │
-│         │                 │                 │                   │
-│  ┌──────▼─────────────────▼─────────────────▼───────┐          │
+│  ┌──────────────┐  ┌──────────────┐                            │
+│  │ Console App  │  │Azure Function│                            │
+│  │(Export/Import)│  │(JIT Auth)    │                            │
+│  └──────┬───────┘  └──────┬───────┘                            │
+│         │                 │                                     │
+│         │                 │                                     │
+│  ┌──────▼─────────────────▼───────────────────────────┐        │
 │  │           Shared Core Library                     │          │
 │  │  (Services, Models, Orchestrators, Abstractions)  │          │
 │  └──────┬───────────┬──────────┬──────────┬──────────┘          │
@@ -112,13 +110,6 @@ User Login → External ID → Custom Extension → JIT Function → B2C ROPC Va
           ↓
 External ID sets password + marks migrated → Complete authentication
 ```
-
-#### Phase 4: Profile Sync (Coexistence) - *Not Yet Implemented*
-```
-Profile Update (B2C or External ID) → Queue → Sync Function → Update Other Tenant
-```
-
-> **⚠️ Note**: Profile synchronization service code exists (`ProfileSyncService.cs`) and is registered in DI, but has no entry point (trigger/command) yet. A future release will add the trigger to support bidirectional profile updates during tenant coexistence.
 
 ---
 
@@ -168,7 +159,6 @@ Profile Update (B2C or External ID) → Queue → Sync Function → Update Other
 
 - **Multi-App Parallelization**: Use 3-5 app registrations to multiply throughput
 - **Stateless Design**: Horizontal scaling without shared state
-- **Async Processing**: Queue-based profile sync for non-blocking updates *(planned for future release)*
 - **Batching**: Efficient Graph API batch requests (50-100 users per call)
 
 ---
@@ -183,7 +173,6 @@ B2CMigrationKit.Core/
 │   ├── IOrchestrator.cs              # Coordinates multi-step workflows
 │   ├── IGraphClient.cs               # Graph API operations (CRUD users)
 │   ├── IBlobStorageClient.cs         # Export/import file storage
-│   ├── IQueueClient.cs               # Profile sync message queue (future)
 │   ├── IAuthenticationService.cs     # B2C ROPC validation
 │   ├── ISecretProvider.cs            # Key Vault integration
 │   └── ITelemetryService.cs          # Custom metrics/events
@@ -192,7 +181,7 @@ B2CMigrationKit.Core/
 │   ├── B2COptions.cs                 # B2C tenant configuration
 │   ├── ExternalIdOptions.cs          # External ID configuration
 │   ├── JitAuthenticationOptions.cs   # JIT function settings
-│   ├── StorageOptions.cs             # Blob/Queue configuration
+│   ├── StorageOptions.cs             # Blob storage configuration
 │   └── RetryOptions.cs               # Throttling/backoff settings
 ├── Models/
 │   ├── UserProfile.cs                # Unified user model
@@ -209,8 +198,7 @@ B2CMigrationKit.Core/
 │   │   ├── B2CGraphClient.cs         # B2C-specific operations
 │   │   └── ExternalIdGraphClient.cs  # External ID operations
 │   ├── Storage/
-│   │   ├── BlobStorageClient.cs      # Azure Blob operations
-│   │   └── QueueClient.cs            # Azure Queue operations
+│   │   └── BlobStorageClient.cs      # Azure Blob operations
 │   ├── Authentication/
 │   │   ├── AuthenticationService.cs  # B2C ROPC implementation
 │   │   └── RsaKeyProvider.cs         # JIT RSA key management
@@ -503,12 +491,12 @@ JIT Phase:     External ID UPN (user@externalid.com) → Reverse Transform → B
 │  ┌──────────────────────────▼───────────────────────────────────┐ │
 │  │ Custom Authentication Extension                              │ │
 │  │ - App Registration with RSA Public Key                       │ │
-│  │ - Encrypts password payload (JWE format)                     │ │
+│  │ - Encrypts password field with RSA public key                │ │
 │  │ - Sends POST to Azure Function                               │ │
 │  │ - Timeout: 2 seconds max                                     │ │
 │  └──────────────────────────┬───────────────────────────────────┘ │
 └────────────────────────────┼────────────────────────────────────────┘
-                             │ HTTPS (JWE encrypted payload)
+                             │ HTTPS (encrypted password field)
                              ▼
 ┌────────────────────────────────────────────────────────────────────┐
 │                   Azure Function (JIT Endpoint)                    │
@@ -516,7 +504,7 @@ JIT Phase:     External ID UPN (user@externalid.com) → Reverse Transform → B
 │  ┌──────────────────────────────────────────────────────────────┐ │
 │  │ 1. Decrypt Password                                          │ │
 │  │    - Retrieve RSA private key from Key Vault (cached)        │ │
-│  │    - Decrypt JWE payload → {password, nonce}                 │ │
+│  │    - Decrypt password context → {password, nonce}            │ │
 │  │    - Validate nonce present (replay protection)              │ │
 │  └──────────────────────────┬───────────────────────────────────┘ │
 │                             │                                      │
@@ -571,9 +559,10 @@ JIT Phase:     External ID UPN (user@externalid.com) → Reverse Transform → B
 
 #### 6.3.2 Encryption in Transit
 
-- **External ID → Function**: JWE (JSON Web Encryption) with RSA-2048/4096 public key
-  - Password encrypted **before** leaving External ID network
-  - Only Azure Function (with matching private key) can decrypt
+- **External ID → Function**: HTTPS with encrypted password context
+  - Password field encrypted with the RSA public key configured in the Custom Authentication Extension
+  - Only Azure Function (with matching RSA private key) can decrypt the password
+  - Payload is a JSON HTTP POST; the password field is the only encrypted part
 - **Function → B2C**: HTTPS with TLS 1.2+
   - ROPC endpoint uses OAuth 2.0 secure token endpoint
 - **Function → External ID Graph API**: OAuth 2.0 Client Credentials flow

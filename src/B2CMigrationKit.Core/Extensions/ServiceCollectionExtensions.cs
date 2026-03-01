@@ -62,7 +62,6 @@ public static class ServiceCollectionExtensions
 
         // Register Azure Storage clients
         services.AddSingleton<IBlobStorageClient, BlobStorageClient>();
-        services.AddSingleton<IQueueClient, QueueClient>();
 
         // Register B2C Credential Manager
         services.AddSingleton<ICredentialManager>(sp =>
@@ -164,8 +163,6 @@ public static class ServiceCollectionExtensions
 
             return new JitMigrationService(authService, externalIdGraphClient, telemetry, Options.Create(options), logger);
         });
-
-        services.AddScoped<ProfileSyncService>();
 
         return services;
     }

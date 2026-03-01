@@ -316,7 +316,7 @@ The JIT authentication function integrates with External ID Custom Authenticatio
 - Azure Functions Core Tools v4 (`func --version`)
 - ngrok (free tier: [ngrok.com](https://ngrok.com))
 - PowerShell 7+
-- OpenSSL (for RSA key generation)
+- OpenSSL (only if generating RSA keys manually instead of using the PowerShell script)
 
 **Required Access:**
 - Azure AD B2C tenant with test users

@@ -491,12 +491,12 @@ JIT Phase:     External ID UPN (user@externalid.com) → Reverse Transform → B
 │  ┌──────────────────────────▼───────────────────────────────────┐ │
 │  │ Custom Authentication Extension                              │ │
 │  │ - App Registration with RSA Public Key                       │ │
-│  │ - Encrypts password payload (JWE format)                     │ │
+│  │ - Encrypts password field with RSA public key                │ │
 │  │ - Sends POST to Azure Function                               │ │
 │  │ - Timeout: 2 seconds max                                     │ │
 │  └──────────────────────────┬───────────────────────────────────┘ │
 └────────────────────────────┼────────────────────────────────────────┘
-                             │ HTTPS (JWE encrypted payload)
+                             │ HTTPS (encrypted password field)
                              ▼
 ┌────────────────────────────────────────────────────────────────────┐
 │                   Azure Function (JIT Endpoint)                    │
@@ -504,7 +504,7 @@ JIT Phase:     External ID UPN (user@externalid.com) → Reverse Transform → B
 │  ┌──────────────────────────────────────────────────────────────┐ │
 │  │ 1. Decrypt Password                                          │ │
 │  │    - Retrieve RSA private key from Key Vault (cached)        │ │
-│  │    - Decrypt JWE payload → {password, nonce}                 │ │
+│  │    - Decrypt password context → {password, nonce}            │ │
 │  │    - Validate nonce present (replay protection)              │ │
 │  └──────────────────────────┬───────────────────────────────────┘ │
 │                             │                                      │
@@ -559,9 +559,10 @@ JIT Phase:     External ID UPN (user@externalid.com) → Reverse Transform → B
 
 #### 6.3.2 Encryption in Transit
 
-- **External ID → Function**: JWE (JSON Web Encryption) with RSA-2048/4096 public key
-  - Password encrypted **before** leaving External ID network
-  - Only Azure Function (with matching private key) can decrypt
+- **External ID → Function**: HTTPS with encrypted password context
+  - Password field encrypted with the RSA public key configured in the Custom Authentication Extension
+  - Only Azure Function (with matching RSA private key) can decrypt the password
+  - Payload is a JSON HTTP POST; the password field is the only encrypted part
 - **Function → B2C**: HTTPS with TLS 1.2+
   - ROPC endpoint uses OAuth 2.0 secure token endpoint
 - **Function → External ID Graph API**: OAuth 2.0 Client Credentials flow

@@ -1421,7 +1421,99 @@ string b2cUpn = "user@b2cprod.onmicrosoft.com";
 
 **Configuration**: The target domain is taken from `Migration.ExternalId.TenantDomain` in appsettings.json.
 
-#### 2. Identity Issuer Update
+#### 2. Authentication Method Handling (Email Identity)
+
+**Code Location**: `ImportOrchestrator.cs:EnsureEmailIdentity()`
+
+**Important**: External ID requires all users to have an email identity for authentication. The import logic ensures every user gets an email identity for the Email+Password flow with JIT migration.
+
+```csharp
+// Decision tree:
+// 1. Check if user already has emailAddress identity -> use it (no changes)
+// 2. If user has 'mail' field -> create email identity from mail
+// 3. If user has NO 'mail' -> fallback to userPrincipalName as email (for users with only userName + userPrincipalName)
+
+// Example results:
+
+// Scenario 1: User has mail field
+// B2C User:
+{
+  "mail": "john.doe@example.com",
+  "identities": [
+    { "signInType": "userName", "issuerAssignedId": "johndoe" },
+    { "signInType": "userPrincipalName", "issuerAssignedId": "guid@b2c.onmicrosoft.com" }
+  ]
+}
+// External ID Result (Email+Password with JIT):
+{
+  "mail": "john.doe@example.com",
+  "identities": [
+    { "signInType": "userName", "issuerAssignedId": "johndoe", "issuer": "eeid.onmicrosoft.com" },
+    { "signInType": "emailAddress", "issuerAssignedId": "john.doe@example.com", "issuer": "eeid.onmicrosoft.com" },
+    { "signInType": "userPrincipalName", "issuerAssignedId": "guid@eeid.onmicrosoft.com", "issuer": "eeid.onmicrosoft.com" }
+  ]
+}
+
+// Scenario 2: User has NO mail field (only userName + userPrincipalName)
+// B2C User:
+{
+  "mail": null,
+  "identities": [
+    { "signInType": "userName", "issuerAssignedId": "loadtest5017" },
+    { "signInType": "userPrincipalName", "issuerAssignedId": "a3f2d8e1@b2c.onmicrosoft.com" }
+  ]
+}
+// External ID Result (uses userPrincipalName as email fallback):
+{
+  "mail": null,
+  "identities": [
+    { "signInType": "userName", "issuerAssignedId": "loadtest5017", "issuer": "eeid.onmicrosoft.com" },
+    { "signInType": "emailAddress", "issuerAssignedId": "a3f2d8e1@eeid.onmicrosoft.com", "issuer": "eeid.onmicrosoft.com" },
+    { "signInType": "userPrincipalName", "issuerAssignedId": "a3f2d8e1@eeid.onmicrosoft.com", "issuer": "eeid.onmicrosoft.com" }
+  ]
+}
+// Warning logged: "User X has no email in 'mail' field. Using userPrincipalName as email fallback."
+
+// Scenario 3: User already has emailAddress identity from B2C (preserved)
+// B2C User:
+{
+  "mail": "jane@example.com",
+  "identities": [
+    { "signInType": "emailAddress", "issuerAssignedId": "jane@example.com" },
+    { "signInType": "userPrincipalName", "issuerAssignedId": "guid@b2c.onmicrosoft.com" }
+  ]
+}
+// External ID Result (emailAddress preserved, no duplicate created):
+{
+  "mail": "jane@example.com",
+  "identities": [
+    { "signInType": "emailAddress", "issuerAssignedId": "jane@example.com", "issuer": "eeid.onmicrosoft.com" },
+    { "signInType": "userPrincipalName", "issuerAssignedId": "guid@eeid.onmicrosoft.com", "issuer": "eeid.onmicrosoft.com" }
+  ]
+}
+```
+
+**Identity Preservation Rules**:
+
+The import orchestrator preserves all B2C identity types:
+
+1. ✅ **userName** identities are PRESERVED (not converted)
+   - Original userName from B2C is maintained
+   - Only issuer domain is updated to External ID domain
+   - Users can login with their original userName
+
+2. ✅ **userPrincipalName** identities are PRESERVED (not converted)
+   - Original userPrincipalName structure is maintained
+   - Only domain is updated via `TransformUpnForExternalId()`
+   - GUID-based usernames stay as userPrincipalName (not converted to userName)
+
+3. ✅ **emailAddress** identities are ADDED if missing
+   - If user has 'mail' field → uses that email
+   - If user has NO 'mail' → uses userPrincipalName as email
+   - Existing emailAddress identities are preserved (no duplicates)
+
+
+#### 3. Identity Issuer Update
 
 All existing identity issuers are updated from B2C domain to External ID domain:
 

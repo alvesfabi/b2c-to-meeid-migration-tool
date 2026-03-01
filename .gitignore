@@ -66,6 +66,8 @@ artifacts/
 
 # Local Development Configuration Files
 **/appsettings.local.json
+**/appsettings.master.json
+**/appsettings.worker*.json
 **/appsettings.*.local.json
 **/.env
 **/.env.local

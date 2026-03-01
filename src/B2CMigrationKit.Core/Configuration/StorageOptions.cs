@@ -33,11 +33,6 @@ public class StorageOptions
     public string ImportAuditContainerName { get; set; } = "import-audit";
 
     /// <summary>
-    /// Gets or sets the queue name for profile sync messages.
-    /// </summary>
-    public string ProfileSyncQueueName { get; set; } = "profile-updates";
-
-    /// <summary>
     /// Gets or sets the blob name prefix for export files.
     /// </summary>
     public string ExportBlobPrefix { get; set; } = "users_";

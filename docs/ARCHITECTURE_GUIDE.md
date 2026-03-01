@@ -34,7 +34,6 @@ The **B2C Migration Kit** is a sample solution for migrating user identities fro
 
 ### What will be added in the future?
 
-- **Asynchronous Profile Sync**: Keep user profiles synchronized during coexistence
 - **Enterprise Security Architecture**: SFI-compliant design patterns with private endpoints, Managed Identity, and Key Vault integration - architecture is ready for SFI but not yet implemented in this sample.
 
 
@@ -65,14 +64,13 @@ The **B2C Migration Kit** is a sample solution for migrating user identities fro
 ┌─────────────────────────────────────────────────────────────────┐
 │                    Azure Subscription                           │
 │                                                                 │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
-│  │ Console App  │  │Azure Function│  │Azure Function│          │
-│  │(Export/Import│  │(JIT Auth)    │  │(Profile Sync)│          │
-│  │              │  │              │  │  *Future*    │          │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘          │
-│         │                 │                 │                   │
-│         │                 │                 │                   │
-│  ┌──────▼─────────────────▼─────────────────▼───────┐          │
+│  ┌──────────────┐  ┌──────────────┐                            │
+│  │ Console App  │  │Azure Function│                            │
+│  │(Export/Import)│  │(JIT Auth)    │                            │
+│  └──────┬───────┘  └──────┬───────┘                            │
+│         │                 │                                     │
+│         │                 │                                     │
+│  ┌──────▼─────────────────▼───────────────────────────┐        │
 │  │           Shared Core Library                     │          │
 │  │  (Services, Models, Orchestrators, Abstractions)  │          │
 │  └──────┬───────────┬──────────┬──────────┬──────────┘          │
@@ -112,13 +110,6 @@ User Login → External ID → Custom Extension → JIT Function → B2C ROPC Va
           ↓
 External ID sets password + marks migrated → Complete authentication
 ```
-
-#### Phase 4: Profile Sync (Coexistence) - *Not Yet Implemented*
-```
-Profile Update (B2C or External ID) → Queue → Sync Function → Update Other Tenant
-```
-
-> **⚠️ Note**: Profile synchronization service code exists (`ProfileSyncService.cs`) and is registered in DI, but has no entry point (trigger/command) yet. A future release will add the trigger to support bidirectional profile updates during tenant coexistence.
 
 ---
 
@@ -168,7 +159,6 @@ Profile Update (B2C or External ID) → Queue → Sync Function → Update Other
 
 - **Multi-App Parallelization**: Use 3-5 app registrations to multiply throughput
 - **Stateless Design**: Horizontal scaling without shared state
-- **Async Processing**: Queue-based profile sync for non-blocking updates *(planned for future release)*
 - **Batching**: Efficient Graph API batch requests (50-100 users per call)
 
 ---
@@ -183,7 +173,6 @@ B2CMigrationKit.Core/
 │   ├── IOrchestrator.cs              # Coordinates multi-step workflows
 │   ├── IGraphClient.cs               # Graph API operations (CRUD users)
 │   ├── IBlobStorageClient.cs         # Export/import file storage
-│   ├── IQueueClient.cs               # Profile sync message queue (future)
 │   ├── IAuthenticationService.cs     # B2C ROPC validation
 │   ├── ISecretProvider.cs            # Key Vault integration
 │   └── ITelemetryService.cs          # Custom metrics/events
@@ -192,7 +181,7 @@ B2CMigrationKit.Core/
 │   ├── B2COptions.cs                 # B2C tenant configuration
 │   ├── ExternalIdOptions.cs          # External ID configuration
 │   ├── JitAuthenticationOptions.cs   # JIT function settings
-│   ├── StorageOptions.cs             # Blob/Queue configuration
+│   ├── StorageOptions.cs             # Blob storage configuration
 │   └── RetryOptions.cs               # Throttling/backoff settings
 ├── Models/
 │   ├── UserProfile.cs                # Unified user model
@@ -209,8 +198,7 @@ B2CMigrationKit.Core/
 │   │   ├── B2CGraphClient.cs         # B2C-specific operations
 │   │   └── ExternalIdGraphClient.cs  # External ID operations
 │   ├── Storage/
-│   │   ├── BlobStorageClient.cs      # Azure Blob operations
-│   │   └── QueueClient.cs            # Azure Queue operations
+│   │   └── BlobStorageClient.cs      # Azure Blob operations
 │   ├── Authentication/
 │   │   ├── AuthenticationService.cs  # B2C ROPC implementation
 │   │   └── RsaKeyProvider.cs         # JIT RSA key management

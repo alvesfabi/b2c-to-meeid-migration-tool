@@ -64,7 +64,6 @@ B2CMigrationKit.Function/  # Azure Function for JIT & sync
 - `IOrchestrator<T>` - Base interface for orchestration
 - `IGraphClient` - Microsoft Graph operations
 - `IBlobStorageClient` - Blob Storage operations
-- `IQueueClient` - Queue Storage operations
 - `ITelemetryService` - Telemetry operations
 - `ICredentialManager` - Multi-app credential rotation
 - `IAuthenticationService` - Credential validation
@@ -82,7 +81,6 @@ B2CMigrationKit.Function/  # Azure Function for JIT & sync
 *Infrastructure Services*
 - `GraphClient` - Implements IGraphClient with Polly v8 resilience pipeline
 - `BlobStorageClient` - Blob operations with Managed Identity
-- `QueueClient` - Queue operations for profile sync *(service exists, no entry point yet)*
 - `CredentialManager` - Round-robin credential management
 - `AuthenticationService` - ROPC-based credential validation
 
@@ -90,7 +88,6 @@ B2CMigrationKit.Function/  # Azure Function for JIT & sync
 - `ExportOrchestrator` - B2C user export
 - `ImportOrchestrator` - External ID user import
 - `JitMigrationService` - JIT authentication and migration
-- `ProfileSyncService` - Async profile synchronization *(service exists, no entry point yet)*
 
 ## Configuration Guide
 
@@ -160,7 +157,6 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
 "Storage": {
   "ConnectionStringOrUri": "https://yourstorage.blob.core.windows.net",
   "ExportContainerName": "user-exports",
-  "ProfileSyncQueueName": "profile-updates",  // For future profile sync feature
   "UseManagedIdentity": true
 }
 ```

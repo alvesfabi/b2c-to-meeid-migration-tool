@@ -53,8 +53,19 @@ B2CMigrationKit.Core/
 └── Extensions/            # DI registration
 
 B2CMigrationKit.Console/   # CLI for local operations
-B2CMigrationKit.Function/  # Azure Function for JIT & sync
+B2CMigrationKit.Function/  # Azure Function for JIT
 ```
+
+**Orchestrators**
+
+| Class | Operation | Description |
+|---|---|---|
+| `ExportOrchestrator` | `export` | Single-instance full export (reads + writes in one process) |
+| `HarvestOrchestrator` | `harvest` | Master phase — pages B2C IDs only, enqueues batches |
+| `WorkerExportOrchestrator` | `worker-export` | Worker phase — dequeues IDs, fetches full profiles, uploads blobs |
+| `ImportOrchestrator` | `import` | Creates users in EEID; optionally enqueues phone-registration tasks |
+| `PhoneRegistrationWorker` | `phone-registration` | Async worker that registers MFA phones in EEID at a throttle-safe rate |
+| `JitMigrationService` | *(Azure Function)* | Validates B2C credentials and returns `MigratePassword` action |
 
 ## Project Structure
 
@@ -147,9 +158,59 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
 ```
 
 **App Registration Requirements:**
-- **Permissions**: `User.ReadWrite.All`, `Directory.ReadWrite.All` (for import)
+- **Permissions**: `User.ReadWrite.All`, `Directory.ReadWrite.All` (for import), `UserAuthenticationMethod.ReadWrite.All` (for phone registration)
 - **Extension App ID**: Application ID (without hyphens) for extension attributes
 - **Scaling**: Deploy multiple instances with different app registrations on different IPs
+
+### Harvest Configuration
+
+```json
+"Harvest": {
+  "QueueName": "user-ids-to-process",
+  "IdsPerMessage": 20,
+  "PageSize": 999,
+  "MessageVisibilityTimeout": "00:05:00"
+}
+```
+
+**Options:**
+- `QueueName` — Storage Queue that worker-export instances consume
+- `IdsPerMessage` — Number of user IDs packed into a single queue message (tune based on profile size)
+- `PageSize` — How many users to request per Graph API page (max 999)
+- `MessageVisibilityTimeout` — How long a dequeued message is hidden before becoming visible again if a worker crashes
+
+### Phone Registration Configuration
+
+Two config blocks control the async phone registration pipeline:
+
+**Inside `Import`** — controls whether import enqueues phone-registration tasks:
+```json
+"Import": {
+  "PhoneRegistration": {
+    "EnqueuePhoneRegistration": false
+  }
+}
+```
+Set `EnqueuePhoneRegistration: true` to have `import` push `{ upn, phoneNumber }` messages to the phone-registration queue for users who have a `MobilePhone` value in their profile.
+
+**Top-level `PhoneRegistration`** — controls the async worker:
+```json
+"PhoneRegistration": {
+  "QueueName": "phone-registration",
+  "ThrottleDelayMs": 1200,
+  "MessageVisibilityTimeoutSeconds": 120,
+  "EmptyQueuePollDelayMs": 5000,
+  "MaxEmptyPolls": 3
+}
+```
+
+**Options:**
+- `ThrottleDelayMs` — Delay between each `POST /authentication/phoneMethods` call. Default 1200 ms ≈ 50 calls/min. Increase if you see 429 responses.
+- `MessageVisibilityTimeoutSeconds` — How long a message is invisible while being processed. If the worker crashes, the message reappears after this timeout.
+- `EmptyQueuePollDelayMs` — How long the worker sleeps between polls when the queue is empty.
+- `MaxEmptyPolls` — How many consecutive empty polls before the CLI process exits cleanly.
+
+> **Why async?** The `POST /users/{id}/authentication/phoneMethods` API has a much lower throttle quota than the user-creation API. Running phone registration inline with import would stall the import pipeline. Decoupling via queue lets import proceed at full speed while phone registration runs independently at a safe rate.
 
 ### Storage Configuration
 
@@ -233,7 +294,10 @@ The toolkit supports dual telemetry output: console logging (local development) 
 
 **Telemetry Metrics:**
 - Export: `export.storage.total.bytes`, `export.throughput.users.per.second`
-- Import: `import.graph.api.calls`, `import.blob.read.bytes`
+- Harvest: `harvest.users.enqueued`, `harvest.messages.sent`
+- Worker Export: `workerexport.users.processed`, `workerexport.failures`
+- Import: `import.graph.api.calls`, `import.blob.read.bytes`, `import.phone.enqueued`
+- Phone Registration: `PhoneRegistration.Started`, `PhoneRegistration.Success`, `PhoneRegistration.Failed`, `PhoneRegistration.Completed`, `GraphClient.PhoneMethodRegistered`
 - JIT: `JITAuth.PasswordValidated`, `JITAuth.MigrationSuccess`
 
 ## Development Workflow
@@ -268,7 +332,7 @@ The toolkit supports dual telemetry output: console logging (local development) 
    - **Local development (no Key Vault):** Use `ClientSecret` with the actual secret value
    - **Production (with Key Vault):** Use `ClientSecretName` with the Key Vault secret name
 
-3. **Run Export Locally**
+3. **Run Export Locally** *(single-process, small tenant)*
    ```powershell
    # From repository root - use the automation script
    .\scripts\Start-LocalExport.ps1 -VerboseLogging
@@ -285,6 +349,52 @@ The toolkit supports dual telemetry output: console logging (local development) 
    cd src\B2CMigrationKit.Console
    dotnet run -- export --config appsettings.Development.json --verbose
    ```
+
+4. **Run Harvest + Worker Export** *(master/worker, large tenant)*
+
+   The harvest+worker flow splits the export into two phases to allow horizontal scaling. In local development you can run both in sequence:
+
+   ```powershell
+   # Step 1 — Harvest: pages all B2C user IDs, enqueues batches of 20 into the queue
+   .\scripts\Start-LocalHarvest.ps1 -VerboseLogging
+
+   # Step 2 — Worker Export: dequeues batches, fetches full profiles, uploads blobs
+   # Run one or more instances (different terminals) for parallelism
+   .\scripts\Start-LocalWorkerExport.ps1 -VerboseLogging
+   ```
+
+   **Manual alternative:**
+   ```powershell
+   cd src\B2CMigrationKit.Console
+   dotnet run -- harvest   --config appsettings.Development.json --verbose
+   dotnet run -- worker-export --config appsettings.Development.json --verbose
+   ```
+
+   > **Tip:** For local testing with a small tenant `export` is simpler. Use `harvest` + `worker-export` when you need to run multiple export workers in parallel (production scale-out).
+
+5. **Run Import Locally**
+   ```powershell
+   .\scripts\Start-LocalImport.ps1 -VerboseLogging
+   ```
+
+   To also enqueue phone-registration tasks during import, set `Import.PhoneRegistration.EnqueuePhoneRegistration: true` in your local config before running.
+
+6. **Run Phone Registration Worker Locally**
+
+   After import has finished (or while import is running), start the phone-registration worker to process the queue:
+
+   ```powershell
+   cd src\B2CMigrationKit.Console
+   dotnet run -- phone-registration --config appsettings.Development.json --verbose
+   ```
+
+   The worker:
+   - Drains the `phone-registration` queue at `ThrottleDelayMs` per message (~50 calls/min by default)
+   - Treats 409 Conflict as success (phone already registered — idempotent)
+   - Exits automatically after `MaxEmptyPolls` consecutive empty polls
+   - Can be run concurrently with import (queue fills as import runs)
+
+   > **Prerequisite:** The EEID app registration must have `UserAuthenticationMethod.ReadWrite.All` (Application) granted and admin-consented.
 
 ### Building the Solution
 
@@ -1907,6 +2017,47 @@ az functionapp config appsettings set \
 ```
 
 ## Operations & Monitoring
+
+### Phone Registration Monitoring
+
+**Phone Registration Progress (KQL)**
+```kql
+customMetrics
+| where name in ("PhoneRegistration.Success", "PhoneRegistration.Failed")
+| summarize Count = sum(value) by bin(timestamp, 5m), name
+| render timechart
+```
+
+**Completion Summary**
+```kql
+traces
+| where message contains "Phone registration completed"
+| extend Success = toint(extract("Success: ([0-9]+)", 1, message))
+| extend Failed = toint(extract("Failed: ([0-9]+)", 1, message))
+| extend AlreadyRegistered = toint(extract("AlreadyRegistered: ([0-9]+)", 1, message))
+| project timestamp, Success, Failed, AlreadyRegistered
+| order by timestamp desc
+```
+
+**Throttle Health Check**
+```kql
+traces
+| where message contains "phoneMethods" and (message contains "429" or message contains "throttle")
+| summarize ThrottleHits = count() by bin(timestamp, 5m)
+| render timechart
+```
+
+If you see sustained 429s, increase `PhoneRegistration.ThrottleDelayMs` in your config (e.g., from 1200 to 2000).
+
+**Key Counters:**
+| Metric | Description |
+|---|---|
+| `PhoneRegistration.Success` | Phones successfully registered (new) |
+| `PhoneRegistration.Failed` | Messages that failed and will be retried |
+| `PhoneRegistration.Completed` | Total messages processed (success + already-registered) |
+| `GraphClient.PhoneMethodRegistered` | Raw Graph API 201-Created count |
+
+> **409 Conflict** is treated as a silent success — the phone was already registered in a previous run. This makes the worker fully idempotent.
 
 ### Application Insights Dashboards
 

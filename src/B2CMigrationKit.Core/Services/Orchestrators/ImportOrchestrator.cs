@@ -16,6 +16,7 @@ public class ImportOrchestrator : IOrchestrator<ExecutionResult>
 {
     private readonly IGraphClient _externalIdGraphClient;
     private readonly IBlobStorageClient _blobClient;
+    private readonly IQueueClient _queueClient;
     private readonly ITelemetryService _telemetry;
     private readonly ILogger<ImportOrchestrator> _logger;
     private readonly MigrationOptions _options;
@@ -23,12 +24,14 @@ public class ImportOrchestrator : IOrchestrator<ExecutionResult>
     public ImportOrchestrator(
         IGraphClient externalIdGraphClient,
         IBlobStorageClient blobClient,
+        IQueueClient queueClient,
         ITelemetryService telemetry,
         IOptions<MigrationOptions> options,
         ILogger<ImportOrchestrator> logger)
     {
         _externalIdGraphClient = externalIdGraphClient ?? throw new ArgumentNullException(nameof(externalIdGraphClient));
         _blobClient = blobClient ?? throw new ArgumentNullException(nameof(blobClient));
+        _queueClient = queueClient ?? throw new ArgumentNullException(nameof(queueClient));
         _telemetry = telemetry ?? throw new ArgumentNullException(nameof(telemetry));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _options = options?.Value ?? throw new ArgumentNullException(nameof(options));
@@ -217,6 +220,12 @@ public class ImportOrchestrator : IOrchestrator<ExecutionResult>
                                 cancellationToken);
 
                             _logger.LogInformation("Updated extension attributes for {Count} duplicate users", updateCount);
+                        }
+
+                        // Enqueue phone-registration tasks for users with a mobile phone (opt-in)
+                        if (_options.Import.PhoneRegistration.EnqueuePhoneRegistration)
+                        {
+                            await EnqueuePhoneRegistrationTasksAsync(batch, result, cancellationToken);
                         }
 
                         // Create and save audit log for this batch
@@ -706,5 +715,65 @@ public class ImportOrchestrator : IOrchestrator<ExecutionResult>
         }
 
         return updateCount;
+    }
+
+    /// <summary>
+    /// Enqueues phone-registration tasks for users in the batch that have a mobile phone
+    /// and were not hard-failed during creation.
+    /// Called only when <see cref="PhoneRegistrationImportOptions.EnqueuePhoneRegistration"/> is true.
+    /// </summary>
+    private async Task EnqueuePhoneRegistrationTasksAsync(
+        UserProfile[] batch,
+        BatchResult batchResult,
+        CancellationToken cancellationToken)
+    {
+        var phoneQueueName = _options.PhoneRegistration.QueueName;
+
+        // Ensure queue exists (idempotent)
+        await _queueClient.CreateQueueIfNotExistsAsync(phoneQueueName, cancellationToken);
+
+        // Build a set of failed batch indices so we can skip users that were never created
+        var failedIndices = new HashSet<int>(batchResult.Failures.Select(f => f.Index));
+
+        int enqueued = 0;
+        int skipped = 0;
+
+        for (int i = 0; i < batch.Length; i++)
+        {
+            var user = batch[i];
+
+            // Skip users whose creation hard-failed (they don't exist in EEID)
+            if (failedIndices.Contains(i))
+            {
+                skipped++;
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(user.MobilePhone) ||
+                string.IsNullOrWhiteSpace(user.UserPrincipalName))
+            {
+                skipped++;
+                continue;
+            }
+
+            var msg = new PhoneRegistrationMessage
+            {
+                Upn = user.UserPrincipalName,
+                PhoneNumber = user.MobilePhone
+            };
+
+            var json = JsonSerializer.Serialize(msg);
+            await _queueClient.SendMessageAsync(phoneQueueName, json, cancellationToken);
+            enqueued++;
+        }
+
+        if (enqueued > 0 || _options.VerboseLogging)
+        {
+            _logger.LogInformation(
+                "[PhoneReg] Enqueued {Count} phone-registration tasks (skipped {Skip} — no phone or creation failed)",
+                enqueued, skipped);
+        }
+
+        _telemetry.IncrementCounter("Import.PhoneRegistrationEnqueued", enqueued);
     }
 }

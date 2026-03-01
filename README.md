@@ -22,7 +22,7 @@ This migration kit provides a sample solution for identity migration with:
 
 **Key Components:**
 
-1. **B2CMigrationKit.Console** - CLI tool for export/import operations
+1. **B2CMigrationKit.Console** - CLI tool for export/import/harvest/phone-registration operations
 2. **B2CMigrationKit.Function** - Azure Function for JIT password migration
 3. **B2CMigrationKit.Core** - Shared business logic and services
 
@@ -30,20 +30,33 @@ This migration kit provides a sample solution for identity migration with:
 
 ```mermaid
 graph TB
-    subgraph "Phase 1: Bulk Migration"
+    subgraph "Phase 1: Harvest + Worker Export (Master/Worker)"
         B2C[(Azure AD B2C<br/>Source Tenant)]
-        Export[1. Export Tool<br/>Console App]
+        Harvest[1a. Harvest<br/>Enqueue user IDs]
+        Queue1[(Azure Queue<br/>user-ids-to-process)]
+        Worker[1b. Worker Export × N<br/>Fetch profiles + upload]
         Storage[(Azure Blob Storage<br/>JSON Files)]
-        Import[2. Import Tool<br/>Console App]
-        ExtID[(Entra External ID<br/>Target Tenant)]
 
-        B2C -->|Read all users| Export
-        Export -->|Save JSON files| Storage
-        Storage -->|Load users| Import
-        Import -->|Create with placeholder passwords| ExtID
+        B2C -->|Page IDs only| Harvest
+        Harvest -->|Batches of 20 IDs| Queue1
+        Queue1 -->|Dequeue + full profile fetch| Worker
+        Worker -->|users_XXXXXX.json| Storage
     end
 
-    subgraph "Phase 2: JIT Password Migration"
+    subgraph "Phase 2: Import + Phone Registration"
+        Import[2a. Import<br/>Console App]
+        ExtID[(Entra External ID<br/>Target Tenant)]
+        Queue2[(Azure Queue<br/>phone-registration)]
+        PhoneWorker[2b. Phone Registration<br/>Worker — throttled]
+
+        Storage -->|Load users| Import
+        Import -->|Create with placeholder passwords| ExtID
+        Import -->|Enqueue phone tasks| Queue2
+        Queue2 -->|POST /authentication/phoneMethods| PhoneWorker
+        PhoneWorker -->|Register MFA phone| ExtID
+    end
+
+    subgraph "Phase 3: JIT Password Migration"
         User[User Login]
         ExtIDLogin[External ID<br/>Sign-In Policy]
         JIT[3. JIT Function<br/>HTTP Trigger]
@@ -54,8 +67,10 @@ graph TB
         JIT -->|Update real password| ExtID
     end
 
-    style Export fill:#0078d4,color:#fff
+    style Harvest fill:#0078d4,color:#fff
+    style Worker fill:#0078d4,color:#fff
     style Import fill:#0078d4,color:#fff
+    style PhoneWorker fill:#0078d4,color:#fff
     style JIT fill:#107c10,color:#fff
 ```
 
@@ -65,10 +80,12 @@ graph TB
 
 ### ✅ Currently Available
 
-- **Bulk User Export** from Azure AD B2C with automatic pagination
-- **Bulk User Import** to External ID with extension attributes
+- **Master/Worker Export** - Harvest phase enqueues user IDs; N parallel workers fetch full profiles (scales to millions)
+- **Bulk User Export** from Azure AD B2C with automatic pagination (single-instance mode)
+- **Bulk User Import** to External ID with extension attributes and audit logs
+- **Async Phone Registration** - After import, MFA phone numbers are enqueued and registered in EEID at a throttle-safe rate by the `phone-registration` worker
 - **JIT Password Migration** via Custom Authentication Extension
-- **UPN Domain Transformation** preserving local-part identifiers as a workaround to enable [sign-in alias](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-sign-in-alias) functionality 
+- **UPN Domain Transformation** preserving local-part identifiers as a workaround to enable [sign-in alias](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-sign-in-alias) functionality
 - **Attribute Mapping** with flexible field transformation
 - **Export Filtering** by display name pattern and user count limits
 - **Built-in Retry Logic** with exponential backoff

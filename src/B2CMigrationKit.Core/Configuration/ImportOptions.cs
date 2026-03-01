@@ -25,6 +25,11 @@ public class ImportOptions
     /// Gets or sets the migration-specific attribute configuration.
     /// </summary>
     public MigrationAttributesOptions MigrationAttributes { get; set; } = new();
+
+    /// <summary>
+    /// Gets or sets the phone-registration enqueuing options.
+    /// </summary>
+    public PhoneRegistrationImportOptions PhoneRegistration { get; set; } = new();
 }
 
 /// <summary>
@@ -65,4 +70,18 @@ public class MigrationAttributesOptions
     /// Default: false
     /// </summary>
     public bool OverwriteExtensionAttributes { get; set; } = false;
+}
+
+/// <summary>
+/// Configuration for the import phone-registration enqueuing behaviour.
+/// </summary>
+public class PhoneRegistrationImportOptions
+{
+    /// <summary>
+    /// When true, users with a non-null MobilePhone value will have a phone-registration
+    /// task enqueued during import. A PhoneRegistrationWorker must then process the queue
+    /// to register the phone as an MFA method in Entra External ID.
+    /// Default: false
+    /// </summary>
+    public bool EnqueuePhoneRegistration { get; set; } = false;
 }

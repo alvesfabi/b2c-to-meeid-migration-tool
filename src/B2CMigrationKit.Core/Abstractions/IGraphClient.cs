@@ -92,4 +92,34 @@ public interface IGraphClient
         string password,
         bool forceChangePasswordNextSignIn = false,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Registers a phone number as a mobile MFA authentication method for the specified user.
+    /// Idempotent: a 409 Conflict (phone already registered) is treated as success.
+    /// Requires UserAuthenticationMethod.ReadWrite.All on the target tenant.
+    /// </summary>
+    /// <param name="userIdOrUpn">The user's object ID or userPrincipalName.</param>
+    /// <param name="phoneNumber">Phone number in E.164-ish format: "+1 2065551234".</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
+    Task RegisterPhoneAuthMethodAsync(
+        string userIdOrUpn,
+        string phoneNumber,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Fetches the full profile for a batch of up to 20 users using the Graph $batch API.
+    /// Used by the Worker/Consumer phase of the Master-Worker export pattern to avoid
+    /// full-tenant pagination: each worker only resolves its own slice of pre-harvested IDs.
+    /// </summary>
+    /// <param name="userIds">Up to 20 user object IDs to fetch.</param>
+    /// <param name="select">Optional comma-separated list of properties to select.</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
+    /// <returns>
+    /// A list of successfully retrieved user profiles.
+    /// Users that were not found or returned an error are omitted (logged at Warning level).
+    /// </returns>
+    Task<IReadOnlyList<UserProfile>> GetUsersByIdsAsync(
+        IEnumerable<string> userIds,
+        string? select = null,
+        CancellationToken cancellationToken = default);
 }

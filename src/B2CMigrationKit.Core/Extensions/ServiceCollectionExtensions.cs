@@ -62,6 +62,7 @@ public static class ServiceCollectionExtensions
 
         // Register Azure Storage clients
         services.AddSingleton<IBlobStorageClient, BlobStorageClient>();
+        services.AddSingleton<IQueueClient, QueueStorageClient>();
 
         // Register B2C Credential Manager
         services.AddSingleton<ICredentialManager>(sp =>
@@ -115,6 +116,47 @@ public static class ServiceCollectionExtensions
         // Register orchestrators and services
         services.AddScoped<ExportOrchestrator>();
 
+        // HarvestOrchestrator: uses B2C Graph client + queue
+        services.AddScoped<HarvestOrchestrator>(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<MigrationOptions>>().Value;
+            var credManagers = sp.GetRequiredService<IEnumerable<ICredentialManager>>();
+            var telemetry = sp.GetRequiredService<ITelemetryService>();
+            var factoryLogger = sp.GetRequiredService<ILogger<GraphClientFactory>>();
+            var clientLogger = sp.GetRequiredService<ILogger<GraphClient>>();
+            var retryOptions = sp.GetRequiredService<IOptions<RetryOptions>>();
+            var queueClient = sp.GetRequiredService<IQueueClient>();
+            var orchestratorLogger = sp.GetRequiredService<ILogger<HarvestOrchestrator>>();
+
+            var factory = new GraphClientFactory(credManagers.First(), factoryLogger, telemetry);
+            var graphServiceClient = factory.CreateClient(options.B2C.Scopes);
+            var graphClient = new GraphClient(graphServiceClient, retryOptions, clientLogger, telemetry);
+
+            return new HarvestOrchestrator(graphClient, queueClient, telemetry,
+                Options.Create(options), orchestratorLogger);
+        });
+
+        // WorkerExportOrchestrator: uses B2C Graph client + blob + queue
+        services.AddScoped<WorkerExportOrchestrator>(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<MigrationOptions>>().Value;
+            var credManagers = sp.GetRequiredService<IEnumerable<ICredentialManager>>();
+            var telemetry = sp.GetRequiredService<ITelemetryService>();
+            var factoryLogger = sp.GetRequiredService<ILogger<GraphClientFactory>>();
+            var clientLogger = sp.GetRequiredService<ILogger<GraphClient>>();
+            var retryOptions = sp.GetRequiredService<IOptions<RetryOptions>>();
+            var blobClient = sp.GetRequiredService<IBlobStorageClient>();
+            var queueClient = sp.GetRequiredService<IQueueClient>();
+            var orchestratorLogger = sp.GetRequiredService<ILogger<WorkerExportOrchestrator>>();
+
+            var factory = new GraphClientFactory(credManagers.First(), factoryLogger, telemetry);
+            var graphServiceClient = factory.CreateClient(options.B2C.Scopes);
+            var graphClient = new GraphClient(graphServiceClient, retryOptions, clientLogger, telemetry);
+
+            return new WorkerExportOrchestrator(graphClient, blobClient, queueClient, telemetry,
+                Options.Create(options), orchestratorLogger);
+        });
+
         // Register ImportOrchestrator with External ID Graph client
         services.AddScoped<ImportOrchestrator>(sp =>
         {
@@ -126,13 +168,33 @@ public static class ServiceCollectionExtensions
             var clientLogger = sp.GetRequiredService<ILogger<GraphClient>>();
             var retryOptions = sp.GetRequiredService<IOptions<RetryOptions>>();
             var blobClient = sp.GetRequiredService<IBlobStorageClient>();
+            var queueClient = sp.GetRequiredService<IQueueClient>();
             var orchestratorLogger = sp.GetRequiredService<ILogger<ImportOrchestrator>>();
 
             var factory = new GraphClientFactory(credManager, factoryLogger, telemetry);
             var graphServiceClient = factory.CreateClient(options.ExternalId.Scopes);
             var graphClient = new GraphClient(graphServiceClient, retryOptions, clientLogger, telemetry);
 
-            return new ImportOrchestrator(graphClient, blobClient, telemetry, Options.Create(options), orchestratorLogger);
+            return new ImportOrchestrator(graphClient, blobClient, queueClient, telemetry, Options.Create(options), orchestratorLogger);
+        });
+
+        // Register PhoneRegistrationWorker with External ID Graph client
+        services.AddScoped<PhoneRegistrationWorker>(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<MigrationOptions>>().Value;
+            var credManager = sp.GetRequiredService<IEnumerable<ICredentialManager>>().Last();
+            var telemetry = sp.GetRequiredService<ITelemetryService>();
+            var factoryLogger = sp.GetRequiredService<ILogger<GraphClientFactory>>();
+            var clientLogger = sp.GetRequiredService<ILogger<GraphClient>>();
+            var retryOptions = sp.GetRequiredService<IOptions<RetryOptions>>();
+            var queueClient = sp.GetRequiredService<IQueueClient>();
+            var workerLogger = sp.GetRequiredService<ILogger<PhoneRegistrationWorker>>();
+
+            var factory = new GraphClientFactory(credManager, factoryLogger, telemetry);
+            var graphServiceClient = factory.CreateClient(options.ExternalId.Scopes);
+            var graphClient = new GraphClient(graphServiceClient, retryOptions, clientLogger, telemetry);
+
+            return new PhoneRegistrationWorker(graphClient, queueClient, telemetry, Options.Create(options), workerLogger);
         });
 
         // Register JitMigrationService with External ID Graph client

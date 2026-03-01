@@ -48,6 +48,11 @@ public class MigrationOptions
     public RetryOptions Retry { get; set; } = new();
 
     /// <summary>
+    /// Gets or sets the configuration for the harvest (master/producer) phase.
+    /// </summary>
+    public HarvestOptions Harvest { get; set; } = new();
+
+    /// <summary>
     /// Gets or sets the export configuration.
     /// </summary>
     public ExportOptions Export { get; set; } = new();
@@ -61,6 +66,13 @@ public class MigrationOptions
     /// Gets or sets the JIT authentication configuration.
     /// </summary>
     public JitAuthenticationOptions JitAuthentication { get; set; } = new();
+
+    /// <summary>
+    /// Gets or sets the phone-registration worker configuration.
+    /// Controls the async queue-based worker that registers MFA phone numbers
+    /// in Entra External ID after import, at a throttle-safe rate.
+    /// </summary>
+    public PhoneRegistrationOptions PhoneRegistration { get; set; } = new();
 
     /// <summary>
     /// Gets or sets the batch size for operations (default: 100).

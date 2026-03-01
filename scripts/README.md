@@ -27,10 +27,17 @@ This directory contains PowerShell scripts for local development, testing, and J
    dotnet --version  # Should be 8.0+
    ```
 
-2. **Azurite** - Azure Storage emulator for local development
-   ```powershell
-   npm install -g azurite
+2. **Azurite VS Code Extension** - Azure Storage emulator for local development
+   - Install from VS Code Marketplace: [`ms-azuretools.vscode-azurite`](https://marketplace.visualstudio.com/items?itemName=ms-azuretools.vscode-azurite)
+   - Or search "Azurite" in the VS Code Extensions panel
+   - **Do NOT use `npm install -g azurite`** – the extension is the recommended approach
+     (no npm dependency, integrates with VS Code status bar)
+
+   Start Azurite before running any script:
    ```
+   Ctrl+Shift+P  →  "Azurite: Start Service"
+   ```
+   Or click the **Azurite Blob Service** / **Azurite Queue Service** icons in the status bar.
 
 3. **Configuration** - `appsettings.local.json` with tenant credentials
    - See [Developer Guide - Configuration](../docs/DEVELOPER_GUIDE.md#configuration-guide)
@@ -59,23 +66,36 @@ This directory contains PowerShell scripts for local development, testing, and J
 
 ## Quick Start
 
-**Recommended workflow:** Use the PowerShell scripts that automatically handle Azurite setup.
+**Recommended workflow:** Use the PowerShell scripts that automatically handle Azurite verification.
 
-### Export Users from B2C
+> ⚠️ **Azurite must be running first.** Start it from VS Code: `Ctrl+Shift+P` → `Azurite: Start Service`
+
+### Option A – Single-instance export (simple, smaller tenants)
+
 ```powershell
-.\scripts\Start-LocalExport.ps1
+.\.scripts\Start-LocalExport.ps1     # Export all users via full pagination
+.\.scripts\Start-LocalImport.ps1     # Import to External ID
 ```
 
-### Import Users to External ID
+### Option B – Master/Worker export (recommended for 50K+ users)
+
 ```powershell
+# Step 1: run ONCE – enqueues all user IDs (fast, only fetches 'id' field)
+.\scripts\Start-LocalHarvest.ps1
+
+# Step 2: run in PARALLEL, each in its own terminal with its own App Registration
+.\scripts\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app1.json
+.\scripts\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app2.json
+.\scripts\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app3.json
+
+# Step 3: import (same as before)
 .\scripts\Start-LocalImport.ps1
 ```
 
-**✅ What these scripts do automatically:**
-- Check if Azurite is installed (prompt for installation if missing)
-- Auto-detect if you need Azurite based on your connection string
-- Start Azurite automatically if needed (or use existing instance)
-- Create required storage containers and queues
+**✅ What the scripts do automatically:**
+- Verify Azurite is running via the VS Code extension (port check – no npm needed)
+- Auto-detect whether local Azurite or cloud storage is configured
+- Pre-create storage containers (`user-exports`, `migration-errors`, `import-audit`) and queue (`user-ids-to-process`) via Azure CLI (if available)
 - Build and run the console application
 - Display color-coded progress and status messages
 
@@ -85,48 +105,108 @@ This directory contains PowerShell scripts for local development, testing, and J
 
 ### Start-LocalExport.ps1
 
-Exports users from Azure AD B2C to local Azurite storage.
+Exports users from Azure AD B2C to local Azurite storage using full pagination (single instance).
 
 **Usage:**
 ```powershell
-.\Start-LocalExport.ps1 [-VerboseLogging] [-ConfigFile "config.json"]
+.\Start-LocalExport.ps1 [-VerboseLogging] [-ConfigFile "config.json"] [-SkipAzurite]
 ```
 
 **Parameters:**
 - `-ConfigFile` - Configuration file path (default: `appsettings.local.json`)
 - `-VerboseLogging` - Enable detailed logging
-- `-SkipAzurite` - Skip Azurite initialization (use cloud storage)
+- `-SkipAzurite` - Skip Azurite port check (use cloud storage)
 
 **What it does:**
 1. Validates configuration file exists
-2. Auto-detects if local storage emulator is needed
-3. Checks if Azurite is installed (prompts if missing)
-4. Starts Azurite if needed
-5. Creates storage containers (`user-exports`, `migration-errors`)
-6. Builds the console application
-7. Runs the export operation
+2. Detects storage mode (local vs cloud)
+3. Verifies Azurite ports 10000/10001 are open (VS Code extension)
+4. Pre-creates blob containers via Azure CLI
+5. Builds and runs `export` (full B2C pagination → Blob Storage)
+
+> For large tenants use `Start-LocalHarvest.ps1` + `Start-LocalWorkerExport.ps1` instead.
+
+---
 
 ### Start-LocalImport.ps1
 
-Imports users from local Azurite storage to Entra External ID.
+Imports users from local Azurite Blob Storage to Entra External ID.
 
 **Usage:**
 ```powershell
-.\Start-LocalImport.ps1 [-VerboseLogging] [-ConfigFile "config.json"]
+.\Start-LocalImport.ps1 [-VerboseLogging] [-ConfigFile "config.json"] [-SkipAzurite]
 ```
 
 **Parameters:**
 - `-ConfigFile` - Configuration file path (default: `appsettings.local.json`)
 - `-VerboseLogging` - Enable detailed logging
-- `-SkipAzurite` - Skip Azurite initialization (use cloud storage)
+- `-SkipAzurite` - Skip Azurite port check (use cloud storage)
 
 **What it does:**
 1. Validates configuration file exists
-2. Auto-detects if local storage emulator is needed
-3. Checks if Azurite is installed (prompts if missing)
-4. Starts Azurite if needed
-5. Builds the console application
-6. Runs the import operation
+2. Detects storage mode (local vs cloud)
+3. Verifies Azurite ports 10000/10001 are open (VS Code extension)
+4. Pre-creates blob containers via Azure CLI
+5. Builds and runs `import` (Blob Storage → Entra External ID)
+
+---
+
+### Start-LocalHarvest.ps1  *(Master/Producer phase)*
+
+Fetches **only user IDs** from B2C at maximum speed (page size 999, `$select=id`) and
+enqueues batches of 20 IDs to the Azure Queue `user-ids-to-process`.
+
+**Usage:**
+```powershell
+.\Start-LocalHarvest.ps1 [-VerboseLogging] [-ConfigFile "config.json"] [-SkipAzurite]
+```
+
+**Parameters:**
+- `-ConfigFile` - Configuration file (default: `appsettings.local.json`). Use `appsettings.master.json` for a dedicated master config.
+- `-VerboseLogging` - Enable detailed logging
+- `-SkipAzurite` - Skip Azurite port check
+
+**What it does:**
+1. Verifies Azurite ports are open
+2. Pre-creates the queue (`user-ids-to-process`) and blob containers
+3. Downloads all user IDs from B2C — extremely fast (only `id` field)
+4. Groups IDs into batches of 20 and sends each batch as one queue message
+5. Prints a summary with next-step instructions
+
+---
+
+### Start-LocalWorkerExport.ps1  *(Worker/Consumer phase)*
+
+Consumes the queue populated by the harvest phase. Each worker:
+- Dequeues one message (20 user IDs)
+- Calls `POST /$batch` to fetch full profiles in one HTTP request
+- Uploads a blob to `user-exports`
+- Deletes the message (ACK)
+- Repeats until the queue is empty
+
+Run multiple instances simultaneously, each with a **different App Registration config**
+to multiply the API throttle limit by the number of workers.
+
+**Usage:**
+```powershell
+# Terminal 1
+.\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app1.json
+
+# Terminal 2 (simultaneously)
+.\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app2.json
+
+# Terminal 3 (simultaneously)
+.\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app3.json
+```
+
+**Parameters:**
+- `-ConfigFile` - Configuration file (default: `appsettings.local.json`)
+- `-VerboseLogging` - Enable detailed logging
+- `-SkipAzurite` - Skip Azurite port check
+
+**Resilience:** if a worker crashes before ACKing a message, the message automatically
+reappears in the queue after the `MessageVisibilityTimeout` (default 5 min) and another
+worker (or a re-run) will process it.
 
 ---
 
@@ -320,6 +400,11 @@ The scripts use `appsettings.local.json` by default, pre-configured for Azurite:
       "ConnectionStringOrUri": "UseDevelopmentStorage=true",
       "UseManagedIdentity": false
     },
+    "Harvest": {
+      "QueueName": "user-ids-to-process",
+      "IdsPerMessage": 20,
+      "PageSize": 999
+    },
     "KeyVault": null,
     "Telemetry": {
       "Enabled": false
@@ -330,14 +415,16 @@ The scripts use `appsettings.local.json` by default, pre-configured for Azurite:
 
 **What this means:**
 - ✅ **Storage**: Local Azurite emulator (no Azure Storage account needed)
+- ✅ **Queue**: Azurite queue service on port 10001
 - ✅ **Secrets**: Use `ClientSecret` directly in config (no Key Vault needed)
 - ✅ **Telemetry**: Console logging only (no Application Insights needed)
 
 **To run locally, you only need:**
-1. Install Azurite: `npm install -g azurite`
-2. Copy `appsettings.json` to `appsettings.local.json`
-3. Add your B2C/External ID app registration credentials
-4. Run: `.\scripts\Start-LocalExport.ps1`
+1. Install the **Azurite VS Code extension** (`ms-azuretools.vscode-azurite`)
+2. Start Azurite: `Ctrl+Shift+P` → `Azurite: Start Service`
+3. Copy `appsettings.json` to `appsettings.local.json`
+4. Add your B2C/External ID app registration credentials
+5. Run: `.\scripts\Start-LocalHarvest.ps1` then `.\scripts\Start-LocalWorkerExport.ps1`
 
 ### Production/Cloud Storage
 
@@ -374,31 +461,40 @@ The file is already in `.gitignore`. For production:
 
 ### Azurite Storage Location
 
-Azurite stores data in the repository root. To view data:
-- Use Azure Storage Explorer (connect to local emulator)
-- Or use Azure CLI: `UseDevelopmentStorage=true`
+When using the VS Code extension, data is stored in the workspace root by default
+(same `__azurite_db_*.json` and `__blobstorage__` / `__queuestorage__` files already
+in the repo root). To customise the location, set `azurite.location` in VS Code settings.
+
+To view data: use **Azure Storage Explorer** → connect to **Local Emulator**.
 
 **Stopping Azurite:**
-```powershell
-Stop-Process -Name azurite
-```
+- VS Code status bar → click **Azurite Blob Service** → **Stop**
+- Or `Ctrl+Shift+P` → `Azurite: Close Service`
 
 ---
 
 ## Troubleshooting
 
-**"Azurite is not installed"**
-```powershell
-npm install -g azurite
-```
+**"Azurite is not running" / ports not open**
+
+The scripts check TCP ports 10000 (Blob) and 10001 (Queue). If they are not open:
+
+1. Open VS Code
+2. Press `Ctrl+Shift+P`
+3. Type `Azurite: Start Service` and press Enter
+4. Verify the status bar shows **Azurite Blob Service** and **Azurite Queue Service**
+5. Re-run the script
+
+Extension install: `ext install ms-azuretools.vscode-azurite`
 
 **"Configuration file not found"**
 - Ensure you're in the repository root
 - Or use `-ConfigFile` parameter with full path
 
-**"Failed to start Azurite"**
-- Check if port 10000/10001 is in use
-- Stop manually: `Stop-Process -Name azurite`
+**"Azurite port already in use"**
+- Another process occupies port 10000 or 10001
+- Stop the other Azurite instance: VS Code status bar → **Azurite** → **Stop**
+- Or terminate the conflict: `Get-Process -Name azurite | Stop-Process`
 
 **"Certificate not found"** (JIT setup)
 - Verify path: `Test-Path ".\jit-certificate.txt"`
@@ -427,28 +523,37 @@ dotnet clean
 Complete local development workflow:
 
 ```powershell
-# 1. Export from B2C to local storage
+# 1. Start Azurite (VS Code: Ctrl+Shift+P → "Azurite: Start Service")
+
+# Option A – single-instance export
 .\scripts\Start-LocalExport.ps1 -VerboseLogging
 
-# 2. Inspect data (optional - use Azure Storage Explorer)
+# Option B – Master/Worker export (recommended for large tenants)
+# 2a. Harvest: enqueue all user IDs (run once)
+.\scripts\Start-LocalHarvest.ps1 -VerboseLogging
 
-# 3. Import to External ID
+# 2b. Workers: process queue in parallel (open separate terminals)
+.\scripts\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app1.json
+.\scripts\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app2.json
+
+# 3. Inspect exported data (optional – use Azure Storage Explorer, connect to local)
+
+# 4. Import to External ID
 .\scripts\Start-LocalImport.ps1 -VerboseLogging
 
-# 4. Generate JIT keys
+# 5. Generate JIT keys
 .\scripts\New-LocalJitRsaKeyPair.ps1
 
-# 5. Configure External ID for JIT
+# 6. Configure External ID for JIT
 .\scripts\Configure-ExternalIdJit.ps1 `
     -TenantId "your-tenant-id" `
     -CertificatePath ".\jit-certificate.txt" `
     -FunctionUrl "https://your-ngrok.ngrok-free.dev/api/JitAuthentication" `
     -MigrationPropertyId "extension_{ExtensionAppId}_RequiresMigration"
 
-# 6. Test JIT (use Portal → User flows → Run user flow)
+# 7. Test JIT (use Portal → User flows → Run user flow)
 
-# 7. Stop Azurite when done
-Stop-Process -Name azurite
+# 8. Stop Azurite when done (VS Code status bar → click Azurite → Stop)
 ```
 
 ---

@@ -2,22 +2,26 @@
 # Licensed under the MIT License.
 <#
 .SYNOPSIS
-    Initializes Azurite and runs the B2C import console application locally.
+    Runs the External ID import operation locally.
 
 .DESCRIPTION
     This script:
-    1. Checks if Azurite is installed
-    2. Starts Azurite blob service on default port (10000)
-    3. Runs the B2C import console application with local configuration
+    1. Verifies Azurite is running via the VS Code extension (checks ports 10000/10001)
+    2. Pre-creates required blob containers using Azure CLI (if available)
+    3. Builds and runs the B2C Migration Kit console with the 'import' operation
+
+    Azurite must be started manually from VS Code before running this script:
+      Ctrl+Shift+P  →  "Azurite: Start Service"
 
 .PARAMETER ConfigFile
-    Path to the configuration file (default: appsettings.local.json)
+    Path to the configuration file relative to the console project directory.
+    Default: appsettings.local.json
 
 .PARAMETER VerboseLogging
-    Enable verbose logging in the console application
+    Enable verbose (Debug-level) logging in the console application.
 
 .PARAMETER SkipAzurite
-    Skip Azurite initialization (use if already running)
+    Skip the Azurite port check. Use when pointing to a real Azure Storage account.
 
 .EXAMPLE
     .\Start-LocalImport.ps1
@@ -42,190 +46,69 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# Script directory
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$rootDir = Split-Path -Parent $scriptDir
+# Shared helpers
+. (Join-Path $PSScriptRoot "_Common.ps1")
+
+$rootDir       = Split-Path -Parent $PSScriptRoot
 $consoleAppDir = Join-Path $rootDir "src\B2CMigrationKit.Console"
-$configPath = Join-Path $consoleAppDir $ConfigFile
+$configPath    = Join-Path $consoleAppDir $ConfigFile
 
-# Colors for output
-function Write-Success { Write-Host $args -ForegroundColor Green }
-function Write-Info { Write-Host $args -ForegroundColor Cyan }
-function Write-Warning { Write-Host $args -ForegroundColor Yellow }
-function Write-Error { Write-Host $args -ForegroundColor Red }
-
-# Header
+# ─── Header ────────────────────────────────────────────────────────────────────
 Write-Host ""
-Write-Host "═══════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "  B2C Migration Kit - Local Import Runner" -ForegroundColor Cyan
-Write-Host "═══════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "  B2C Migration Kit - Local Import" -ForegroundColor Cyan
+Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host ""
 
-# Validate configuration file exists
+# Validate config file
 if (-not (Test-Path $configPath)) {
-    Write-Error "Configuration file not found: $configPath"
-    Write-Info "Please create the configuration file or specify a different one with -ConfigFile parameter"
+    Write-Err "Configuration file not found: $configPath"
+    Write-Info "Create it or use -ConfigFile to specify a different path."
     exit 1
 }
+Write-Success "✓ Configuration: $ConfigFile"
 
-Write-Success "✓ Configuration file found: $ConfigFile"
+# Detect storage mode
+$storage = Get-StorageMode -ConfigPath $configPath
+$skipCheck = ($SkipAzurite -or -not $storage.NeedsAzurite)
 
-# Auto-detect if Azurite is needed by checking the connection string
-$needsAzurite = $false
-if (-not $SkipAzurite) {
-    try {
-        $configContent = Get-Content $configPath -Raw | ConvertFrom-Json
-        $connectionString = $configContent.Migration.Storage.ConnectionStringOrUri
-        
-        if ($connectionString -eq "UseDevelopmentStorage=true" -or 
-            $connectionString -like "*127.0.0.1*" -or 
-            $connectionString -like "*localhost*") {
-            $needsAzurite = $true
-            Write-Info "Detected local storage emulator configuration - Azurite will be started"
-        }
-        else {
-            Write-Info "Detected cloud storage configuration - Skipping Azurite"
-            $SkipAzurite = $true
-        }
-    }
-    catch {
-        Write-Warning "⚠ Could not parse config file to detect storage type - assuming Azurite is needed"
-        $needsAzurite = $true
-    }
+# Verify Azurite is running (VS Code extension)
+Confirm-AzuriteRunning -SkipAzurite $skipCheck
+
+# Pre-create storage resources
+if (-not $skipCheck) {
+    Initialize-LocalStorage
 }
 
-# Check if Azurite is installed
-if (-not $SkipAzurite -and $needsAzurite) {
-    Write-Info "Checking Azurite installation..."
-
-    $azuriteInstalled = $null
-    try {
-        $azuriteInstalled = Get-Command azurite -ErrorAction SilentlyContinue
-    }
-    catch {
-        # Ignore error
-    }
-
-    if (-not $azuriteInstalled) {
-        Write-Error "Azurite is not installed!"
-        Write-Info "Install Azurite using: npm install -g azurite"
-        Write-Info "Or run this script with -SkipAzurite if you are using a different storage emulator"
-        exit 1
-    }
-
-    Write-Success "✓ Azurite is installed"
-
-    # Check if Azurite is already running
-    Write-Info "Checking if Azurite is already running..."
-    $azuriteProcess = Get-Process -Name "azurite" -ErrorAction SilentlyContinue
-
-    if ($azuriteProcess) {
-        Write-Warning "⚠ Azurite is already running (PID: $($azuriteProcess.Id))"
-        Write-Info "Using existing Azurite instance"
-    }
-    else {
-        Write-Info "Starting Azurite..."
-
-        # Create workspace directory for Azurite
-        $azuriteWorkspace = Join-Path $rootDir ".azurite"
-        if (-not (Test-Path $azuriteWorkspace)) {
-            New-Item -ItemType Directory -Path $azuriteWorkspace | Out-Null
-        }
-
-        # Start Azurite in background
-        try {
-            # Build arguments as a single string for cmd.exe
-            $azuriteCommand = "azurite --silent --location `"$azuriteWorkspace`" --blobPort 10000 --queuePort 10001"
-            
-            # Use cmd.exe to run azurite to avoid file association issues
-            $azuriteJob = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $azuriteCommand -WindowStyle Hidden -PassThru
-
-            # Wait for Azurite to start
-            Write-Info "Waiting for Azurite to start..."
-            Start-Sleep -Seconds 5
-
-            # Verify Azurite is running
-            $azuriteProcess = Get-Process -Id $azuriteJob.Id -ErrorAction SilentlyContinue
-            if (-not $azuriteProcess) {
-                Write-Error "Failed to start Azurite - process exited unexpectedly"
-                Write-Info "Try running azurite manually to see the error"
-                exit 1
-            }
-
-            Write-Success "✓ Azurite started successfully (PID: $($azuriteProcess.Id))"
-        }
-        catch {
-            Write-Error "Failed to start Azurite: $_"
-            Write-Info "Make sure Azurite is properly installed: npm install -g azurite"
-            exit 1
-        }
-    }
-}
-else {
-    if ($SkipAzurite) {
-        Write-Info "Skipping Azurite initialization (using -SkipAzurite or cloud storage detected)"
-    }
-}
-
+# ─── Run ───────────────────────────────────────────────────────────────────────
 Write-Host ""
-Write-Info "Starting user import to External ID..."
+Write-Info "Starting import to Entra External ID..."
 Write-Host ""
 
-# Build console application arguments
-$appArgs = @("import", "--config", $ConfigFile)
-if ($VerboseLogging) {
-    $appArgs += "--verbose"
-}
+$exitCode = Invoke-ConsoleApp `
+    -AppDir        $consoleAppDir `
+    -Operation     "import" `
+    -ConfigFile    $ConfigFile `
+    -VerboseLogging $VerboseLogging.IsPresent
 
-# Run the console application
-try {
-    Push-Location $consoleAppDir
-
-    # Build the project first
-    Write-Info "Building console application..."
-    dotnet build --configuration Debug --nologo --verbosity quiet
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to build console application"
-        exit 1
+Write-Host ""
+switch ($exitCode) {
+    0 {
+        Write-Success "═══════════════════════════════════════════════════"
+        Write-Success "  Import completed successfully!"
+        Write-Success "═══════════════════════════════════════════════════"
     }
-
-    Write-Success "✓ Build successful"
-    Write-Host ""
-
-    # Run the application
-    dotnet run --no-build --configuration Debug -- $appArgs
-
-    $exitCode = $LASTEXITCODE
+    2 {
+        Write-Warn    "═══════════════════════════════════════════════════"
+        Write-Warn    "  Import completed with some failures (exit 2)"
+        Write-Warn    "  Check logs for individual user errors."
+        Write-Warn    "═══════════════════════════════════════════════════"
+    }
+    default {
+        Write-Err     "═══════════════════════════════════════════════════"
+        Write-Err     "  Import failed (exit code $exitCode)"
+        Write-Err     "═══════════════════════════════════════════════════"
+    }
 }
-finally {
-    Pop-Location
-}
-
 Write-Host ""
-
-if ($exitCode -eq 0) {
-    Write-Success "═══════════════════════════════════════════════"
-    Write-Success "  Import completed successfully!"
-    Write-Success "═══════════════════════════════════════════════"
-}
-elseif ($exitCode -eq 2) {
-    Write-Warning "═══════════════════════════════════════════════"
-    Write-Warning "  Import completed with some failures"
-    Write-Warning "  Exit code: $exitCode"
-    Write-Warning "═══════════════════════════════════════════════"
-}
-else {
-    Write-Error "═══════════════════════════════════════════════"
-    Write-Error "  Import failed with exit code: $exitCode"
-    Write-Error "═══════════════════════════════════════════════"
-}
-
-Write-Host ""
-
-# Cleanup instructions
-if (-not $SkipAzurite -and -not $azuriteProcess) {
-    Write-Info "To stop Azurite, run: Stop-Process -Name azurite"
-}
-
 exit $exitCode

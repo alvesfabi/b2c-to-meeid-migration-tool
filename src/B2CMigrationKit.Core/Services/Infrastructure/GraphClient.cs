@@ -311,6 +311,103 @@ public class GraphClient : IGraphClient
         }, cancellationToken);
     }
 
+    public async Task<IReadOnlyList<CoreModels.UserProfile>> GetUsersByIdsAsync(
+        IEnumerable<string> userIds,
+        string? select = null,
+        CancellationToken cancellationToken = default)
+    {
+        var idList = userIds.ToList();
+        if (idList.Count == 0)
+        {
+            return Array.Empty<CoreModels.UserProfile>();
+        }
+
+        // Graph $batch is limited to 20 requests per call.
+        if (idList.Count > 20)
+        {
+            throw new ArgumentException("GetUsersByIdsAsync supports at most 20 user IDs per call. " +
+                "Chunk the list before calling this method.", nameof(userIds));
+        }
+
+        return await _retryPipeline.ExecuteAsync(async ct =>
+        {
+            var results = new List<CoreModels.UserProfile>(idList.Count);
+
+            var batchRequest = new Microsoft.Graph.BatchRequestContentCollection(_client);
+            var requestIdToUserId = new Dictionary<string, string>(idList.Count);
+
+            foreach (var userId in idList)
+            {
+                // Build a GET /users/{id} request, optionally with $select
+                var requestInfo = _client.Users[userId].ToGetRequestInformation(config =>
+                {
+                    if (!string.IsNullOrEmpty(select))
+                    {
+                        config.QueryParameters.Select = select.Split(',');
+                    }
+                });
+
+                var requestId = await batchRequest.AddBatchRequestStepAsync(requestInfo);
+                requestIdToUserId[requestId] = userId;
+            }
+
+            var batchResponse = await _client.Batch.PostAsync(batchRequest, cancellationToken: ct);
+
+            foreach (var (requestId, userId) in requestIdToUserId)
+            {
+                try
+                {
+                    var user = await batchResponse.GetResponseByIdAsync<GraphModels.User>(requestId);
+                    if (user != null)
+                    {
+                        results.Add(MapToUserProfile(user));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "Failed to retrieve user {UserId} in batch request {RequestId}", userId, requestId);
+                }
+            }
+
+            _telemetry.IncrementCounter("GraphClient.GetUsersByIds", results.Count);
+
+            return (IReadOnlyList<CoreModels.UserProfile>)results;
+        }, cancellationToken);
+    }
+
+    public async Task RegisterPhoneAuthMethodAsync(
+        string userIdOrUpn,
+        string phoneNumber,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await _retryPipeline.ExecuteAsync(async ct =>
+            {
+                var phoneMethod = new GraphModels.PhoneAuthenticationMethod
+                {
+                    PhoneNumber = phoneNumber,
+                    PhoneType = GraphModels.AuthenticationPhoneType.Mobile
+                };
+
+                await _client.Users[userIdOrUpn].Authentication.PhoneMethods
+                    .PostAsync(phoneMethod, cancellationToken: ct);
+
+                _telemetry.IncrementCounter("GraphClient.PhoneMethodRegistered");
+            }, cancellationToken);
+        }
+        catch (Microsoft.Graph.Models.ODataErrors.ODataError odataError)
+            when (odataError.ResponseStatusCode == (int)System.Net.HttpStatusCode.Conflict)
+        {
+            // 409 = phone already registered — treat as success (idempotent)
+            _logger.LogDebug(
+                "Phone method already registered for user {User} (409 Conflict — skipping)",
+                userIdOrUpn);
+            _telemetry.IncrementCounter("GraphClient.PhoneMethodAlreadyRegistered");
+        }
+    }
+
     private CoreModels.UserProfile MapToUserProfile(GraphModels.User user)
     {
         var profile = new CoreModels.UserProfile

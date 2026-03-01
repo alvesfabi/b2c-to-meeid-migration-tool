@@ -258,6 +258,10 @@ The toolkit supports dual telemetry output: console logging (local development) 
    az login
    ```
 
+   **Azurite (local Azure Storage emulator)** — choose one:
+   - **Recommended:** Install the [Azurite VS Code extension](https://marketplace.visualstudio.com/items?itemName=Azurite.azurite) → start with `Ctrl+Shift+P` → "Azurite: Start" (no Node.js dependency)
+   - **Alternative:** Install via npm (requires Node.js 18+): `npm install -g azurite`
+
    **IDE:** [Visual Studio Code](https://code.visualstudio.com/) with the [C# Dev Kit](https://marketplace.visualstudio.com/items?itemName=ms-dotnettools.csdevkit) extension. The repository includes `.vscode/launch.json` and `.vscode/tasks.json` for debugging Azure Functions locally.
 
 2. **Configure Local Settings**

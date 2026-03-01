@@ -83,6 +83,12 @@ class Program
                     options.TimestampFormat = "HH:mm:ss ";
                 });
 
+                // File logging — writes to logs/migration-YYYYMMDD-HHmmss.log
+                var logsDir = Path.Combine(AppContext.BaseDirectory, "logs");
+                Directory.CreateDirectory(logsDir);
+                var logFile = Path.Combine(logsDir, $"migration-{DateTime.Now:yyyyMMdd-HHmmss}.log");
+                logging.AddProvider(new SimpleFileLoggerProvider(logFile));
+
                 if (verbose)
                 {
                     logging.SetMinimumLevel(LogLevel.Debug);

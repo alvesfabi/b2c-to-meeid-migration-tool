@@ -327,86 +327,151 @@ public class GraphClient : IGraphClient
         if (!userIdList.Any())
             return result;
 
-        // Graph batch limit is 20 requests per batch
-        var batches = userIdList.Chunk(20);
+        // Graph batch limit is 20 requests per batch, but the authentication
+        // methods API has much stricter rate limits than /users. We use a smaller
+        // sub-batch (10) with generous delays to stay within throttle thresholds.
+        //   1. Wrap each batch POST in the retry pipeline (retries on transient/429 errors)
+        //   2. Add inter-batch delay to avoid overwhelming the API
+        //   3. Collect per-sub-request 429 failures and retry them in subsequent rounds
+        const int graphBatchSize = 10;
+        const int interBatchDelayMs = 1500;
+        const int maxRetryRounds = 5;
+        const int retryRoundBaseDelayMs = 3000;
 
-        foreach (var batch in batches)
+        var pendingUserIds = userIdList;
+
+        for (var round = 0; round <= maxRetryRounds && pendingUserIds.Count > 0; round++)
         {
-            try
+            var throttledUserIds = new List<string>();
+
+            if (round > 0)
             {
-                var batchRequest = new BatchRequestContentCollection(_client);
-                var requestIdToUserId = new Dictionary<string, string>();
+                // Exponential backoff between retry rounds for throttled sub-requests
+                var roundDelay = TimeSpan.FromMilliseconds(retryRoundBaseDelayMs * Math.Pow(2, round - 1));
+                _logger.LogInformation(
+                    "Phone methods retry round {Round}/{MaxRounds}: retrying {Count} throttled users after {Delay}ms delay",
+                    round, maxRetryRounds, pendingUserIds.Count, roundDelay.TotalMilliseconds);
+                await Task.Delay(roundDelay, cancellationToken);
+            }
 
-                foreach (var userId in batch)
+            var batches = pendingUserIds.Chunk(graphBatchSize);
+            var batchIndex = 0;
+
+            foreach (var batch in batches)
+            {
+                // Add delay between batch calls to respect rate limits
+                if (batchIndex > 0)
                 {
-                    // Build GET /users/{userId}/authentication/phoneMethods
-                    var requestInfo = _client.Users[userId].Authentication.PhoneMethods
-                        .ToGetRequestInformation();
-                    var requestId = await batchRequest.AddBatchRequestStepAsync(requestInfo);
-                    requestIdToUserId[requestId] = userId;
+                    await Task.Delay(interBatchDelayMs, cancellationToken);
                 }
+                batchIndex++;
 
-                var batchResponse = await _client.Batch.PostAsync(batchRequest, cancellationToken: cancellationToken);
-
-                foreach (var (requestId, userId) in requestIdToUserId)
+                try
                 {
-                    try
+                    // Wrap the batch POST in retry pipeline to handle transient failures
+                    await _retryPipeline.ExecuteAsync(async ct =>
                     {
-                        var response = await batchResponse.GetResponseByIdAsync(requestId);
+                        var batchRequest = new BatchRequestContentCollection(_client);
+                        var requestIdToUserId = new Dictionary<string, string>();
 
-                        if (response != null && response.IsSuccessStatusCode)
+                        foreach (var userId in batch)
                         {
-                            var content = await response.Content.ReadAsStringAsync(cancellationToken);
-                            var doc = System.Text.Json.JsonDocument.Parse(content);
+                            // Build GET /users/{userId}/authentication/phoneMethods
+                            var requestInfo = _client.Users[userId].Authentication.PhoneMethods
+                                .ToGetRequestInformation();
+                            var requestId = await batchRequest.AddBatchRequestStepAsync(requestInfo);
+                            requestIdToUserId[requestId] = userId;
+                        }
 
-                            string? mobilePhone = null;
+                        var batchResponse = await _client.Batch.PostAsync(batchRequest, cancellationToken: ct);
 
-                            if (doc.RootElement.TryGetProperty("value", out var valueArray))
+                        foreach (var (requestId, userId) in requestIdToUserId)
+                        {
+                            try
                             {
-                                foreach (var method in valueArray.EnumerateArray())
+                                var response = await batchResponse!.GetResponseByIdAsync(requestId);
+
+                                if (response != null && response.IsSuccessStatusCode)
                                 {
-                                    // Only capture "mobile" type (SMS-capable)
-                                    if (method.TryGetProperty("phoneType", out var phoneType) &&
-                                        string.Equals(phoneType.GetString(), "mobile", StringComparison.OrdinalIgnoreCase))
+                                    var content = await response.Content.ReadAsStringAsync(ct);
+                                    var doc = System.Text.Json.JsonDocument.Parse(content);
+
+                                    string? mobilePhone = null;
+
+                                    if (doc.RootElement.TryGetProperty("value", out var valueArray))
                                     {
-                                        if (method.TryGetProperty("phoneNumber", out var phoneNum))
+                                        foreach (var method in valueArray.EnumerateArray())
                                         {
-                                            mobilePhone = phoneNum.GetString();
+                                            // Only capture "mobile" type (SMS-capable)
+                                            if (method.TryGetProperty("phoneType", out var phoneType) &&
+                                                string.Equals(phoneType.GetString(), "mobile", StringComparison.OrdinalIgnoreCase))
+                                            {
+                                                if (method.TryGetProperty("phoneNumber", out var phoneNum))
+                                                {
+                                                    mobilePhone = phoneNum.GetString();
+                                                }
+                                                break; // Only one mobile phone method per user
+                                            }
                                         }
-                                        break; // Only one mobile phone method per user
+                                    }
+
+                                    result[userId] = mobilePhone;
+                                }
+                                else
+                                {
+                                    var statusCode = response?.StatusCode ?? HttpStatusCode.InternalServerError;
+
+                                    if (statusCode == HttpStatusCode.TooManyRequests ||
+                                        statusCode == HttpStatusCode.ServiceUnavailable)
+                                    {
+                                        // Collect for retry in next round
+                                        throttledUserIds.Add(userId);
+                                        _logger.LogDebug(
+                                            "Phone methods sub-request throttled for user {UserId} (Status: {Status}), will retry",
+                                            userId, statusCode);
+                                    }
+                                    else
+                                    {
+                                        _logger.LogWarning(
+                                            "Failed to get phone methods for user {UserId} (Status: {Status})",
+                                            userId, statusCode);
+                                        result[userId] = null;
                                     }
                                 }
                             }
+                            catch (Exception ex)
+                            {
+                                _logger.LogWarning(ex, "Error processing phone methods response for user {UserId}", userId);
+                                result[userId] = null;
+                            }
+                        }
+                    }, cancellationToken);
 
-                            result[userId] = mobilePhone;
-                        }
-                        else
-                        {
-                            var statusCode = response?.StatusCode ?? HttpStatusCode.InternalServerError;
-                            _logger.LogWarning(
-                                "Failed to get phone methods for user {UserId} (Status: {Status})",
-                                userId, statusCode);
-                            result[userId] = null;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Error processing phone methods response for user {UserId}", userId);
-                        result[userId] = null;
-                    }
+                    _telemetry.IncrementCounter("GraphClient.PhoneMethodsBatchRead", batch.Length);
                 }
-
-                _telemetry.IncrementCounter("GraphClient.PhoneMethodsBatchRead", batch.Length);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Batch phone methods request failed for {Count} users", batch.Length);
-
-                // Mark all users in failed batch as null
-                foreach (var userId in batch)
+                catch (Exception ex)
                 {
-                    result.TryAdd(userId, null);
+                    _logger.LogError(ex, "Batch phone methods request failed for {Count} users after retries", batch.Length);
+
+                    // Mark all users in failed batch as null
+                    foreach (var userId in batch)
+                    {
+                        result.TryAdd(userId, null);
+                    }
                 }
+            }
+
+            // Prepare next round with only the throttled users
+            pendingUserIds = throttledUserIds;
+        }
+
+        // Any users still not resolved after all retry rounds get null
+        foreach (var userId in pendingUserIds)
+        {
+            if (!result.ContainsKey(userId))
+            {
+                _logger.LogWarning("Phone methods lookup exhausted retries for user {UserId}", userId);
+                result[userId] = null;
             }
         }
 

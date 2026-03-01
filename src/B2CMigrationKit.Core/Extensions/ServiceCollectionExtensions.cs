@@ -62,6 +62,7 @@ public static class ServiceCollectionExtensions
 
         // Register Azure Storage clients
         services.AddSingleton<IBlobStorageClient, BlobStorageClient>();
+        services.AddSingleton<IQueueClient, QueueStorageClient>();
 
         // Register B2C Credential Manager
         services.AddSingleton<ICredentialManager>(sp =>
@@ -142,6 +143,7 @@ public static class ServiceCollectionExtensions
             var authService = sp.GetRequiredService<IAuthenticationService>();
             var telemetry = sp.GetRequiredService<ITelemetryService>();
             var logger = sp.GetRequiredService<ILogger<JitMigrationService>>();
+            var queueClient = sp.GetService<IQueueClient>();
 
             // Create External ID credential manager
             var secretProvider = sp.GetService<ISecretProvider>();
@@ -161,10 +163,49 @@ public static class ServiceCollectionExtensions
             var graphServiceClient = factory.CreateClient(options.ExternalId.Scopes);
             var externalIdGraphClient = new GraphClient(graphServiceClient, retryOptions, clientLogger, telemetry);
 
-            return new JitMigrationService(authService, externalIdGraphClient, telemetry, Options.Create(options), logger);
+            return new JitMigrationService(authService, externalIdGraphClient, telemetry, Options.Create(options), logger, queueClient);
+        });
+
+        // Register a named External ID Graph client for phone migration (used by PhoneMigrationFunction)
+        services.AddScoped<ExternalIdGraphClientWrapper>(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<MigrationOptions>>().Value;
+            var telemetry = sp.GetRequiredService<ITelemetryService>();
+
+            var secretProvider = sp.GetService<ISecretProvider>();
+            var credManagerLogger = sp.GetRequiredService<ILogger<CredentialManager>>();
+            var externalIdCredManager = new CredentialManager(
+                options.ExternalId.AppRegistration,
+                options.ExternalId.TenantId,
+                secretProvider,
+                credManagerLogger);
+
+            var factoryLogger = sp.GetRequiredService<ILogger<GraphClientFactory>>();
+            var clientLogger = sp.GetRequiredService<ILogger<GraphClient>>();
+            var retryOptions = sp.GetRequiredService<IOptions<RetryOptions>>();
+
+            var factory = new GraphClientFactory(externalIdCredManager, factoryLogger, telemetry);
+            var graphServiceClient = factory.CreateClient(options.ExternalId.Scopes);
+            var graphClient = new GraphClient(graphServiceClient, retryOptions, clientLogger, telemetry);
+
+            return new ExternalIdGraphClientWrapper(graphClient);
         });
 
         return services;
+    }
+
+    /// <summary>
+    /// Wrapper to distinguish External ID Graph client from B2C Graph client in DI.
+    /// Used by PhoneMigrationFunction to resolve the correct Graph client.
+    /// </summary>
+    public class ExternalIdGraphClientWrapper
+    {
+        public IGraphClient Client { get; }
+
+        public ExternalIdGraphClientWrapper(IGraphClient client)
+        {
+            Client = client ?? throw new ArgumentNullException(nameof(client));
+        }
     }
 
     /// <summary>

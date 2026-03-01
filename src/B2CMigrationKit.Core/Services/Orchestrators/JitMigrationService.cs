@@ -15,6 +15,7 @@ public class JitMigrationService
 {
     private readonly IAuthenticationService _authService;
     private readonly IGraphClient _externalIdGraphClient;
+    private readonly IQueueClient? _queueClient;
     private readonly ITelemetryService _telemetry;
     private readonly ILogger<JitMigrationService> _logger;
     private readonly MigrationOptions _options;
@@ -24,13 +25,15 @@ public class JitMigrationService
         IGraphClient externalIdGraphClient,
         ITelemetryService telemetry,
         IOptions<MigrationOptions> options,
-        ILogger<JitMigrationService> logger)
+        ILogger<JitMigrationService> logger,
+        IQueueClient? queueClient = null)
     {
         _authService = authService ?? throw new ArgumentNullException(nameof(authService));
         _externalIdGraphClient = externalIdGraphClient ?? throw new ArgumentNullException(nameof(externalIdGraphClient));
         _telemetry = telemetry ?? throw new ArgumentNullException(nameof(telemetry));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _options = options?.Value ?? throw new ArgumentNullException(nameof(options));
+        _queueClient = queueClient;
     }
 
     /// <summary>
@@ -119,6 +122,48 @@ public class JitMigrationService
             // External ID handles password complexity validation and will prompt the user
             // to update their password if it doesn't meet the tenant's policy.
             // External ID also automatically updates the migration attribute to false.
+
+            // Step 2b: Enqueue phone migration if enabled (fire-and-forget, must not block JIT response)
+            if (_options.MigratePhoneAuthMethods && _queueClient != null)
+            {
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        var message = new PhoneMigrationMessage
+                        {
+                            UserId = userId,
+                            UserPrincipalName = userPrincipalName,
+                            CorrelationId = correlationId,
+                            Timestamp = DateTimeOffset.UtcNow,
+                            Source = "JIT"
+                        };
+
+                        await _queueClient.SendMessageAsync(
+                            _options.Storage.PhoneMigrationQueueName,
+                            message);
+
+                        _logger.LogInformation(
+                            "[JIT Migration] Phone migration message enqueued | UserId: {UserId} | CorrelationId: {CorrelationId}",
+                            userId, correlationId);
+
+                        _telemetry.IncrementCounter("JIT.PhoneMigrationEnqueued");
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex,
+                            "[JIT Migration] Failed to enqueue phone migration (non-blocking) | UserId: {UserId} | CorrelationId: {CorrelationId}",
+                            userId, correlationId);
+
+                        _telemetry.TrackException(ex, new Dictionary<string, string>
+                        {
+                            { "Operation", "JIT.PhoneMigrationEnqueue" },
+                            { "UserId", userId },
+                            { "CorrelationId", correlationId }
+                        });
+                    }
+                });
+            }
 
             var totalDuration = (DateTimeOffset.UtcNow - startTime).TotalMilliseconds;
 

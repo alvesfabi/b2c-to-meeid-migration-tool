@@ -41,4 +41,10 @@ public class StorageOptions
     /// Gets or sets whether to use Managed Identity for authentication (default: true).
     /// </summary>
     public bool UseManagedIdentity { get; set; } = true;
+
+    /// <summary>
+    /// Gets or sets the queue name for async phone MFA migration messages.
+    /// Default: "phone-migration".
+    /// </summary>
+    public string PhoneMigrationQueueName { get; set; } = "phone-migration";
 }

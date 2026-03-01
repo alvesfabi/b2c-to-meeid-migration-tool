@@ -59,6 +59,13 @@ public static class MigrationExtensionAttributes
     public const string MigrationDate = "MigrationDate";
 
     /// <summary>
+    /// Extension attribute name for storing the B2C MFA phone number.
+    /// Format: extension_{appId}_B2CMfaPhone
+    /// Used as a vehicle to pass the phone number from import to JIT/queue phone migration.
+    /// </summary>
+    public const string B2CMfaPhone = "B2CMfaPhone";
+
+    /// <summary>
     /// Gets the full extension attribute name with app ID.
     /// </summary>
     /// <param name="appId">The application ID (without hyphens).</param>

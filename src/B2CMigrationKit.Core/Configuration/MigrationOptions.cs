@@ -84,4 +84,12 @@ public class MigrationOptions
     /// </summary>
     [Range(0, 10000)]
     public int BatchDelayMs { get; set; } = 0;
+
+    /// <summary>
+    /// Gets or sets whether to migrate phone authentication methods (SMS MFA).
+    /// When true, the export reads MFA phone numbers from B2C authentication methods API,
+    /// the import stores them as extension attributes, and JIT/bulk processes register them in External ID.
+    /// Default: false.
+    /// </summary>
+    public bool MigratePhoneAuthMethods { get; set; } = false;
 }

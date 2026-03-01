@@ -14,6 +14,7 @@ This comprehensive guide provides detailed information for developers implementi
   - [Debugging JIT Function with ngrok](#debugging-jit-function-with-ngrok)
   - [VS Code Debugging Setup](#step-3b-set-up-vs-code-debugging)
 - [Attribute Mapping Configuration](#attribute-mapping-configuration)
+- [Phone MFA (SMS) Migration](#phone-mfa-sms-migration)
 - [Import Audit Logs](#import-audit-logs)
 - [Testing Strategy](#testing-strategy)
 - [Deployment Guide](#deployment-guide)
@@ -31,13 +32,13 @@ This comprehensive guide provides detailed information for developers implementi
 
 ### Design Principles
 
-The migration kit follows the SFI-Aligned Modular Architecture pattern with these key principles:
+The migration kit follows a modular architecture with these key principles:
 
 1. **Separation of Concerns**: Business logic in Core library, hosting in Console/Function
 2. **Dependency Injection**: All services registered via DI for testability
 3. **Idempotency**: All operations can be safely retried
-4. **Observability**: Comprehensive telemetry and structured logging
-5. **Security**: SFI-compliant design patterns for future production deployment
+4. **Observability**: Structured logging with optional Application Insights telemetry
+5. **Security**: Architecture designed for SFI-compliant production deployment (not yet fully implemented in this sample)
 
 ### Component Architecture
 
@@ -64,12 +65,14 @@ B2CMigrationKit.Function/  # Azure Function for JIT & sync
 - `IOrchestrator<T>` - Base interface for orchestration
 - `IGraphClient` - Microsoft Graph operations
 - `IBlobStorageClient` - Blob Storage operations
+- `IQueueClient` - Azure Queue Storage operations
 - `ITelemetryService` - Telemetry operations
 - `ICredentialManager` - Multi-app credential rotation
 - `IAuthenticationService` - Credential validation
 
 **Models**
-- `UserProfile` - User identity model
+- `UserProfile` - User identity model (includes `MfaPhoneNumber` for SMS MFA)
+- `PhoneMigrationMessage` - Queue message model for async phone migration
 - `ExecutionResult` - Operation result
 - `BatchResult` - Batch operation result
 - `PagedResult<T>` - Paged API results
@@ -80,7 +83,9 @@ B2CMigrationKit.Function/  # Azure Function for JIT & sync
 
 *Infrastructure Services*
 - `GraphClient` - Implements IGraphClient with Polly v8 resilience pipeline
-- `BlobStorageClient` - Blob operations with Managed Identity
+- `BlobStorageClient` - Blob operations with `DefaultAzureCredential` support
+- `QueueStorageClient` - Azure Queue Storage with `DefaultAzureCredential` support
+- `PhoneNumberHelper` - Phone number validation (format safety check)
 - `CredentialManager` - Round-robin credential management
 - `AuthenticationService` - ROPC-based credential validation
 
@@ -147,7 +152,7 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
 ```
 
 **App Registration Requirements:**
-- **Permissions**: `User.ReadWrite.All`, `Directory.ReadWrite.All` (for import)
+- **Permissions**: `User.ReadWrite.All`, `Directory.ReadWrite.All` (for import), `UserAuthenticationMethod.ReadWrite.All` (for phone MFA migration)
 - **Extension App ID**: Application ID (without hyphens) for extension attributes
 - **Scaling**: Deploy multiple instances with different app registrations on different IPs
 
@@ -157,6 +162,7 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
 "Storage": {
   "ConnectionStringOrUri": "https://yourstorage.blob.core.windows.net",
   "ExportContainerName": "user-exports",
+  "PhoneMigrationQueueName": "phone-migration",
   "UseManagedIdentity": true
 }
 ```
@@ -234,7 +240,7 @@ The toolkit supports dual telemetry output: console logging (local development) 
 **Telemetry Metrics:**
 - Export: `export.storage.total.bytes`, `export.throughput.users.per.second`
 - Import: `import.graph.api.calls`, `import.blob.read.bytes`
-- JIT: `JITAuth.PasswordValidated`, `JITAuth.MigrationSuccess`
+- JIT: `JIT.Started`, `JIT.ValidationFailed`, `JIT.MigrationCompleted`
 
 ## Development Workflow
 
@@ -1326,6 +1332,13 @@ Before importing, ensure all target custom attributes exist in your External ID 
 2. Create each custom attribute you plan to use
 3. Note the full attribute name: `extension_{appId}_{attributeName}`
 
+**Required attributes for migration:**
+- `B2CObjectId` (String) — Stores the original B2C user ObjectId for correlation
+- `RequiresMigration` (Boolean) — Flags whether JIT password migration is needed
+- `B2CMfaPhone` (String) — *Only if phone MFA migration is enabled*. Temporarily stores the user's B2C MFA phone number for async phone registration
+
+> **Important**: The `B2CMfaPhone` attribute is created during import and cleaned up automatically after the phone method is registered in External ID. If the attribute does not exist in the tenant, the import will fail for users with MFA phone numbers.
+
 #### 2. Extension App ID
 
 The `ExtensionAppId` (without dashes) is used to construct full attribute names:
@@ -1555,6 +1568,155 @@ Enable verbose logging to see transformation details:
   }
 }
 ```
+
+## Phone MFA (SMS) Migration
+
+### Overview
+
+The Phone MFA migration feature allows users who had SMS-based multi-factor authentication (MFA) configured in Azure AD B2C to retain their phone authentication method in Microsoft Entra External ID after migration. The feature is **opt-in** and controlled by the `MigratePhoneAuthMethods` configuration flag.
+
+### How It Works
+
+Phone migration spans all four phases of the migration process:
+
+1. **Export**: `ExportOrchestrator` reads phone authentication methods from B2C via batch Graph API calls (`GET /users/{id}/authentication/phoneMethods`) and stores mobile-type phone numbers in `UserProfile.MfaPhoneNumber`
+2. **Import**: `ImportOrchestrator` stores the phone number as an extension attribute (`extension_{appId}_B2CMfaPhone`) on the user in External ID. The phone is NOT registered as an authentication method yet.
+3. **JIT**: After successful password migration, `JitMigrationService` enqueues a `PhoneMigrationMessage` to Azure Queue Storage (fire-and-forget, does not delay the JIT response)
+4. **Queue Processing**: `PhoneMigrationFunction` (queue trigger) reads the extension attribute, validates the phone number format, registers it as an SMS authentication method via Graph API, and cleans up the extension attribute
+
+### Configuration
+
+#### Enable Phone MFA Migration
+
+Add to your `appsettings.json` (Console App) or `local.settings.json` (Azure Function):
+
+**Console App (`appsettings.json`):**
+```json
+{
+  "Migration": {
+    "MigratePhoneAuthMethods": true,
+    "Storage": {
+      "PhoneMigrationQueueName": "phone-migration"
+    },
+    "Import": {
+      "PhoneMigrationDelayMs": 100
+    }
+  }
+}
+```
+
+**Azure Function (`local.settings.json`):**
+```json
+{
+  "Values": {
+    "Migration__MigratePhoneAuthMethods": "true",
+    "Migration__Storage__PhoneMigrationQueueName": "phone-migration"
+  }
+}
+```
+
+#### Configuration Options
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `Migration:MigratePhoneAuthMethods` | bool | `false` | Master switch — enables phone export, import, and queue processing |
+| `Migration:Storage:PhoneMigrationQueueName` | string | `"phone-migration"` | Azure Queue Storage queue name for phone migration messages |
+| `Migration:Import:PhoneMigrationDelayMs` | int | `100` | Delay between phone registration API calls during bulk fallback (throttle protection) |
+
+#### Required Permissions
+
+The External ID app registration needs the following additional Graph API permission for phone migration:
+
+- `UserAuthenticationMethod.ReadWrite.All` (application permission) — required to read and write phone authentication methods
+
+### Local Development with Azurite
+
+Phone migration uses Azure Queue Storage, which is fully supported by [Azurite](https://learn.microsoft.com/en-us/azure/storage/common/storage-use-azurite) for local development.
+
+**Step 1: Ensure Azurite is running**
+
+If using the automation scripts (`Start-LocalExport.ps1`/`Start-LocalImport.ps1`), Azurite is started automatically. Otherwise:
+
+```powershell
+# Start Azurite (all services including Queue)
+azurite --silent --location .azurite --debug .azurite/debug.log
+```
+
+**Step 2: Verify queue creation**
+
+The `QueueStorageClient` automatically creates the `phone-migration` queue on first use. You can verify it exists using Azure Storage Explorer or:
+
+```powershell
+# Using Azure CLI with Azurite
+az storage queue list --connection-string "UseDevelopmentStorage=true" --output table
+```
+
+**Step 3: Run export with phone migration enabled**
+
+```powershell
+.\scripts\Start-LocalExport.ps1 -VerboseLogging
+```
+
+Look for log output like:
+```
+[Export] Fetching phone authentication methods for batch of N users...
+[Export] Found phone MFA for user X: phone present
+```
+
+**Step 4: Run import**
+
+```powershell
+.\scripts\Start-LocalImport.ps1 -Verbose
+```
+
+The import stores phone numbers as `extension_{appId}_B2CMfaPhone` attributes on users.
+
+**Step 5: Test queue processing locally**
+
+Start the Azure Function locally to process the phone migration queue:
+
+```powershell
+cd src\B2CMigrationKit.Function
+func start
+```
+
+When a JIT migration completes and enqueues a message, the `PhoneMigrationFunction` processes it:
+```
+[PhoneMigration] Processing phone migration for user: <userId>
+[PhoneMigration] Found B2CMfaPhone extension attribute
+[PhoneMigration] Phone method registered successfully
+[PhoneMigration] Cleaned up B2CMfaPhone extension attribute
+```
+
+### Phone Number Format
+
+Phone numbers exported from B2C via `GET /users/{id}/authentication/phoneMethods` are **already in the correct format** required by the Graph API: `+{country code} {subscriber number}` (e.g., `+1 5551234567`, `+44 7911123456`).
+
+The tool passes phone numbers through **as-is** without normalization. Only a basic validation check (`PhoneNumberHelper.IsValidPhoneNumber`) verifies the number starts with `+` and has sufficient digits as a safety measure. This avoids the risk of corrupting phone numbers with multi-digit country codes (e.g., `+351` Portugal, `+972` Israel).
+
+See: [Graph API phoneMethods documentation](https://learn.microsoft.com/en-us/graph/api/authentication-post-phonemethods)
+
+### Troubleshooting Phone Migration
+
+**Issue: Phone methods not exported**
+- Verify `MigratePhoneAuthMethods` is set to `true` in configuration
+- Ensure the B2C app registration has `UserAuthenticationMethod.Read.All` permission
+- Check verbose logs for errors during phone method batch requests
+
+**Issue: Queue messages not being processed**
+- Verify Azurite is running with Queue service enabled
+- Check that `AzureWebJobsStorage` is set to `UseDevelopmentStorage=true` in `local.settings.json`
+- Verify the Azure Function is running (`func start`)
+- Check the function logs for queue trigger binding errors
+
+**Issue: Phone registration fails (403/Forbidden)**
+- Ensure the External ID app registration has `UserAuthenticationMethod.ReadWrite.All` permission
+- Verify admin consent has been granted for the permission
+
+**Issue: Invalid phone number format**
+- The Graph API requires E.164 format with country code space separator
+- Check `PhoneNumberHelper.IsValidPhoneNumber()` — numbers must start with `+` and have at least 8 digits
+- Review the exported phone data for unexpected formats
 
 ## Import Audit Logs
 
@@ -1851,10 +2013,8 @@ Write-Host "Avg Batch Duration: $([math]::Round($avgDuration, 2)) ms"
 
 1. **Deploy Azure Resources**
    ```bash
-   # Deploy via Azure Portal or Bicep
-   az deployment group create \
-     --resource-group rg-b2c-migration \
-     --template-file infra/main.bicep
+   # Deploy via Azure Portal, Bicep, or Terraform (infrastructure templates not included)
+   # Create: Resource Group, Function App, Storage Account, (optional) Key Vault
    ```
 
 2. **Configure Private Endpoints** (planned for v2.0)
@@ -1908,9 +2068,11 @@ az functionapp config appsettings set \
 
 ## Operations & Monitoring
 
-### Application Insights Dashboards
+### Application Insights Queries
 
-**Migration Progress Dashboard**
+> **Note**: These are example KQL queries for use in Application Insights Log Analytics. No pre-built dashboards are included in the toolkit.
+
+**Migration Progress**
 ```kql
 let startTime = ago(24h);
 traces
@@ -1925,9 +2087,9 @@ traces
 
 **JIT Migration Tracking**
 ```kql
-customMetrics
-| where name == "JIT.MigrationsCompleted"
-| summarize MigrationsCompleted = sum(value) by bin(timestamp, 1h)
+customEvents
+| where name == "JIT.MigrationCompleted"
+| summarize MigrationsCompleted = count() by bin(timestamp, 1h)
 | render timechart
 ```
 
@@ -1938,34 +2100,6 @@ traces
 | summarize ThrottleCount = count() by bin(timestamp, 5m), severity = severityLevel
 | render timechart
 ```
-
-### Alerts Configuration
-
-**Recommended Alerts:**
-
-1. **High Failure Rate**
-   ```kql
-   traces
-   | where message contains "failed" or severityLevel >= 3
-   | summarize FailureCount = count() by bin(timestamp, 5m)
-   | where FailureCount > 10
-   ```
-
-2. **Excessive Throttling**
-   ```kql
-   traces
-   | where message contains "429"
-   | summarize ThrottleCount = count() by bin(timestamp, 5m)
-   | where ThrottleCount > 50
-   ```
-
-3. **JIT Authentication Failures**
-   ```kql
-   customMetrics
-   | where name == "JIT.CredentialValidationFailed"
-   | summarize Failures = sum(value) by bin(timestamp, 5m)
-   | where Failures > 20
-   ```
 
 ### Performance Tuning
 

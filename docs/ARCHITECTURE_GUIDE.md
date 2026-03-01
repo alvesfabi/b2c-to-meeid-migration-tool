@@ -14,6 +14,7 @@
 4. [Component Architecture](#4-component-architecture)
 5. [Bulk Migration Components](#5-bulk-migration-components)
 6. [Just-In-Time (JIT) Migration Architecture](#6-just-in-time-jit-migration-architecture)
+   - [6.5 Phone MFA (SMS) Migration](#65-phone-mfa-sms-migration)
 7. [Security Architecture](#7-security-architecture)
 8. [Scalability & Performance](#8-scalability--performance)
 9. [Deployment Topologies](#9-deployment-topologies)
@@ -31,6 +32,7 @@ The **B2C Migration Kit** is a sample solution for migrating user identities fro
 
 - **Bulk Export/Import**: Migrate users with parallel processing (validated with 181K+ users locally)
 - **Just-In-Time (JIT) Password Migration**: Seamless password validation during first login (tested with Custom Authentication Extension)
+- **Phone MFA (SMS) Migration**: Async queue-based phone authentication method registration after JIT password migration
 
 ### What will be added in the future?
 
@@ -79,7 +81,7 @@ The **B2C Migration Kit** is a sample solution for migrating user identities fro
 │  ┌──────────┐ ┌─────────┐ ┌─────────┐ ┌──────────┐            │
 │  │ Blob     │ │Key Vault│ │App      │ │ Storage  │            │
 │  │ Storage  │ │         │ │ Insights│ │ Queue    │            │
-│  │          │ │*Future  │ │         │ │ *Future* │            │
+│  │          │ │*Future  │ │         │ │          │            │
 │  └──────────┘ └─────────┘ └─────────┘ └──────────┘            │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
@@ -111,6 +113,13 @@ User Login → External ID → Custom Extension → JIT Function → B2C ROPC Va
 External ID sets password + marks migrated → Complete authentication
 ```
 
+#### Phase 4: Phone MFA Migration (Post-JIT, Async)
+```
+JIT Function → Enqueue PhoneMigrationMessage → Azure Queue Storage
+          ↓
+Queue Trigger Function → Read B2CMfaPhone extension attr → Register SMS method via Graph API
+```
+
 ---
 
 ## 3. Design Principles
@@ -136,8 +145,8 @@ External ID sets password + marks migrated → Complete authentication
 
 ### 3.2 Security First
 
-- **Private Endpoints Only**: All Azure PaaS resources (Storage, Key Vault) accessible only via private network
-- **Managed Identity**: Zero secrets in code or configuration (except Key Vault references)
+- **Private Endpoints** *(target architecture)*: All Azure PaaS resources (Storage, Key Vault) accessible only via private network
+- **Managed Identity Support**: `DefaultAzureCredential` fallback for zero-secret deployments (client secret also supported for development)
 - **Encryption Everywhere**: At rest (Storage/Key Vault) and in transit (HTTPS/TLS 1.2+)
 - **Least Privilege**: Service principals with minimal required permissions
 
@@ -152,8 +161,7 @@ External ID sets password + marks migrated → Complete authentication
 
 - **Idempotency**: Safe to retry operations without duplication
 - **Graceful Degradation**: Continue processing on non-critical failures
-- **Checkpoint/Resume**: Export/Import can restart from last successful batch
-- **Circuit Breaker**: Automatic backoff on API throttling (HTTP 429)
+- **Retry with Exponential Backoff**: Polly-based retry pipeline with configurable attempts and timeout
 
 ### 3.5 Scalability
 
@@ -175,6 +183,7 @@ B2CMigrationKit.Core/
 │   ├── IBlobStorageClient.cs         # Export/import file storage
 │   ├── IAuthenticationService.cs     # B2C ROPC validation
 │   ├── ISecretProvider.cs            # Key Vault integration
+│   ├── IQueueClient.cs               # Azure Queue Storage operations
 │   └── ITelemetryService.cs          # Custom metrics/events
 ├── Configuration/
 │   ├── MigrationOptions.cs           # Root configuration binding
@@ -184,7 +193,8 @@ B2CMigrationKit.Core/
 │   ├── StorageOptions.cs             # Blob storage configuration
 │   └── RetryOptions.cs               # Throttling/backoff settings
 ├── Models/
-│   ├── UserProfile.cs                # Unified user model
+│   ├── UserProfile.cs                # Unified user model (includes MfaPhoneNumber)
+│   ├── PhoneMigrationMessage.cs      # Queue message for async phone migration
 │   ├── ExportResult.cs               # Export operation outcome
 │   ├── ImportResult.cs               # Import operation outcome
 │   ├── JitAuthenticationRequest.cs   # JIT payload from External ID
@@ -199,6 +209,9 @@ B2CMigrationKit.Core/
 │   │   └── ExternalIdGraphClient.cs  # External ID operations
 │   ├── Storage/
 │   │   └── BlobStorageClient.cs      # Azure Blob operations
+│   ├── Infrastructure/
+│   │   ├── QueueStorageClient.cs     # Azure Queue Storage with Managed Identity
+│   │   └── PhoneNumberHelper.cs      # Phone number validation
 │   ├── Authentication/
 │   │   ├── AuthenticationService.cs  # B2C ROPC implementation
 │   │   └── RsaKeyProvider.cs         # JIT RSA key management
@@ -629,6 +642,92 @@ private static readonly SemaphoreSlim _keyLoadLock = new(1, 1);
 - Audit logging and telemetry as Fire-and-Forget
 - Use durable queue for critical non-blocking tasks
 
+### 6.5 Phone MFA (SMS) Migration
+
+#### Overview
+
+Phone MFA migration enables users who had SMS-based MFA configured in Azure AD B2C to retain their phone authentication method in External ID after migration. Because the authentication methods API has strict throttling limits (~122 requests/10 seconds per app+tenant) and the JIT function must respond within a 2-second timeout, phone migration is handled **asynchronously** via Azure Queue Storage.
+
+#### Why Async Queue-Based?
+
+| Constraint | Impact |
+|---|---|
+| JIT 2-second timeout | Cannot call phoneMethods API synchronously during JIT |
+| Auth methods API throttling | ~122 req/10s per app — much lower than user management APIs |
+| Phone method registration latency | POST to phoneMethods takes 200-500ms |
+| Non-blocking requirement | Password migration must succeed even if phone migration fails |
+
+#### Architecture Flow
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│ Phase 1: Export (Bulk)                                             │
+│                                                                    │
+│  ExportOrchestrator reads phone methods via batch Graph API:       │
+│  GET /users/{id}/authentication/phoneMethods                       │
+│                                                                    │
+│  → Extracts mobile-type phone number                               │
+│  → Stores in UserProfile.MfaPhoneNumber                            │
+│  → Exports to JSON alongside other user attributes                 │
+└────────────────────────┬───────────────────────────────────────────┘
+                         │
+                         ▼
+┌────────────────────────────────────────────────────────────────────┐
+│ Phase 2: Import (Bulk)                                             │
+│                                                                    │
+│  ImportOrchestrator stores phone number as extension attribute:     │
+│  extension_{appId}_B2CMfaPhone = "+1 5551234567"                   │
+│                                                                    │
+│  → Phone is NOT registered as auth method yet                      │
+│  → Stored temporarily for later async processing                   │
+└────────────────────────┬───────────────────────────────────────────┘
+                         │
+                         ▼
+┌────────────────────────────────────────────────────────────────────┐
+│ Phase 3: JIT Password Migration                                    │
+│                                                                    │
+│  After successful password migration:                              │
+│  JitMigrationService enqueues PhoneMigrationMessage (fire-and-     │
+│  forget via Task.Run, does NOT delay JIT response)                 │
+│                                                                    │
+│  Queue message: { UserId, UPN, CorrelationId, Timestamp, Source }  │
+└────────────────────────┬───────────────────────────────────────────┘
+                         │
+                         ▼
+┌────────────────────────────────────────────────────────────────────┐
+│ Phase 4: Phone Registration (Async Queue Trigger)                  │
+│                                                                    │
+│  PhoneMigrationFunction (Queue Trigger):                           │
+│  1. Read B2CMfaPhone extension attribute from user                 │
+│  2. Check if user already has phone method registered              │
+│  3. Validate phone number format (pass-through, no normalization)  │
+│  4. POST /users/{id}/authentication/phoneMethods                   │
+│     { phoneType: "mobile", phoneNumber: "+1 5551234567" }          │
+│  5. Clean up: remove B2CMfaPhone extension attribute               │
+│                                                                    │
+│  Auto-retries via queue visibility timeout on transient failures   │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+#### Key Design Decisions
+
+1. **Extension Attribute as Intermediate Storage**: The phone number is stored as `extension_{appId}_B2CMfaPhone` during import. This avoids needing the queue during bulk import and allows the queue trigger to read the phone number independently.
+
+2. **Fire-and-Forget Enqueue**: The JIT function enqueues the message via `Task.Run` to avoid adding latency to the 2-second JIT response window.
+
+3. **Idempotent Processing**: The queue trigger checks `HasPhoneAuthenticationMethodAsync` before registering to prevent duplicate registrations on retries.
+
+4. **Phone Number Pass-Through**: Phone numbers from B2C's `phoneMethods` API are already in the correct Graph API format (`+CC NNNNNN`). The tool passes them through as-is with only a basic validation check, avoiding the risk of corrupting numbers with multi-digit country codes. See [Graph API phoneMethods](https://learn.microsoft.com/en-us/graph/api/authentication-post-phonemethods).
+
+5. **Feature Flag**: The entire feature is opt-in via `Migration.MigratePhoneAuthMethods = true`. When disabled, no phone data is exported, imported, or queued.
+
+#### Security Measures
+
+- **No phone numbers in logs**: Phone numbers are never logged; only presence/absence is tracked
+- **Extension attribute cleanup**: `B2CMfaPhone` is removed from the user after successful registration
+- **Queue message**: Contains only UserId and UPN — no phone number in the queue message itself
+- **Managed Identity**: Queue access uses `DefaultAzureCredential` (Managed Identity in production, local credentials for development)
+
 ---
 
 ## 7. Security Architecture
@@ -719,27 +818,23 @@ resource storage 'Microsoft.Storage/storageAccounts@2023-01-01' = {
 
 #### Managed Identity Strategy
 
-All Azure services use **System-Assigned Managed Identity** (no service principals with secrets):
+Azure services **support Managed Identity** via `DefaultAzureCredential` (recommended for production). For local development, client secret authentication is used.
 
 ```
-┌──────────────────┐
-│ Azure Function   │
-│ (Managed Identity│
-│  Object ID: xxx) │
-└────────┬─────────┘
-         │
-         │ Azure RBAC
-         ▼
-┌────────────────────────────────────────────────────────────┐
-│ Azure Resources                                            │
-│                                                            │
-│ ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
-│ │ Key Vault    │  │ Blob Storage │  │ Queue        │      │
-│ │ Role:        │  │ Role:        │  │ Role:        │      │
-│ │ Get Secret   │  │ Blob Data    │  │ Queue Data   │      │
-│ │              │  │ Contributor  │  │ Contributor  │      │
-│ └──────────────┘  └──────────────┘  └──────────────┘      │
-└────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ Authentication Strategy                                      │
+│                                                              │
+│ Production (recommended):                                    │
+│   Azure Function → Managed Identity → Azure RBAC → Resources│
+│                                                              │
+│ Development:                                                 │
+│   Console/Function → Client ID + Secret → App Registration   │
+│                                                              │
+│ Required RBAC Roles (when using Managed Identity):           │
+│   Key Vault:    Key Vault Secrets User                       │
+│   Blob Storage: Storage Blob Data Contributor                │
+│   Queue:        Storage Queue Data Contributor               │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 #### Service Principal Permissions
@@ -768,14 +863,15 @@ All Azure services use **System-Assigned Managed Identity** (no service principa
 
 #### Secrets Management
 
-**Zero secrets in code or configuration files**:
-- All secrets stored in Azure Key Vault
-- Configuration uses Key Vault references:
+**Secrets Management**:
+- **Production (recommended)**: Store secrets in Azure Key Vault and use Key Vault references:
   ```json
   {
     "B2C:ClientSecret": "@Microsoft.KeyVault(SecretUri=https://kv-prod.vault.azure.net/secrets/B2CAppSecret/)"
   }
   ```
+- **Local development**: Client secrets in `appsettings.local.json` / `local.settings.json` (gitignored)
+- Key Vault integration is opt-in via `KeyVault:Enabled = true`
 
 ### 7.4 Audit & Compliance
 
@@ -886,23 +982,7 @@ var retryPolicy = Policy
         });
 ```
 
-#### Circuit Breaker Pattern
-
-```csharp
-var circuitBreakerPolicy = Policy
-    .Handle<HttpRequestException>()
-    .CircuitBreakerAsync(
-        handledEventsAllowedBeforeBreaking: 10,
-        durationOfBreak: TimeSpan.FromMinutes(1),
-        onBreak: (exception, duration) =>
-        {
-            _logger.LogError("Circuit breaker opened for {Duration}", duration);
-        },
-        onReset: () =>
-        {
-            _logger.LogInformation("Circuit breaker reset");
-        });
-```
+> **Note**: Circuit breaker pattern is not currently implemented. The retry pipeline uses Polly v8 `ResiliencePipeline` with `.AddRetry()` and `.AddTimeout()`. A circuit breaker could be added as a future enhancement.
 
 ---
 
@@ -975,8 +1055,7 @@ var circuitBreakerPolicy = Policy
 │  ┌────────────────────────────────────────────────────┐    │
 │  │ Application Insights (Log Analytics Workspace)     │    │
 │  │ - 90-day retention                                 │    │
-│  │ - Custom dashboards                                │    │
-│  │ - Alert rules                                      │    │
+│  │ - KQL queries for monitoring (see Section 10)      │    │
 │  └────────────────────────────────────────────────────┘    │
 └───────────────────┼─────────────────────────────────────────┘
                     │
@@ -990,19 +1069,21 @@ var circuitBreakerPolicy = Policy
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Characteristics**:
-- SFI-compliant private network architecture
-- Managed Identity for all Azure resource access
-- Production RSA keys in Key Vault (Premium tier with HSM)
-- Auto-scaling based on request volume
-- Comprehensive monitoring and alerting
+**Characteristics** *(target architecture — not yet implemented)*:
+- Private network architecture with Private Endpoints
+- Managed Identity for Azure resource access
+- Production RSA keys in Key Vault
+- Azure Functions auto-scaling
+- Monitoring with Application Insights
 
 
 ## 10. Operational Considerations
 
-### 10.1 Monitoring & Dashboards
+### 10.1 Monitoring
 
-#### Key Metrics
+> **Note**: The KQL queries below are examples for use in Application Insights Log Analytics. No pre-built dashboards or alert rules are included in the toolkit.
+
+#### Example KQL Queries
 
 **Migration Progress**:
 ```kql
@@ -1023,7 +1104,7 @@ traces
 **JIT Migration Success Rate**:
 ```kql
 customEvents
-| where name == "JIT_Migration_Completed"
+| where name == "JIT.MigrationCompleted"
 | extend Result = tostring(customDimensions.Result)
 | summarize 
     Total = count(),
@@ -1041,40 +1122,6 @@ traces
 | extend InstanceId = cloud_RoleInstance
 | summarize ThrottleCount = count() by InstanceId, bin(timestamp, 5m)
 | render timechart
-```
-
-### 10.2 Alerting Strategy
-
-#### Critical Alerts
-
-**1. JIT Function Failures (>5% error rate)**
-```kql
-customEvents
-| where name == "JIT_Migration_Completed"
-| extend Result = tostring(customDimensions.Result)
-| summarize 
-    Total = count(),
-    Failures = countif(Result == "Failure")
-    by bin(timestamp, 5m)
-| extend ErrorRate = (Failures * 100.0) / Total
-| where ErrorRate > 5.0
-```
-
-**2. Import/Export Stalled (No progress in 30 minutes)**
-```kql
-traces
-| where message contains "RUN SUMMARY"
-| summarize LastRun = max(timestamp)
-| where LastRun < ago(30m)
-```
-
-**3. Key Vault Access Failures**
-```kql
-AzureDiagnostics
-| where ResourceProvider == "MICROSOFT.KEYVAULT"
-| where ResultSignature == "Unauthorized"
-| summarize FailureCount = count() by bin(TimeGenerated, 5m)
-| where FailureCount > 3
 ```
 
 ---

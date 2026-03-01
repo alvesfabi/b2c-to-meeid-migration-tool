@@ -311,6 +311,152 @@ public class GraphClient : IGraphClient
         }, cancellationToken);
     }
 
+    /// <summary>
+    /// The well-known ID for the "mobile" phone authentication method in Microsoft Graph.
+    /// This is a globally fixed GUID across all Entra ID tenants.
+    /// </summary>
+    private const string MobilePhoneMethodId = "3179e48a-750b-4051-897c-87b9720928f7";
+
+    public async Task<Dictionary<string, string?>> GetPhoneAuthenticationMethodsBatchAsync(
+        IEnumerable<string> userIds,
+        CancellationToken cancellationToken = default)
+    {
+        var result = new Dictionary<string, string?>();
+        var userIdList = userIds.ToList();
+
+        if (!userIdList.Any())
+            return result;
+
+        // Graph batch limit is 20 requests per batch
+        var batches = userIdList.Chunk(20);
+
+        foreach (var batch in batches)
+        {
+            try
+            {
+                var batchRequest = new BatchRequestContentCollection(_client);
+                var requestIdToUserId = new Dictionary<string, string>();
+
+                foreach (var userId in batch)
+                {
+                    // Build GET /users/{userId}/authentication/phoneMethods
+                    var requestInfo = _client.Users[userId].Authentication.PhoneMethods
+                        .ToGetRequestInformation();
+                    var requestId = await batchRequest.AddBatchRequestStepAsync(requestInfo);
+                    requestIdToUserId[requestId] = userId;
+                }
+
+                var batchResponse = await _client.Batch.PostAsync(batchRequest, cancellationToken: cancellationToken);
+
+                foreach (var (requestId, userId) in requestIdToUserId)
+                {
+                    try
+                    {
+                        var response = await batchResponse.GetResponseByIdAsync(requestId);
+
+                        if (response != null && response.IsSuccessStatusCode)
+                        {
+                            var content = await response.Content.ReadAsStringAsync(cancellationToken);
+                            var doc = System.Text.Json.JsonDocument.Parse(content);
+
+                            string? mobilePhone = null;
+
+                            if (doc.RootElement.TryGetProperty("value", out var valueArray))
+                            {
+                                foreach (var method in valueArray.EnumerateArray())
+                                {
+                                    // Only capture "mobile" type (SMS-capable)
+                                    if (method.TryGetProperty("phoneType", out var phoneType) &&
+                                        string.Equals(phoneType.GetString(), "mobile", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        if (method.TryGetProperty("phoneNumber", out var phoneNum))
+                                        {
+                                            mobilePhone = phoneNum.GetString();
+                                        }
+                                        break; // Only one mobile phone method per user
+                                    }
+                                }
+                            }
+
+                            result[userId] = mobilePhone;
+                        }
+                        else
+                        {
+                            var statusCode = response?.StatusCode ?? HttpStatusCode.InternalServerError;
+                            _logger.LogWarning(
+                                "Failed to get phone methods for user {UserId} (Status: {Status})",
+                                userId, statusCode);
+                            result[userId] = null;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Error processing phone methods response for user {UserId}", userId);
+                        result[userId] = null;
+                    }
+                }
+
+                _telemetry.IncrementCounter("GraphClient.PhoneMethodsBatchRead", batch.Length);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Batch phone methods request failed for {Count} users", batch.Length);
+
+                // Mark all users in failed batch as null
+                foreach (var userId in batch)
+                {
+                    result.TryAdd(userId, null);
+                }
+            }
+        }
+
+        return result;
+    }
+
+    public async Task<bool> AddPhoneAuthenticationMethodAsync(
+        string userId,
+        string phoneNumber,
+        CancellationToken cancellationToken = default)
+    {
+        return await _retryPipeline.ExecuteAsync(async ct =>
+        {
+            var phoneMethod = new GraphModels.PhoneAuthenticationMethod
+            {
+                PhoneNumber = phoneNumber,
+                PhoneType = GraphModels.AuthenticationPhoneType.Mobile
+            };
+
+            await _client.Users[userId].Authentication.PhoneMethods
+                .PostAsync(phoneMethod, cancellationToken: ct);
+
+            _telemetry.IncrementCounter("GraphClient.PhoneMethodAdded");
+            _logger.LogInformation("Registered mobile phone method for user {UserId}", userId);
+
+            return true;
+        }, cancellationToken);
+    }
+
+    public async Task<bool> HasPhoneAuthenticationMethodAsync(
+        string userId,
+        CancellationToken cancellationToken = default)
+    {
+        return await _retryPipeline.ExecuteAsync(async ct =>
+        {
+            try
+            {
+                // GET /users/{id}/authentication/phoneMethods/{mobilePhoneMethodId}
+                var method = await _client.Users[userId].Authentication.PhoneMethods[MobilePhoneMethodId]
+                    .GetAsync(cancellationToken: ct);
+
+                return method?.PhoneNumber != null;
+            }
+            catch (Microsoft.Graph.Models.ODataErrors.ODataError ex) when (ex.ResponseStatusCode == 404)
+            {
+                return false;
+            }
+        }, cancellationToken);
+    }
+
     private CoreModels.UserProfile MapToUserProfile(GraphModels.User user)
     {
         var profile = new CoreModels.UserProfile

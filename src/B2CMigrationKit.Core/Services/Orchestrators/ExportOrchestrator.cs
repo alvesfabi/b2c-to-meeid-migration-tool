@@ -115,6 +115,45 @@ public class ExportOrchestrator : IOrchestrator<ExecutionResult>
 
                 if (filteredItems.Any())
                 {
+                    // Fetch MFA phone numbers if phone migration is enabled
+                    if (_options.MigratePhoneAuthMethods)
+                    {
+                        var phoneStartTime = DateTimeOffset.UtcNow;
+                        var userIdsWithValues = filteredItems
+                            .Where(u => !string.IsNullOrEmpty(u.Id))
+                            .Select(u => u.Id!)
+                            .ToList();
+
+                        if (userIdsWithValues.Any())
+                        {
+                            var phoneMethods = await _b2cGraphClient.GetPhoneAuthenticationMethodsBatchAsync(
+                                userIdsWithValues,
+                                cancellationToken);
+
+                            var phoneCount = 0;
+                            foreach (var user in filteredItems)
+                            {
+                                if (!string.IsNullOrEmpty(user.Id) &&
+                                    phoneMethods.TryGetValue(user.Id, out var phone) &&
+                                    !string.IsNullOrEmpty(phone))
+                                {
+                                    // Phone numbers from B2C's phoneMethods API are already in the
+                                    // correct Graph API format (+CC NNNNNN). No normalization needed.
+                                    user.MfaPhoneNumber = phone;
+                                    phoneCount++;
+                                }
+                            }
+
+                            var phoneDuration = (DateTimeOffset.UtcNow - phoneStartTime).TotalMilliseconds;
+                            _logger.LogInformation(
+                                "Phone methods batch: {PhoneCount}/{TotalUsers} users have mobile MFA phone | Duration: {Duration:F0}ms",
+                                phoneCount, filteredItems.Count, phoneDuration);
+
+                            _telemetry.IncrementCounter("Export.PhoneMethodsFound", phoneCount);
+                            _telemetry.TrackMetric("Export.PhoneFetchDurationMs", phoneDuration);
+                        }
+                    }
+
                     var serializeStartTime = DateTimeOffset.UtcNow;
                     
                     // Write page to blob

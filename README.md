@@ -16,7 +16,8 @@ This migration kit provides a sample solution for identity migration with:
 
 - ✅ **Bulk Export/Import** - Efficient batch processing with retry logic and throttling management
 - ✅ **Just-In-Time (JIT) Password Migration** - Seamless password migration on user's first login
-- ✅ **Full Observability** - Application Insights integration with metrics and dashboards
+- ✅ **Phone MFA (SMS) Migration** - Async queue-based phone authentication method migration
+- ✅ **Telemetry & Logging** - Structured logging with optional Application Insights integration
 
 ## 🏗️ Architecture
 
@@ -54,9 +55,19 @@ graph TB
         JIT -->|Update real password| ExtID
     end
 
+    subgraph "Phase 3: Phone MFA Migration"
+        Queue[(Azure Queue Storage)]
+        PhoneFunc[4. Phone Migration<br/>Queue Trigger]
+
+        JIT -->|Enqueue after password migrated| Queue
+        Queue -->|Process async| PhoneFunc
+        PhoneFunc -->|Register SMS MFA method| ExtID
+    end
+
     style Export fill:#0078d4,color:#fff
     style Import fill:#0078d4,color:#fff
     style JIT fill:#107c10,color:#fff
+    style PhoneFunc fill:#5c2d91,color:#fff
 ```
 
 ---
@@ -72,9 +83,10 @@ graph TB
 - **Attribute Mapping** with flexible field transformation
 - **Export Filtering** by display name pattern and user count limits
 - **Built-in Retry Logic** with exponential backoff
-- **Comprehensive Telemetry** with Application Insights integration
+- **Phone MFA (SMS) Migration** via async queue processing after JIT password migration
+- **Telemetry** with optional Application Insights integration
 - **Local Development Mode** using Azurite emulator (no Azure resources)
-- **Multi-Instance Scaling** for high-volume migrations
+- **Stateless Architecture** designed for multi-instance scaling (see Architecture Guide)
   
 > **⚠️ PREVIEW/SAMPLE STATUS**: This toolkit is currently a **sample implementation** to showcase how to implement the [Just-In-Time password migration public preview](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-migrate-passwords-just-in-time?tabs=graph) for export, import and JIT function. Production-ready features including full SFI compliance (Private Endpoints, VNet integration, automated infrastructure deployment) are planned for future releases. 
 
@@ -85,7 +97,7 @@ This migration kit includes two comprehensive guides:
 ### [Architecture Guide](docs/ARCHITECTURE_GUIDE.md)
 Complete architectural overview for solutions architects, technical leads, and security reviewers:
 - Executive summary and system design
-- Component architecture (Export, Import, JIT)
+- Component architecture (Export, Import, JIT, Phone MFA Migration)
 - Security architecture and compliance patterns
 - Scalability, performance benchmarks, and multi-instance deployments
 - Deployment topologies and operational considerations

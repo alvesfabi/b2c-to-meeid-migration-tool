@@ -25,6 +25,14 @@ public class ImportOptions
     /// Gets or sets the migration-specific attribute configuration.
     /// </summary>
     public MigrationAttributesOptions MigrationAttributes { get; set; } = new();
+
+    /// <summary>
+    /// Gets or sets the delay in milliseconds between phone authentication method registrations
+    /// during bulk import. Helps avoid Graph API throttling on auth methods endpoints.
+    /// Default: 100ms.
+    /// </summary>
+    [System.ComponentModel.DataAnnotations.Range(0, 5000)]
+    public int PhoneMigrationDelayMs { get; set; } = 100;
 }
 
 /// <summary>

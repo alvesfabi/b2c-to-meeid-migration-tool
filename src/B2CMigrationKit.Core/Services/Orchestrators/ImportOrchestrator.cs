@@ -3,6 +3,7 @@
 using B2CMigrationKit.Core.Abstractions;
 using B2CMigrationKit.Core.Configuration;
 using B2CMigrationKit.Core.Models;
+using B2CMigrationKit.Core.Services.Infrastructure;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.Text.Json;
@@ -139,6 +140,32 @@ public class ImportOrchestrator : IOrchestrator<ExecutionResult>
                                 }
                             }
 
+                            // Store B2C MFA phone number as extension attribute (if phone migration enabled and user has MFA phone)
+                            if (_options.MigratePhoneAuthMethods && !string.IsNullOrEmpty(user.MfaPhoneNumber))
+                            {
+                                var b2cMfaPhoneAttr = MigrationExtensionAttributes.GetFullAttributeName(
+                                    _options.ExternalId.ExtensionAppId,
+                                    MigrationExtensionAttributes.B2CMfaPhone);
+
+                                // Phone numbers from B2C's phoneMethods API are already in the correct
+                                // Graph API format (+CC NNNNNN). Store as-is without normalization.
+                                if (PhoneNumberHelper.IsValidPhoneNumber(user.MfaPhoneNumber))
+                                {
+                                    user.ExtensionAttributes[b2cMfaPhoneAttr] = user.MfaPhoneNumber;
+
+                                    if (_options.VerboseLogging)
+                                    {
+                                        _logger.LogDebug("Storing B2C MFA phone {Phone} as {AttrName}",
+                                            MaskPhoneNumber(user.MfaPhoneNumber), b2cMfaPhoneAttr);
+                                    }
+                                }
+                                else
+                                {
+                                    _logger.LogWarning("Invalid MFA phone format for user {UPN}, skipping phone migration",
+                                        user.UserPrincipalName);
+                                }
+                            }
+
                             // Transform UPN from B2C to External ID compatible format
                             if (!string.IsNullOrEmpty(user.UserPrincipalName))
                             {
@@ -229,6 +256,21 @@ public class ImportOrchestrator : IOrchestrator<ExecutionResult>
                             batchStartTime);
 
                         await SaveAuditLogAsync(auditLog, blobName, batchNumber, cancellationToken);
+
+                        // Bulk phone migration fallback: register phone methods for successfully created users
+                        // This is the secondary path; the primary path is JIT+Queue (async, per-user on login)
+                        if (_options.MigratePhoneAuthMethods && result.SuccessCount > 0)
+                        {
+                            var phoneMigrationCount = await BulkRegisterPhoneMethodsAsync(
+                                batch, cancellationToken);
+
+                            if (phoneMigrationCount > 0)
+                            {
+                                _logger.LogInformation(
+                                    "Bulk phone migration: registered {Count} phone methods in this batch",
+                                    phoneMigrationCount);
+                            }
+                        }
 
                         batchNumber++;
 
@@ -657,6 +699,9 @@ public class ImportOrchestrator : IOrchestrator<ExecutionResult>
             _options.ExternalId.ExtensionAppId,
             MigrationExtensionAttributes.B2CObjectId);
         var requireMigrationAttr = GetRequireMigrationAttributeName();
+        var b2cMfaPhoneAttr = MigrationExtensionAttributes.GetFullAttributeName(
+            _options.ExternalId.ExtensionAppId,
+            MigrationExtensionAttributes.B2CMfaPhone);
 
         foreach (var user in duplicateUsers)
         {
@@ -691,6 +736,12 @@ public class ImportOrchestrator : IOrchestrator<ExecutionResult>
                     updates[requireMigrationAttr] = user.ExtensionAttributes[requireMigrationAttr];
                 }
 
+                // Also update B2CMfaPhone if phone migration is enabled
+                if (_options.MigratePhoneAuthMethods && user.ExtensionAttributes.ContainsKey(b2cMfaPhoneAttr))
+                {
+                    updates[b2cMfaPhoneAttr] = user.ExtensionAttributes[b2cMfaPhoneAttr];
+                }
+
                 if (updates.Any())
                 {
                     await _externalIdGraphClient.UpdateUserAsync(existingUser.Id!, updates, cancellationToken);
@@ -706,5 +757,96 @@ public class ImportOrchestrator : IOrchestrator<ExecutionResult>
         }
 
         return updateCount;
+    }
+
+    /// <summary>
+    /// Bulk registers phone authentication methods for users that have B2C MFA phone numbers.
+    /// This is the fallback/secondary path. The primary path is JIT+Queue (async, per-user on login).
+    /// Processes users sequentially with delay to avoid auth methods API throttling (~122 req/10s).
+    /// </summary>
+    private async Task<int> BulkRegisterPhoneMethodsAsync(
+        UserProfile[] batch,
+        CancellationToken cancellationToken)
+    {
+        var b2cMfaPhoneAttr = MigrationExtensionAttributes.GetFullAttributeName(
+            _options.ExternalId.ExtensionAppId,
+            MigrationExtensionAttributes.B2CMfaPhone);
+
+        var usersWithPhone = batch
+            .Where(u => u.ExtensionAttributes.ContainsKey(b2cMfaPhoneAttr) &&
+                        u.ExtensionAttributes[b2cMfaPhoneAttr] is string phone &&
+                        !string.IsNullOrEmpty(phone))
+            .ToList();
+
+        if (!usersWithPhone.Any())
+            return 0;
+
+        var registeredCount = 0;
+
+        foreach (var user in usersWithPhone)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                break;
+
+            try
+            {
+                var phoneNumber = user.ExtensionAttributes[b2cMfaPhoneAttr] as string;
+                if (string.IsNullOrEmpty(phoneNumber) || string.IsNullOrEmpty(user.UserPrincipalName))
+                    continue;
+
+                // We need to find the user in External ID to get their new ObjectId
+                // since the batch create doesn't return IDs reliably
+                var filter = $"userPrincipalName eq '{user.UserPrincipalName}'";
+                var findResult = await _externalIdGraphClient.GetUsersAsync(
+                    pageSize: 1, select: "id", filter: filter, cancellationToken: cancellationToken);
+
+                var extIdUser = findResult.Items.FirstOrDefault();
+                if (extIdUser?.Id == null)
+                {
+                    _logger.LogWarning(
+                        "Bulk phone migration: could not find user {UPN} in External ID, skipping",
+                        user.UserPrincipalName);
+                    continue;
+                }
+
+                // Check if user already has a phone method
+                var hasPhone = await _externalIdGraphClient.HasPhoneAuthenticationMethodAsync(
+                    extIdUser.Id, cancellationToken);
+
+                if (hasPhone)
+                {
+                    _logger.LogDebug(
+                        "Bulk phone migration: user {UPN} already has phone method, skipping",
+                        user.UserPrincipalName);
+                    continue;
+                }
+
+                var success = await _externalIdGraphClient.AddPhoneAuthenticationMethodAsync(
+                    extIdUser.Id, phoneNumber, cancellationToken);
+
+                if (success)
+                {
+                    registeredCount++;
+                    _logger.LogInformation(
+                        "Bulk phone migration: registered phone {Phone} for user {UPN}",
+                        MaskPhoneNumber(phoneNumber), user.UserPrincipalName);
+                }
+
+                // Delay to avoid auth methods API throttling
+                if (_options.Import.PhoneMigrationDelayMs > 0)
+                {
+                    await Task.Delay(_options.Import.PhoneMigrationDelayMs, cancellationToken);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Bulk phone migration: failed to register phone for user {UPN}",
+                    user.UserPrincipalName);
+            }
+        }
+
+        _telemetry.IncrementCounter("Import.PhoneMethodsRegistered", registeredCount);
+        return registeredCount;
     }
 }

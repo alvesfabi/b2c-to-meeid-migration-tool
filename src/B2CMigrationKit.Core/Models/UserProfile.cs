@@ -43,9 +43,17 @@ public class UserProfile
     public List<string> OtherMails { get; set; } = new();
 
     /// <summary>
-    /// Gets or sets the user's mobile phone number.
+    /// Gets or sets the user's mobile phone number (profile property).
+    /// NOTE: This is the profile mobilePhone, NOT the MFA authentication phone.
     /// </summary>
     public string? MobilePhone { get; set; }
+
+    /// <summary>
+    /// Gets or sets the user's MFA phone number from B2C authentication methods.
+    /// Retrieved via GET /users/{id}/authentication/phoneMethods (mobile type only).
+    /// This is the actual phone used for SMS MFA, which may differ from the profile MobilePhone.
+    /// </summary>
+    public string? MfaPhoneNumber { get; set; }
 
     /// <summary>
     /// Gets or sets the user's street address.

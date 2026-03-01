@@ -92,4 +92,38 @@ public interface IGraphClient
         string password,
         bool forceChangePasswordNextSignIn = false,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets phone authentication methods for multiple users in a single batch request.
+    /// Uses Graph batch API to read /users/{id}/authentication/phoneMethods for each user.
+    /// Only returns mobile-type phone methods (SMS-capable).
+    /// </summary>
+    /// <param name="userIds">Collection of user object IDs to query.</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
+    /// <returns>Dictionary mapping userId to their mobile MFA phone number (null if none).</returns>
+    Task<Dictionary<string, string?>> GetPhoneAuthenticationMethodsBatchAsync(
+        IEnumerable<string> userIds,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Registers a phone authentication method (SMS mobile) for a user in External ID.
+    /// </summary>
+    /// <param name="userId">The user's object ID in External ID.</param>
+    /// <param name="phoneNumber">The phone number in E.164 format (e.g., "+1 5555551234").</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
+    /// <returns>True if the phone method was registered successfully.</returns>
+    Task<bool> AddPhoneAuthenticationMethodAsync(
+        string userId,
+        string phoneNumber,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Checks if a user already has a mobile phone authentication method registered.
+    /// </summary>
+    /// <param name="userId">The user's object ID.</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
+    /// <returns>True if the user already has a mobile phone method.</returns>
+    Task<bool> HasPhoneAuthenticationMethodAsync(
+        string userId,
+        CancellationToken cancellationToken = default);
 }

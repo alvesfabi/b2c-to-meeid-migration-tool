@@ -17,9 +17,9 @@
     You can open multiple terminals and run this script simultaneously,
     each pointing to a different App Registration config, to multiply throughput:
 
-      Terminal 1:  .\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app1.json
-      Terminal 2:  .\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app2.json
-      Terminal 3:  .\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app3.json
+      Terminal 1:  .\Start-LocalWorkerExport.ps1
+      Terminal 2:  .\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.worker2.json
+      Terminal 3:  .\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.worker3.json
 
     Each worker independently dequeues messages, calls Graph $batch for up to 20
     users per HTTP request, uploads results to Blob Storage, and deletes the message.
@@ -27,8 +27,8 @@
 
 .PARAMETER ConfigFile
     Path to the configuration file relative to the console project directory.
-    Default: appsettings.local.json
-    For multi-worker runs use per-app configs: appsettings.app1.json, etc.
+    Default: appsettings.worker1.json
+    For multi-worker runs use per-worker configs: appsettings.worker2.json, etc.
 
 .PARAMETER VerboseLogging
     Enable verbose (Debug-level) logging in the console application.
@@ -40,7 +40,7 @@
     .\Start-LocalWorkerExport.ps1
 
 .EXAMPLE
-    .\Start-LocalWorkerExport.ps1 -ConfigFile "appsettings.app2.json" -VerboseLogging
+    .\Start-LocalWorkerExport.ps1 -ConfigFile "appsettings.worker2.json" -VerboseLogging
 
 .EXAMPLE
     .\Start-LocalWorkerExport.ps1 -SkipAzurite
@@ -48,7 +48,7 @@
 
 param(
     [Parameter(Mandatory = $false)]
-    [string]$ConfigFile = "appsettings.local.json",
+    [string]$ConfigFile = "appsettings.worker1.json",
 
     [Parameter(Mandatory = $false)]
     [switch]$VerboseLogging,

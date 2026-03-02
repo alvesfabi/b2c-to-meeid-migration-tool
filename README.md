@@ -16,7 +16,6 @@ This migration kit provides a sample solution for identity migration with:
 
 - ✅ **Bulk Export/Import** - Efficient batch processing with retry logic and throttling management
 - ✅ **Just-In-Time (JIT) Password Migration** - Seamless password migration on user's first login
-- ✅ **Full Observability** - Application Insights integration with metrics and dashboards
 
 ## 🏗️ Architecture
 
@@ -80,18 +79,15 @@ graph TB
 
 ### ✅ Currently Available
 
-- **Master/Worker Export** - Harvest phase enqueues user IDs; N parallel workers fetch full profiles (scales to millions)
+- **Master/Worker Export** - Harvest phase enqueues user IDs; N parallel workers fetch full profiles in parallel (validated with 181K users in local dev; throughput bounded by the B2C tenant's default 200 RPS Graph API limit)
 - **Bulk User Export** from Azure AD B2C with automatic pagination (single-instance mode)
 - **Bulk User Import** to External ID with extension attributes and audit logs
 - **Async Phone Registration** - After import, MFA phone numbers are enqueued and registered in EEID at a throttle-safe rate by the `phone-registration` worker
 - **JIT Password Migration** via Custom Authentication Extension
 - **UPN Domain Transformation** preserving local-part identifiers as a workaround to enable [sign-in alias](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-sign-in-alias) functionality
-- **Attribute Mapping** with flexible field transformation
-- **Export Filtering** by display name pattern and user count limits
 - **Built-in Retry Logic** with exponential backoff
-- **Comprehensive Telemetry** with Application Insights integration
+- **Structured Logging** with optional Application Insights telemetry (requires a connection string; untested outside local development)
 - **Local Development Mode** using Azurite emulator (no Azure resources)
-- **Multi-Instance Scaling** for high-volume migrations
   
 > **⚠️ PREVIEW/SAMPLE STATUS**: This toolkit is currently a **sample implementation** to showcase how to implement the [Just-In-Time password migration public preview](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-migrate-passwords-just-in-time?tabs=graph) for export, import and JIT function. Production-ready features including full SFI compliance (Private Endpoints, VNet integration, automated infrastructure deployment) are planned for future releases. 
 
@@ -118,7 +114,7 @@ Complete technical reference for developers implementing and operating the migra
 - Attribute mapping configuration and UPN transformation
 - Import audit logs for compliance tracking
 - Scaling for high-volume migrations (>100K users)
-- Operations, monitoring with Application Insights, and troubleshooting
+- Operations, logging, and troubleshooting
 - Security best practices and deployment procedures
 
 **Target Audience:** Developers, DevOps Engineers, Operations Teams

@@ -36,7 +36,7 @@ The migration kit follows the SFI-Aligned Modular Architecture pattern with thes
 1. **Separation of Concerns**: Business logic in Core library, hosting in Console/Function
 2. **Dependency Injection**: All services registered via DI for testability
 3. **Idempotency**: All operations can be safely retried
-4. **Observability**: Comprehensive telemetry and structured logging
+4. **Observability**: ILogger-based structured logging; optional Application Insights integration (requires a connection string, untested outside local development)
 5. **Security**: SFI-compliant design patterns for future production deployment
 
 ### Component Architecture
@@ -384,8 +384,7 @@ The toolkit supports dual telemetry output: console logging (local development) 
    After import has finished (or while import is running), start the phone-registration worker to process the queue:
 
    ```powershell
-   cd src\B2CMigrationKit.Console
-   dotnet run -- phone-registration --config appsettings.Development.json --verbose
+   .\scripts\Start-LocalPhoneRegistration.ps1 -VerboseLogging
    ```
 
    The worker:
@@ -2059,9 +2058,11 @@ If you see sustained 429s, increase `PhoneRegistration.ThrottleDelayMs` in your 
 
 > **409 Conflict** is treated as a silent success — the phone was already registered in a previous run. This makes the worker fully idempotent.
 
-### Application Insights Dashboards
+### Sample Log Queries
 
-**Migration Progress Dashboard**
+> The following KQL queries are sample reference patterns. This repository does not deploy any Application Insights resources, dashboards, or alert rules. To use these queries, configure Application Insights in your environment and set `Telemetry:UseApplicationInsights: true` with a valid connection string.
+
+**Migration Progress**
 ```kql
 let startTime = ago(24h);
 traces
@@ -2090,9 +2091,11 @@ traces
 | render timechart
 ```
 
-### Alerts Configuration
+### Sample Alert Queries
 
-**Recommended Alerts:**
+> These query patterns can be used to set up alert rules in Application Insights if configured in your environment. No alert rules are deployed by this repository.
+
+**Suggested Alerts:**
 
 1. **High Failure Rate**
    ```kql

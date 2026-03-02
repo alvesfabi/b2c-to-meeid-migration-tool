@@ -9,6 +9,11 @@ This directory contains PowerShell scripts for local development, testing, and J
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
 - [Export & Import Scripts](#export--import-scripts)
+  - [Start-LocalExport.ps1](#start-localexportps1)
+  - [Start-LocalImport.ps1](#start-localimportps1)
+  - [Start-LocalHarvest.ps1](#start-localharvestps1--masterproducer-phase)
+  - [Start-LocalWorkerExport.ps1](#start-localworkerexportps1--workerconsumer-phase)
+  - [Start-LocalPhoneRegistration.ps1](#start-localphoneregistrationps1--async-phone-registration)
 - [JIT Migration Setup](#jit-migration-setup)
   - [Generate RSA Keys](#1-generate-rsa-keys)
   - [Configure External ID](#2-configure-external-id)
@@ -73,8 +78,8 @@ This directory contains PowerShell scripts for local development, testing, and J
 ### Option A – Single-instance export (simple, smaller tenants)
 
 ```powershell
-.\.scripts\Start-LocalExport.ps1     # Export all users via full pagination
-.\.scripts\Start-LocalImport.ps1     # Import to External ID
+.\scripts\Start-LocalExport.ps1     # Export all users via full pagination
+.\scripts\Start-LocalImport.ps1     # Import to External ID
 ```
 
 ### Option B – Master/Worker export (recommended for 50K+ users)
@@ -84,18 +89,21 @@ This directory contains PowerShell scripts for local development, testing, and J
 .\scripts\Start-LocalHarvest.ps1
 
 # Step 2: run in PARALLEL, each in its own terminal with its own App Registration
-.\scripts\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app1.json
-.\scripts\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app2.json
-.\scripts\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app3.json
+.\scripts\Start-LocalWorkerExport.ps1                              # Terminal 1: default config (appsettings.worker1.json)
+.\scripts\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.worker2.json  # Terminal 2
+.\scripts\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.worker3.json  # Terminal 3
 
 # Step 3: import (same as before)
 .\scripts\Start-LocalImport.ps1
+
+# Step 4: (optional) drain phone-registration queue
+.\scripts\Start-LocalPhoneRegistration.ps1
 ```
 
 **✅ What the scripts do automatically:**
 - Verify Azurite is running via the VS Code extension (port check – no npm needed)
 - Auto-detect whether local Azurite or cloud storage is configured
-- Pre-create storage containers (`user-exports`, `migration-errors`, `import-audit`) and queue (`user-ids-to-process`) via Azure CLI (if available)
+- Pre-create storage containers (`user-exports`, `migration-errors`, `import-audit`) and queues (`user-ids-to-process`, `phone-registration`) via Azure CLI (if available)
 - Build and run the console application
 - Display color-coded progress and status messages
 
@@ -162,7 +170,7 @@ enqueues batches of 20 IDs to the Azure Queue `user-ids-to-process`.
 ```
 
 **Parameters:**
-- `-ConfigFile` - Configuration file (default: `appsettings.local.json`). Use `appsettings.master.json` for a dedicated master config.
+- `-ConfigFile` - Configuration file (default: `appsettings.master.json`). Copy from `appsettings.master.example.json` and fill in your credentials.
 - `-VerboseLogging` - Enable detailed logging
 - `-SkipAzurite` - Skip Azurite port check
 
@@ -189,14 +197,38 @@ to multiply the API throttle limit by the number of workers.
 
 **Usage:**
 ```powershell
-# Terminal 1
-.\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app1.json
+# Terminal 1 (default config: appsettings.worker1.json)
+.\Start-LocalWorkerExport.ps1
 
-# Terminal 2 (simultaneously)
-.\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app2.json
+# Terminal 2 (simultaneously, dedicated config for worker 2)
+.\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.worker2.json
 
-# Terminal 3 (simultaneously)
-.\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app3.json
+# Terminal 3 (simultaneously, dedicated config for worker 3)
+.\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.worker3.json
+```
+
+**Parameters:**
+- `-ConfigFile` - Configuration file (default: `appsettings.worker1.json`). Copy from `appsettings.worker1.example.json` and fill in your credentials.
+- `-VerboseLogging` - Enable detailed logging
+- `-SkipAzurite` - Skip Azurite port check
+
+**Resilience:** if a worker crashes before ACKing a message, the message automatically
+reappears in the queue after the `MessageVisibilityTimeout` (default 5 min) and another
+worker (or a re-run) will process it.
+
+---
+
+### Start-LocalPhoneRegistration.ps1  *(Async Phone Registration)*
+
+Drains the `phone-registration` queue populated by the import phase and registers
+MFA phone numbers in Entra External ID at a throttle-safe rate (~50 calls/min by default).
+
+Run **after** (or concurrently with) `Start-LocalImport.ps1`, provided that
+`Import.PhoneRegistration.EnqueuePhoneRegistration` is set to `true` in config.
+
+**Usage:**
+```powershell
+.\Start-LocalPhoneRegistration.ps1 [-VerboseLogging] [-ConfigFile "config.json"] [-SkipAzurite]
 ```
 
 **Parameters:**
@@ -204,9 +236,20 @@ to multiply the API throttle limit by the number of workers.
 - `-VerboseLogging` - Enable detailed logging
 - `-SkipAzurite` - Skip Azurite port check
 
-**Resilience:** if a worker crashes before ACKing a message, the message automatically
-reappears in the queue after the `MessageVisibilityTimeout` (default 5 min) and another
-worker (or a re-run) will process it.
+**What it does:**
+1. Validates configuration file exists
+2. Detects storage mode (local vs cloud)
+3. Verifies Azurite ports 10000/10001 are open (VS Code extension)
+4. Builds and runs `phone-registration` worker
+5. Worker dequeues `{ upn, phoneNumber }` messages and calls `POST /users/{upn}/authentication/phoneMethods`
+6. Treats 409 Conflict as success (idempotent — phone already registered)
+7. Exits automatically after `MaxEmptyPolls` consecutive empty queue polls
+
+**Prerequisites:**
+- EEID app registration must have `UserAuthenticationMethod.ReadWrite.All` (Application) granted and admin-consented
+- Import must have run with `EnqueuePhoneRegistration: true`
+
+> **Why async?** The `POST /authentication/phoneMethods` API has a lower throttle budget than the user-creation API. Running phone registration inline with import would stall the pipeline; decoupling via queue lets each run at its own optimal rate.
 
 ---
 

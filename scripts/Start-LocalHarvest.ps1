@@ -21,8 +21,7 @@
 
 .PARAMETER ConfigFile
     Path to the configuration file relative to the console project directory.
-    Default: appsettings.local.json
-    For dedicated master config: appsettings.master.json
+    Default: appsettings.master.json (dedicated master config with Harvest section)
 
 .PARAMETER VerboseLogging
     Enable verbose (Debug-level) logging in the console application.
@@ -42,7 +41,7 @@
 
 param(
     [Parameter(Mandatory = $false)]
-    [string]$ConfigFile = "appsettings.local.json",
+    [string]$ConfigFile = "appsettings.master.json",
 
     [Parameter(Mandatory = $false)]
     [switch]$VerboseLogging,
@@ -105,9 +104,8 @@ if ($exitCode -eq 0) {
     Write-Success "  Harvest completed! Queue is populated."
     Write-Success ""
     Write-Success "  Next step – start workers (open one terminal per worker):"
-    Write-Success "    .\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app1.json"
-    Write-Success "    .\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app2.json"
-    Write-Success "    .\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app3.json"
+    Write-Success "    .\Start-LocalWorkerExport.ps1"
+    Write-Success "    .\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.worker2.json"
     Write-Success "═══════════════════════════════════════════════════════"
 } else {
     Write-Err "═══════════════════════════════════════════════════════"

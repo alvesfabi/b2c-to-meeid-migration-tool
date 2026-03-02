@@ -107,14 +107,20 @@ function Get-StorageMode {
 
 <#
 .SYNOPSIS
-    Creates the required Azure Storage containers and queue for local development.
+    Creates the required Azure Storage containers and queues for local development.
     Uses Azure CLI when available; otherwise emits a warning (resources are created
     automatically on first use).
-.PARAMETER QueueName
+.PARAMETER HarvestQueueName
     Name of the harvest queue (default: user-ids-to-process).
+.PARAMETER PhoneRegQueueName
+    Name of the phone-registration queue (default: phone-registration).
+    Pass $null or empty string to skip creating this queue.
 #>
 function Initialize-LocalStorage {
-    param([string]$QueueName = "user-ids-to-process")
+    param(
+        [string]$HarvestQueueName  = "user-ids-to-process",
+        [string]$PhoneRegQueueName = "phone-registration"
+    )
 
     Write-Info "Initializing local storage resources..."
 
@@ -137,15 +143,24 @@ function Initialize-LocalStorage {
         }
     }
 
-    # Queue for Master/Worker pattern
-    $out = az storage queue create --name $QueueName --connection-string $cs --only-show-errors 2>&1
+    # Harvest queue (Master/Worker pattern)
+    $out = az storage queue create --name $HarvestQueueName --connection-string $cs --only-show-errors 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Warn "  ⚠ Could not create queue '$QueueName' (may already exist)"
+        Write-Warn "  ⚠ Could not create queue '$HarvestQueueName' (may already exist)"
         $errors++
     }
 
+    # Phone-registration queue (async phone reg worker)
+    if ($PhoneRegQueueName) {
+        $out = az storage queue create --name $PhoneRegQueueName --connection-string $cs --only-show-errors 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "  ⚠ Could not create queue '$PhoneRegQueueName' (may already exist)"
+            $errors++
+        }
+    }
+
     if ($errors -eq 0) {
-        Write-Success "✓ Storage resources ready (containers + queue '$QueueName')"
+        Write-Success "✓ Storage resources ready (containers + queues '$HarvestQueueName', '$PhoneRegQueueName')"
     }
     else {
         Write-Warn "  Some resources could not be pre-created – the app will create them on first use."

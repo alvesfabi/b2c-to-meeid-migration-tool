@@ -2,7 +2,7 @@
 
 **Target Audience**: Solutions Architects, Technical Leads, Security Reviewers, Decision Makers
 
-**Purpose**: This document provides a comprehensive architectural overview of the B2C Migration Kit, designed for migrating millions of users from Azure AD B2C to Microsoft Entra External ID. It covers system components, design principles, scalability considerations, security measures, and deployment patterns.
+**Purpose**: This document provides a comprehensive architectural overview of the B2C Migration Kit, designed to assist with migrating users from Azure AD B2C to Microsoft Entra External ID. It covers system components, design principles, scalability considerations, security measures, and deployment patterns.
 
 ---
 
@@ -30,9 +30,9 @@
 
 ### What Is This Migration Kit?
 
-The **B2C Migration Kit** is a sample solution for migrating user identities from **Azure AD B2C** to **Microsoft Entra External ID** (formerly Azure AD for Customers). It currently supports:
+The **B2C Migration Kit** is a sample solution for migrating user identities from **Azure AD B2C** to **Microsoft Entra External ID**. It currently supports:
 
-- **Bulk Export/Import**: Migrate users with parallel processing (validated with 181K+ users locally)
+- **Bulk Export/Import**: Migrate users with parallel processing (validated with 200k users locally)
 - **Just-In-Time (JIT) Password Migration**: Seamless password validation during first login (tested with Custom Authentication Extension)
 
 ### What will be added in the future?
@@ -43,7 +43,7 @@ The **B2C Migration Kit** is a sample solution for migrating user identities fro
 ### Why Use This Kit?
 
 - **Proven Approach**: Validated migration pattern for B2C to External ID transitions
-- **Scale-Ready Design**: Architecture designed for 1M+ users with multi-instance parallelization
+- **Scale-Ready Design**: Horizontal scaling via multiple parallel workers; throughput bounded by the B2C tenant's default 200 RPS Graph API limit
 - **Zero Downtime**: Users migrate transparently on first login (no forced password resets)
 - **Local Development**: Fully functional sample for testing and validation without cloud resources
 
@@ -1091,6 +1091,8 @@ var circuitBreakerPolicy = Policy
 ## 10. Operational Considerations
 
 ### 10.1 Monitoring & Dashboards
+
+> **Note:** The KQL queries in this section are sample reference queries. This repository does not deploy any Application Insights resources, dashboards, or alert rules. To use these queries, configure Application Insights in your environment and set `Telemetry:UseApplicationInsights: true` with a valid connection string.
 
 #### Key Metrics
 

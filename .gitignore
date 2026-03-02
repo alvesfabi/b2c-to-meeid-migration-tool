@@ -68,6 +68,7 @@ artifacts/
 **/appsettings.local.json
 **/appsettings.master.json
 **/appsettings.worker*.json
+**/appsettings.import-w*.json
 **/appsettings.*.local.json
 **/.env
 **/.env.local

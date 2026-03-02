@@ -42,4 +42,11 @@ public interface IQueueClient
         string messageId, 
         string popReceipt, 
         CancellationToken cancellationToken = default);
-}
+
+    /// <summary>
+    /// Returns the approximate number of messages currently in the queue.
+    /// The count is approximate because messages may be in-flight (invisible).
+    /// </summary>
+    Task<int> GetQueueLengthAsync(
+        string queueName,
+        CancellationToken cancellationToken = default);}

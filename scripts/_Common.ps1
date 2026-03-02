@@ -23,8 +23,19 @@ $AZURITE_QUEUE_PORT = 10001
 
 function Test-PortOpen {
     param([int]$Port)
-    $result = Test-NetConnection -ComputerName localhost -Port $Port -InformationLevel Quiet -WarningAction SilentlyContinue 2>$null
-    return $result
+    # Use a raw TcpClient instead of Test-NetConnection to avoid the
+    # "Attempting TCP connect" progress message and IPv6 resolution delays.
+    try {
+        $tcp = [System.Net.Sockets.TcpClient]::new()
+        $task = $tcp.ConnectAsync('127.0.0.1', $Port)
+        $completed = $task.Wait(1000)   # 1 second timeout
+        $connected = $completed -and $tcp.Connected
+        $tcp.Close()
+        return $connected
+    }
+    catch {
+        return $false
+    }
 }
 
 <#

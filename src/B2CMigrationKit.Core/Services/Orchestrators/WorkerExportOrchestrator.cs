@@ -180,6 +180,38 @@ public class WorkerExportOrchestrator : IOrchestrator<ExecutionResult>
                             fetchMs, uploadMs, totalMs,
                             summary.TotalItems, rate);
 
+                        // Progress checkpoint every 50 blobs
+                        if (blobCounter % 50 == 0)
+                        {
+                            var remainingMessages = await _queueClient.GetQueueLengthAsync(queueName, cancellationToken);
+                            var etaSeconds = (rate > 0 && remainingMessages > 0)
+                                ? (remainingMessages * 20) / rate  // each message = ~20 users
+                                : 0;
+                            var eta = etaSeconds > 0
+                                ? TimeSpan.FromSeconds(etaSeconds).ToString(@"hh\:mm\:ss")
+                                : "unknown";
+
+                            _logger.LogInformation(
+                                "╔══════════════════════════════════════════════════╗\n" +
+                                "  PROGRESS CHECKPOINT (every 50 blobs)\n" +
+                                "  Prefix          : {Prefix}\n" +
+                                "  Users exported  : {Total:N0}\n" +
+                                "  Blobs written   : {Blobs:N0}\n" +
+                                "  Queue remaining : {Remaining:N0} msgs (~{RemainingUsers:N0} users)\n" +
+                                "  Elapsed         : {Elapsed}\n" +
+                                "  Rate            : {Rate:F1} users/s\n" +
+                                "  ETA             : {ETA}\n" +
+                                "╚══════════════════════════════════════════════════╝",
+                                _blobPrefix,
+                                summary.TotalItems,
+                                blobCounter,
+                                remainingMessages < 0 ? "?" : remainingMessages,
+                                remainingMessages < 0 ? "?" : remainingMessages * 20,
+                                TimeSpan.FromSeconds(elapsed).ToString(@"hh\:mm\:ss"),
+                                rate,
+                                eta);
+                        }
+
                         _telemetry.IncrementCounter("WorkerExport.UsersExported", profiles.Count);
                         _telemetry.TrackMetric("WorkerExport.BatchTotalMs", totalMs);
                         _telemetry.TrackMetric("WorkerExport.FetchMs", fetchMs);

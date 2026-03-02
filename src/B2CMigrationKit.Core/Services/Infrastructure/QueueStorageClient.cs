@@ -109,4 +109,19 @@ public class QueueStorageClient : IQueueClient
             throw;
         }
     }
+
+    public async Task<int> GetQueueLengthAsync(string queueName, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var queueClient = _serviceClient.GetQueueClient(queueName);
+            var properties = await queueClient.GetPropertiesAsync(cancellationToken);
+            return properties.Value.ApproximateMessagesCount;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not get queue length for {QueueName}", queueName);
+            return -1;
+        }
+    }
 }

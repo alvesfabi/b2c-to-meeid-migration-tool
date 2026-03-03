@@ -3,25 +3,29 @@
 namespace B2CMigrationKit.Core.Models;
 
 /// <summary>
-/// Queue message payload for an async phone-authentication-method registration task.
-/// Produced by ImportOrchestrator, consumed by PhoneRegistrationWorker.
+/// Queue message enqueued by <c>worker-migrate</c> and consumed by <c>worker-phone</c>.
+///
+/// Intentionally contains only identifiers — no phone number.
+/// The phone worker fetches the MFA phone from B2C itself
+/// (GET /users/{B2CUserId}/authentication/phoneMethods/{mobilePhoneMethodId})
+/// so that sensitive phone data never sits in queue messages.
 /// </summary>
 public class PhoneRegistrationMessage
 {
     /// <summary>
-    /// The user's UPN in Entra External ID after import (e.g. user_contoso.com#EXT#@tenant.onmicrosoft.com).
-    /// Used as the identifier for POST /users/{upn}/authentication/phoneMethods.
+    /// The original B2C object ID (GUID). Used by the phone worker to look up
+    /// the MFA phone number via GET /authentication/phoneMethods.
     /// </summary>
-    public string Upn { get; set; } = string.Empty;
+    public string B2CUserId { get; set; } = string.Empty;
 
     /// <summary>
-    /// The phone number exported from B2C (mobilePhone field).
-    /// Must be in E.164-ish format accepted by Graph: "+{cc} {number}", e.g. "+1 2065551234".
+    /// The user's UPN in Entra External ID (post-domain-swap).
+    /// Used as the target for POST /users/{EEIDUpn}/authentication/phoneMethods.
     /// </summary>
-    public string PhoneNumber { get; set; } = string.Empty;
+    public string EEIDUpn { get; set; } = string.Empty;
 
     /// <summary>
-    /// Number of times this message has been retried (incremented by the worker on transient failure).
+    /// Number of times this message has been retried.
     /// </summary>
     public int RetryCount { get; set; } = 0;
 }

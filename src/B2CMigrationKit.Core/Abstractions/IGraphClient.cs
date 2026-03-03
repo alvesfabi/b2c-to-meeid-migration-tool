@@ -122,4 +122,25 @@ public interface IGraphClient
         IEnumerable<string> userIds,
         string? select = null,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Fetches the registered mobile MFA phone number for a single user from B2C.
+    /// Calls <c>GET /users/{userId}/authentication/phoneMethods/3179e48a-750b-4051-897c-87b9720928f7</c>.
+    ///
+    /// This endpoint belongs to the <c>authenticationMethod</c> Graph resource family with a
+    /// documented per-app-per-tenant limit of 5 requests / 10 seconds (0.5 RPS).
+    /// Callers must enforce a minimum 2 000 ms delay between consecutive calls.
+    ///
+    /// Requires <c>UserAuthenticationMethod.Read.All</c> on the B2C tenant.
+    /// </summary>
+    /// <param name="userId">The user's B2C object ID.</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
+    /// <returns>
+    /// The phone number string (e.g. "+1 2065551234") if the user has a registered
+    /// mobile phone authentication method; <c>null</c> if the user has no such method
+    /// (HTTP 404) or if the method entry has no phone number set.
+    /// </returns>
+    Task<string?> GetMfaPhoneNumberAsync(
+        string userId,
+        CancellationToken cancellationToken = default);
 }

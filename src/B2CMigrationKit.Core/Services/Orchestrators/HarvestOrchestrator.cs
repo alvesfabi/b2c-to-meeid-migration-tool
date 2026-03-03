@@ -10,18 +10,17 @@ using System.Text.Json;
 namespace B2CMigrationKit.Core.Services.Orchestrators;
 
 /// <summary>
-/// Master / Producer phase of the Master-Worker export pattern.
+/// Master / Producer phase of the unified migration pipeline.
 ///
 /// Performs a single, extremely fast pass through all B2C users requesting
 /// ONLY the 'id' field (page size up to 999). IDs are grouped into batches of
 /// <see cref="HarvestOptions.IdsPerMessage"/> and each batch is enqueued as one
 /// Azure Queue message (JSON array of strings).
 ///
-/// Workers (<see cref="WorkerExportOrchestrator"/>) independently dequeue messages,
-/// resolve full user profiles via the Graph $batch API, and upload results to
-/// Blob Storage — with no file I/O and no inter-process coordination needed.
-/// Azure Queue's visibility-timeout provides free retry semantics: if a worker
-/// crashes, the message reappears after the timeout and another worker picks it up.
+/// Workers (<see cref="WorkerMigrateOrchestrator"/>) independently dequeue messages,
+/// resolve full user profiles via the Graph $batch API, apply transformations,
+/// create users in Entra External ID, and enqueue phone-registration tasks —
+/// with no file I/O and no inter-process coordination needed.
 /// </summary>
 public class HarvestOrchestrator : IOrchestrator<ExecutionResult>
 {
@@ -70,7 +69,7 @@ public class HarvestOrchestrator : IOrchestrator<ExecutionResult>
             _logger.LogInformation("B2C page size   : {PageSize} (requesting only 'id')", pageSize);
             _telemetry.TrackEvent("Harvest.Started");
 
-            // Ensure the queue exists
+            // Ensure the migration queue exists
             await _queueClient.CreateQueueIfNotExistsAsync(queueName, cancellationToken);
 
             var pageNumber = 0;
@@ -144,10 +143,8 @@ public class HarvestOrchestrator : IOrchestrator<ExecutionResult>
                 "B2C pages fetched  : {Pages}\n" +
                 "Duration           : {Duration}\n" +
                 "Rate               : {Rate:F1} IDs/second\n" +
-                "\n--- NEXT STEP: start workers (any number, each with its own config) ---\n" +
-                "  worker-export --config appsettings.app1.json\n" +
-                "  worker-export --config appsettings.app2.json\n" +
-                "  worker-export --config appsettings.app3.json",
+                "\n--- NEXT STEP: start workers ---\n" +
+                "  worker-migrate --config appsettings.worker1.json",
                 summary.TotalItems, messagesEnqueued, queueName,
                 pageNumber, summary.Duration, finalRate);
 

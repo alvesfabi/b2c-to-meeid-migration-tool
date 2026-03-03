@@ -16,9 +16,10 @@ namespace B2CMigrationKit.Core.Services.Orchestrators;
 /// Design rationale
 /// ----------------
 /// The /authentication/phoneMethods endpoint has a much lower throttle budget than the
-/// main /users endpoint. Running it inline during import would stall the entire pipeline.
-/// Instead, ImportOrchestrator just enqueues { upn, phoneNumber } messages, and this worker
-/// drains the queue independently at a configurable, throttle-safe rate.
+/// main /users endpoint. Running it inline during WorkerMigrateOrchestrator would stall
+/// the entire create pipeline. Instead, WorkerMigrateOrchestrator enqueues lightweight
+/// { B2CUserId, EEIDUpn } messages (no phone number stored in the queue), and this worker
+/// fetches the phone number from B2C at drain time, then registers it in EEID.
 ///
 /// Throttle strategy
 /// -----------------
@@ -29,24 +30,32 @@ namespace B2CMigrationKit.Core.Services.Orchestrators;
 ///   exponential back-off.  If all retries are exhausted the message is NOT deleted; it
 ///   becomes visible again after the visibility timeout for another attempt.
 /// - HTTP 409 (already registered) is treated as success by GraphClient.RegisterPhoneAuthMethodAsync.
+/// - All outcomes (PhoneRegistered / PhoneSkipped / PhoneFailed) are written to Azure
+///   Table Storage via <see cref="ITableStorageClient"/>.
 /// </summary>
 public class PhoneRegistrationWorker : IOrchestrator<ExecutionResult>
 {
-    private readonly IGraphClient _externalIdGraphClient;
+    private readonly IGraphClient _b2cGraphClient;
+    private readonly IGraphClient _eeidGraphClient;
     private readonly IQueueClient _queueClient;
+    private readonly ITableStorageClient _tableClient;
     private readonly ITelemetryService _telemetry;
     private readonly ILogger<PhoneRegistrationWorker> _logger;
     private readonly MigrationOptions _options;
 
     public PhoneRegistrationWorker(
-        IGraphClient externalIdGraphClient,
+        IGraphClient b2cGraphClient,
+        IGraphClient eeidGraphClient,
         IQueueClient queueClient,
+        ITableStorageClient tableClient,
         ITelemetryService telemetry,
         IOptions<MigrationOptions> options,
         ILogger<PhoneRegistrationWorker> logger)
     {
-        _externalIdGraphClient = externalIdGraphClient ?? throw new ArgumentNullException(nameof(externalIdGraphClient));
+        _b2cGraphClient = b2cGraphClient ?? throw new ArgumentNullException(nameof(b2cGraphClient));
+        _eeidGraphClient = eeidGraphClient ?? throw new ArgumentNullException(nameof(eeidGraphClient));
         _queueClient = queueClient ?? throw new ArgumentNullException(nameof(queueClient));
+        _tableClient = tableClient ?? throw new ArgumentNullException(nameof(tableClient));
         _telemetry = telemetry ?? throw new ArgumentNullException(nameof(telemetry));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _options = options?.Value ?? throw new ArgumentNullException(nameof(options));
@@ -64,15 +73,18 @@ public class PhoneRegistrationWorker : IOrchestrator<ExecutionResult>
             StartTime = DateTimeOffset.UtcNow
         };
 
+        var auditTable = _options.Storage.AuditTableName;
+
         _logger.LogInformation(
-            "[PhoneReg] Starting worker | Queue: {Queue} | ThrottleDelay: {Delay}ms | VisibilityTimeout: {Timeout}s",
-            queueName, opts.ThrottleDelayMs, opts.MessageVisibilityTimeoutSeconds);
+            "[PhoneReg] Starting worker | Queue: {Queue} | ThrottleDelay: {Delay}ms | VisibilityTimeout: {Timeout}s | AuditTable: {Table}",
+            queueName, opts.ThrottleDelayMs, opts.MessageVisibilityTimeoutSeconds, auditTable);
 
         _telemetry.TrackEvent("PhoneRegistration.Started");
 
         try
         {
             await _queueClient.CreateQueueIfNotExistsAsync(queueName, cancellationToken);
+            await _tableClient.EnsureTableExistsAsync(auditTable, cancellationToken);
 
             int emptyPolls = 0;
             int processed = 0;
@@ -126,36 +138,69 @@ public class PhoneRegistrationWorker : IOrchestrator<ExecutionResult>
                     continue;
                 }
 
-                if (task is null || string.IsNullOrWhiteSpace(task.Upn) || string.IsNullOrWhiteSpace(task.PhoneNumber))
+                if (task is null || string.IsNullOrWhiteSpace(task.B2CUserId) || string.IsNullOrWhiteSpace(task.EEIDUpn))
                 {
                     _logger.LogWarning(
-                        "[PhoneReg] Message {Id} has empty UPN or phone number — deleting.", messageId);
+                        "[PhoneReg] Message {Id} is missing B2CUserId or EEIDUpn — deleting.", messageId);
                     await SafeDeleteAsync(queueName, messageId, popReceipt, cancellationToken);
                     failed++;
                     continue;
                 }
 
                 _logger.LogDebug(
-                    "[PhoneReg] Processing UPN: {Upn} | Phone: {Phone} | RetryCount: {Retry}",
-                    task.Upn, MaskPhone(task.PhoneNumber), task.RetryCount);
+                    "[PhoneReg] Processing B2CUserId: {B2CId} | EEIDUpn: {Upn} | RetryCount: {Retry}",
+                    task.B2CUserId, task.EEIDUpn, task.RetryCount);
+
+                var opStart = DateTimeOffset.UtcNow;
 
                 try
                 {
-                    await _externalIdGraphClient.RegisterPhoneAuthMethodAsync(
-                        task.Upn,
-                        task.PhoneNumber,
-                        cancellationToken);
+                    // 1. Fetch MFA phone number from B2C (not stored in the queue message)
+                    var phoneNumber = await _b2cGraphClient.GetMfaPhoneNumberAsync(
+                        task.B2CUserId, cancellationToken);
 
-                    // Delete message only after confirmed success (or 409-already-exists, handled inside GraphClient)
+                    if (string.IsNullOrWhiteSpace(phoneNumber))
+                    {
+                        // User has no MFA phone registered in B2C — nothing to migrate
+                        var skipMs = (long)(DateTimeOffset.UtcNow - opStart).TotalMilliseconds;
+                        _logger.LogInformation(
+                            "[PhoneReg] No phone found for B2CUserId {B2CId} ({Upn}) — skipping.",
+                            task.B2CUserId, task.EEIDUpn);
+
+                        await _tableClient.UpsertAuditRecordAsync(
+                            MigrationAuditRecord.CreatePhone(
+                                task.B2CUserId, task.EEIDUpn, "PhoneSkipped", skipMs),
+                            auditTable, cancellationToken);
+
+                        await SafeDeleteAsync(queueName, messageId, popReceipt, cancellationToken);
+                        succeeded++;
+                        _telemetry.IncrementCounter("PhoneRegistration.Skipped");
+                        continue;
+                    }
+
+                    // 2. Register the phone in EEID
+                    await _eeidGraphClient.RegisterPhoneAuthMethodAsync(
+                        task.EEIDUpn, phoneNumber, cancellationToken);
+
+                    var regMs = (long)(DateTimeOffset.UtcNow - opStart).TotalMilliseconds;
+
+                    await _tableClient.UpsertAuditRecordAsync(
+                        MigrationAuditRecord.CreatePhone(
+                            task.B2CUserId, task.EEIDUpn, "PhoneRegistered", regMs),
+                        auditTable, cancellationToken);
+
+                    // Delete message only after confirmed success
                     await SafeDeleteAsync(queueName, messageId, popReceipt, cancellationToken);
                     succeeded++;
 
                     _logger.LogInformation(
-                        "[PhoneReg] ✅ Registered phone for {Upn}", task.Upn);
+                        "[PhoneReg] Registered phone for {Upn} (B2C: {B2CId}) in {Ms}ms",
+                        task.EEIDUpn, task.B2CUserId, regMs);
 
                     _telemetry.TrackEvent("PhoneRegistration.Success", new Dictionary<string, string>
                     {
-                        { "Upn", task.Upn }
+                        { "EEIDUpn", task.EEIDUpn },
+                        { "B2CUserId", task.B2CUserId }
                     });
                 }
                 catch (OperationCanceledException)
@@ -167,15 +212,27 @@ public class PhoneRegistrationWorker : IOrchestrator<ExecutionResult>
                 {
                     // Do NOT delete the message — it will become visible again after visibilityTimeout
                     // and be retried (by this worker or another instance).
+                    var failMs = (long)(DateTimeOffset.UtcNow - opStart).TotalMilliseconds;
                     failed++;
 
+                    var errCode = ex is Microsoft.Graph.Models.ODataErrors.ODataError oErr
+                        ? oErr.ResponseStatusCode.ToString()
+                        : ex.GetType().Name;
+
+                    await _tableClient.UpsertAuditRecordAsync(
+                        MigrationAuditRecord.CreatePhone(
+                            task.B2CUserId, task.EEIDUpn, "PhoneFailed", failMs,
+                            errCode, ex.Message),
+                        auditTable, cancellationToken);
+
                     _logger.LogWarning(ex,
-                        "[PhoneReg] ❌ Failed to register phone for {Upn} (attempt {Attempt}) — message will be retried after visibility timeout.",
-                        task.Upn, task.RetryCount + 1);
+                        "[PhoneReg] Failed to register phone for {Upn} / B2C {B2CId} (attempt {Attempt}) — will retry after visibility timeout.",
+                        task.EEIDUpn, task.B2CUserId, task.RetryCount + 1);
 
                     _telemetry.TrackEvent("PhoneRegistration.Failed", new Dictionary<string, string>
                     {
-                        { "Upn", task.Upn },
+                        { "EEIDUpn", task.EEIDUpn },
+                        { "B2CUserId", task.B2CUserId },
                         { "RetryCount", task.RetryCount.ToString() },
                         { "Error", ex.Message }
                     });
@@ -250,10 +307,4 @@ public class PhoneRegistrationWorker : IOrchestrator<ExecutionResult>
         }
     }
 
-    /// <summary>Masks a phone number for safe logging: "+1 206555****"</summary>
-    private static string MaskPhone(string phone)
-    {
-        if (phone.Length <= 4) return "****";
-        return phone[..^4] + "****";
-    }
 }

@@ -74,6 +74,8 @@ public class MigrationOptions
     /// </summary>
     public PhoneRegistrationOptions PhoneRegistration { get; set; } = new();
 
+
+
     /// <summary>
     /// Gets or sets the batch size for operations (default: 100).
     /// </summary>

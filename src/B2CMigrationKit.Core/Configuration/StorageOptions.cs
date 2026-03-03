@@ -41,4 +41,12 @@ public class StorageOptions
     /// Gets or sets whether to use Managed Identity for authentication (default: true).
     /// </summary>
     public bool UseManagedIdentity { get; set; } = true;
+
+    /// <summary>
+    /// Azure Table Storage table name for migration audit records.
+    /// Each <c>worker-migrate</c> user-create and <c>worker-phone</c> phone-register
+    /// outcome is written here as a searchable row.
+    /// Default: "migration-audit"
+    /// </summary>
+    public string AuditTableName { get; set; } = "migration-audit";
 }

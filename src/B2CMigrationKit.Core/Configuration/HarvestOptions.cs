@@ -9,16 +9,19 @@ namespace B2CMigrationKit.Core.Configuration;
 ///
 /// The master performs a single, extremely fast pass through all B2C users
 /// requesting ONLY the 'id' field (up to 999 per page). It groups the IDs
-/// into batches and enqueues each batch as one Azure Queue message.
-/// Workers (WorkerExportOrchestrator) then dequeue messages independently,
-/// fetch full user profiles via the Graph $batch API, and upload the results
-/// to Blob Storage — all without any file I/O or inter-process coordination.
+/// into batches of <see cref="IdsPerMessage"/> and enqueues each batch as one
+/// Azure Queue message (JSON array of strings).
+///
+/// <c>worker-migrate</c> instances dequeue these messages independently,
+/// resolve full user profiles via the Graph $batch API, create users in
+/// Entra External ID, and enqueue phone-registration tasks — all without
+/// any file I/O or inter-process coordination.
 /// </summary>
 public class HarvestOptions
 {
     /// <summary>
     /// Gets or sets the Azure Queue name where user-ID batches will be enqueued.
-    /// All workers must point to the same queue name.
+    /// All <c>worker-migrate</c> instances must point to the same queue.
     /// Default: "user-ids-to-process"
     /// </summary>
     public string QueueName { get; set; } = "user-ids-to-process";

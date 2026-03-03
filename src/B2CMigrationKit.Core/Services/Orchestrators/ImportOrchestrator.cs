@@ -10,11 +10,20 @@ using System.Text.Json;
 namespace B2CMigrationKit.Core.Services.Orchestrators;
 
 /// <summary>
-/// Orchestrates the bulk import of users from Blob Storage to Entra External ID.
+/// Master / Producer phase of the import pipeline.
+///
+/// Reads the prepared <c>users_*.json</c> blobs that were written during the
+/// export phase, applies all attribute transformations, and enqueues each user
+/// as an individual message on the <c>users-to-import</c> Azure Queue.
+/// Optionally also enqueues a companion message to the <c>phone-registration</c>
+/// queue for users who have an MFA phone number.
+///
+/// The actual user-creation calls against Entra External ID are made by
+/// <see cref="WorkerImportOrchestrator"/> instances that drain the queue in
+/// parallel, each using their own app registration.
 /// </summary>
 public class ImportOrchestrator : IOrchestrator<ExecutionResult>
 {
-    private readonly IGraphClient _externalIdGraphClient;
     private readonly IBlobStorageClient _blobClient;
     private readonly IQueueClient _queueClient;
     private readonly ITelemetryService _telemetry;
@@ -22,14 +31,12 @@ public class ImportOrchestrator : IOrchestrator<ExecutionResult>
     private readonly MigrationOptions _options;
 
     public ImportOrchestrator(
-        IGraphClient externalIdGraphClient,
         IBlobStorageClient blobClient,
         IQueueClient queueClient,
         ITelemetryService telemetry,
         IOptions<MigrationOptions> options,
         ILogger<ImportOrchestrator> logger)
     {
-        _externalIdGraphClient = externalIdGraphClient ?? throw new ArgumentNullException(nameof(externalIdGraphClient));
         _blobClient = blobClient ?? throw new ArgumentNullException(nameof(blobClient));
         _queueClient = queueClient ?? throw new ArgumentNullException(nameof(queueClient));
         _telemetry = telemetry ?? throw new ArgumentNullException(nameof(telemetry));
@@ -41,9 +48,478 @@ public class ImportOrchestrator : IOrchestrator<ExecutionResult>
     {
         var summary = new RunSummary
         {
-            OperationName = "External ID User Import",
+            OperationName = "Import Master — Enqueue Users",
             StartTime = DateTimeOffset.UtcNow
         };
+
+        long totalBlobBytesRead = 0;
+        int usersEnqueued = 0;
+        int phonesEnqueued = 0;
+
+        try
+        {
+            _logger.LogInformation("=== IMPORT MASTER START ===");
+            _telemetry.TrackEvent("Import.Started");
+
+            // Validate extension attributes configuration
+            ValidateExtensionAttributes();
+
+            // ---------------------------------------------------------------
+            // Ensure queues exist
+            // ---------------------------------------------------------------
+            var importQueueName = _options.Import.QueueName;
+            await _queueClient.CreateQueueIfNotExistsAsync(importQueueName, cancellationToken);
+            _logger.LogInformation("Queue ready: {Queue}", importQueueName);
+
+            if (_options.Import.PhoneRegistration.EnqueuePhoneRegistration)
+            {
+                var phoneQueueName = _options.PhoneRegistration.QueueName;
+                await _queueClient.CreateQueueIfNotExistsAsync(phoneQueueName, cancellationToken);
+                _logger.LogInformation("Queue ready: {Queue}", phoneQueueName);
+            }
+
+            // ---------------------------------------------------------------
+            // Load phone-harvest lookup (phones_*.json blobs written by phone-harvest workers)
+            // ---------------------------------------------------------------
+            var phoneLookup = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var phoneBlobs = (await _blobClient.ListBlobsAsync(
+                _options.Storage.ExportContainerName,
+                "phones_",
+                cancellationToken)).ToList();
+
+            foreach (var phoneBlobName in phoneBlobs)
+            {
+                try
+                {
+                    var phoneJson = await _blobClient.ReadBlobAsync(
+                        _options.Storage.ExportContainerName,
+                        phoneBlobName,
+                        cancellationToken);
+                    var phoneEntries = JsonSerializer.Deserialize<List<PhoneLookupEntry>>(phoneJson);
+                    if (phoneEntries != null)
+                    {
+                        foreach (var entry in phoneEntries)
+                        {
+                            phoneLookup[entry.UserId] = entry.PhoneNumber;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Could not read phone lookup blob {Blob} — skipping.", phoneBlobName);
+                }
+            }
+
+            _logger.LogInformation(
+                "Phone lookup loaded: {Count:N0} users have an MFA phone number (from {BlobCount} phone blob(s)).",
+                phoneLookup.Count, phoneBlobs.Count);
+
+            // ---------------------------------------------------------------
+            // List all export blobs
+            // ---------------------------------------------------------------
+            var blobs = await _blobClient.ListBlobsAsync(
+                _options.Storage.ExportContainerName,
+                _options.Storage.ExportBlobPrefix,
+                cancellationToken);
+
+            var blobList = blobs.OrderBy(b => b).ToList();
+            _logger.LogInformation("Found {Count} export blob(s) to process", blobList.Count);
+
+            // ---------------------------------------------------------------
+            // For each blob, for each user: transform then enqueue
+            // ---------------------------------------------------------------
+            foreach (var blobName in blobList)
+            {
+                if (cancellationToken.IsCancellationRequested) break;
+
+                try
+                {
+                    var json = await _blobClient.ReadBlobAsync(
+                        _options.Storage.ExportContainerName,
+                        blobName,
+                        cancellationToken);
+
+                    totalBlobBytesRead += System.Text.Encoding.UTF8.GetByteCount(json);
+
+                    var users = JsonSerializer.Deserialize<List<UserProfile>>(json);
+
+                    if (users == null || !users.Any())
+                    {
+                        _logger.LogWarning("Blob {Blob} contains no users, skipping.", blobName);
+                        continue;
+                    }
+
+                    _logger.LogInformation("Enqueuing {Count} users from {Blob}", users.Count, blobName);
+
+                    foreach (var user in users)
+                    {
+                        if (cancellationToken.IsCancellationRequested) break;
+
+                        // Enrich with MFA phone number from phone-harvest phase
+                        if (user.Id != null && phoneLookup.TryGetValue(user.Id, out var mfaPhone))
+                        {
+                            user.MfaPhoneNumber = mfaPhone;
+                        }
+
+                        // ---- Apply all transformations before enqueueing ----
+
+                        ApplyAttributeMappings(user);
+
+                        if (_options.Import.MigrationAttributes.StoreB2CObjectId)
+                        {
+                            var b2cObjectIdAttr = GetB2CObjectIdAttributeName();
+                            user.ExtensionAttributes[b2cObjectIdAttr] = user.Id!;
+
+                            if (_options.VerboseLogging)
+                                _logger.LogDebug("Storing B2C ObjectId {ObjectId} as {AttrName}", user.Id, b2cObjectIdAttr);
+                        }
+
+                        if (_options.Import.MigrationAttributes.SetRequireMigration)
+                        {
+                            var requireMigrationAttr = GetRequireMigrationAttributeName();
+                            user.ExtensionAttributes[requireMigrationAttr] = true;
+
+                            if (_options.VerboseLogging)
+                                _logger.LogDebug("Setting migration flag to true as {AttrName}", requireMigrationAttr);
+                        }
+
+                        if (!string.IsNullOrEmpty(user.UserPrincipalName))
+                        {
+                            user.UserPrincipalName = TransformUpnForExternalId(user.UserPrincipalName);
+                        }
+
+                        EnsureEmailIdentity(user);
+
+                        if (user.Identities != null && user.Identities.Any())
+                        {
+                            foreach (var identity in user.Identities)
+                            {
+                                identity.Issuer = _options.ExternalId.TenantDomain;
+
+                                if (identity.SignInType?.ToLower() == "userprincipalname" &&
+                                    !string.IsNullOrEmpty(identity.IssuerAssignedId))
+                                {
+                                    identity.IssuerAssignedId = TransformUpnForExternalId(identity.IssuerAssignedId);
+                                }
+                            }
+
+                            if (_options.VerboseLogging)
+                            {
+                                _logger.LogDebug("User has {Count} identities: {Types}",
+                                    user.Identities.Count,
+                                    string.Join(", ", user.Identities.Select(i => i.SignInType)));
+                            }
+                        }
+
+                        user.PasswordProfile = new PasswordProfile
+                        {
+                            Password = GenerateRandomPassword(),
+                            ForceChangePasswordNextSignIn = false
+                        };
+
+                        // ---- Enqueue to users-to-import ----
+                        var userJson = JsonSerializer.Serialize(user);
+                        await _queueClient.SendMessageAsync(importQueueName, userJson, cancellationToken);
+                        usersEnqueued++;
+
+                        summary.TotalItems++;
+                        summary.SuccessCount++;
+
+                        // ---- Optionally enqueue to phone-registration ----
+                        if (_options.Import.PhoneRegistration.EnqueuePhoneRegistration &&
+                            !string.IsNullOrWhiteSpace(user.MfaPhoneNumber) &&
+                            !string.IsNullOrWhiteSpace(user.UserPrincipalName))
+                        {
+                            var phoneMsg = new PhoneRegistrationMessage
+                            {
+                                Upn = user.UserPrincipalName,
+                                PhoneNumber = user.MfaPhoneNumber
+                            };
+                            var phoneMsgJson = JsonSerializer.Serialize(phoneMsg);
+                            await _queueClient.SendMessageAsync(
+                                _options.PhoneRegistration.QueueName, phoneMsgJson, cancellationToken);
+                            phonesEnqueued++;
+                        }
+
+                        // Progress log every 1 000 users
+                        if (usersEnqueued % 1000 == 0)
+                        {
+                            _logger.LogInformation(
+                                "Progress: {Users:N0} users enqueued ({Phones:N0} with phones)",
+                                usersEnqueued, phonesEnqueued);
+                        }
+                    }
+
+                    _telemetry.IncrementCounter("Import.BlobsProcessed");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to process blob {Blob}", blobName);
+                    summary.FailureCount++;
+                }
+            }
+
+            summary.EndTime = DateTimeOffset.UtcNow;
+
+            _logger.LogInformation(
+                "=== IMPORT MASTER SUMMARY ===\n" +
+                "Users enqueued to '{ImportQueue}' : {Users:N0}\n" +
+                "Phones enqueued to '{PhoneQueue}'  : {Phones:N0}\n" +
+                "Blobs failed                        : {Failed}\n" +
+                "Blob data read                      : {Bytes:N0} bytes\n" +
+                "Duration                            : {Duration}",
+                importQueueName, usersEnqueued,
+                _options.PhoneRegistration.QueueName, phonesEnqueued,
+                summary.FailureCount,
+                totalBlobBytesRead,
+                summary.Duration);
+
+            _logger.LogInformation(
+                "Next step: run 'worker-import' on one or more consoles (each with its own --config).");
+
+            _telemetry.TrackMetric("import.blob.read.bytes", totalBlobBytesRead);
+            _telemetry.TrackMetric("import.users.enqueued", usersEnqueued);
+            _telemetry.TrackMetric("import.phones.enqueued", phonesEnqueued);
+
+            _telemetry.TrackEvent("Import.Completed", new Dictionary<string, string>
+            {
+                { "UsersEnqueued", usersEnqueued.ToString() },
+                { "PhonesEnqueued", phonesEnqueued.ToString() },
+                { "BlobsFailed", summary.FailureCount.ToString() },
+                { "Duration", summary.Duration.ToString() }
+            });
+
+            await _telemetry.FlushAsync();
+
+            return new ExecutionResult
+            {
+                Success = summary.FailureCount == 0,
+                StartTime = summary.StartTime,
+                EndTime = summary.EndTime,
+                Summary = summary
+            };
+        }
+        catch (Exception ex)
+        {
+            summary.EndTime = DateTimeOffset.UtcNow;
+            _logger.LogError(ex, "Import master failed");
+            _telemetry.TrackException(ex);
+
+            return new ExecutionResult
+            {
+                Success = false,
+                ErrorMessage = ex.Message,
+                Exception = ex,
+                StartTime = summary.StartTime,
+                EndTime = summary.EndTime,
+                Summary = summary
+            };
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Private helpers (all transformations — identical logic to export-time prep)
+    // -------------------------------------------------------------------------
+
+    private void ValidateExtensionAttributes()
+    {
+        _logger.LogInformation("Validating extension attributes configuration...");
+
+        if (string.IsNullOrWhiteSpace(_options.ExternalId.ExtensionAppId))
+        {
+            throw new InvalidOperationException(
+                "Extension App ID is not configured. Please set Migration.ExternalId.ExtensionAppId in your configuration.");
+        }
+
+        if (_options.ExternalId.ExtensionAppId.Contains("-"))
+        {
+            throw new InvalidOperationException(
+                $"Extension App ID must not contain dashes. Current value: {_options.ExternalId.ExtensionAppId}. " +
+                "Please remove all dashes from the GUID.");
+        }
+
+        _logger.LogInformation("Import configuration:");
+        _logger.LogInformation("  - Import queue           : {Queue}", _options.Import.QueueName);
+        _logger.LogInformation("  - Attribute mappings     : {Count}", _options.Import.AttributeMappings.Count);
+        _logger.LogInformation("  - Exclude fields         : {Count}", _options.Import.ExcludeFields.Count);
+        _logger.LogInformation("  - Store B2C ObjectId     : {StoreB2C}", _options.Import.MigrationAttributes.StoreB2CObjectId);
+        _logger.LogInformation("  - Set RequireMigration   : {SetMigrated}", _options.Import.MigrationAttributes.SetRequireMigration);
+        _logger.LogInformation("  - EnqueuePhoneRegistration: {EnqueuePhone}", _options.Import.PhoneRegistration.EnqueuePhoneRegistration);
+
+        if (_options.Import.MigrationAttributes.StoreB2CObjectId)
+        {
+            var b2cAttr = GetB2CObjectIdAttributeName();
+            _logger.LogInformation("  - B2CObjectId target     : {Attr}", b2cAttr);
+        }
+
+        if (_options.Import.MigrationAttributes.SetRequireMigration)
+        {
+            var requireMigrationAttr = GetRequireMigrationAttributeName();
+            _logger.LogInformation("  - Migration flag target  : {Attr} (will be set to true)", requireMigrationAttr);
+        }
+
+        if (_options.Import.AttributeMappings.Any())
+        {
+            _logger.LogInformation("Attribute mappings:");
+            foreach (var mapping in _options.Import.AttributeMappings)
+            {
+                _logger.LogInformation("  - {Source} → {Target}", mapping.Key, mapping.Value);
+            }
+        }
+
+        _logger.LogWarning(
+            "⚠️  IMPORTANT: Ensure all target custom attributes exist in External ID tenant at " +
+            "External Identities > Custom user attributes. " +
+            "If they don't exist, worker-import will fail. " +
+            "See User Guide for instructions on creating them.");
+    }
+
+    private void ApplyAttributeMappings(UserProfile user)
+    {
+        if (_options.Import.AttributeMappings.Any())
+        {
+            var mappedAttributes = new Dictionary<string, object>();
+
+            foreach (var kvp in user.ExtensionAttributes)
+            {
+                var sourceAttr = kvp.Key;
+                var value = kvp.Value;
+
+                if (_options.Import.AttributeMappings.ContainsKey(sourceAttr))
+                {
+                    var targetAttr = _options.Import.AttributeMappings[sourceAttr];
+                    mappedAttributes[targetAttr] = value;
+
+                    if (_options.VerboseLogging)
+                        _logger.LogDebug("Mapping attribute {Source} → {Target}", sourceAttr, targetAttr);
+                }
+                else if (!_options.Import.ExcludeFields.Contains(sourceAttr))
+                {
+                    mappedAttributes[sourceAttr] = value;
+                }
+                else if (_options.VerboseLogging)
+                {
+                    _logger.LogDebug("Excluding attribute {Attr}", sourceAttr);
+                }
+            }
+
+            user.ExtensionAttributes = mappedAttributes;
+        }
+        else if (_options.Import.ExcludeFields.Any())
+        {
+            foreach (var excludeField in _options.Import.ExcludeFields)
+            {
+                if (user.ExtensionAttributes.Remove(excludeField) && _options.VerboseLogging)
+                    _logger.LogDebug("Excluding attribute {Attr}", excludeField);
+            }
+        }
+    }
+
+    private string GetB2CObjectIdAttributeName()
+    {
+        if (!string.IsNullOrEmpty(_options.Import.MigrationAttributes.B2CObjectIdTarget))
+            return _options.Import.MigrationAttributes.B2CObjectIdTarget;
+
+        return MigrationExtensionAttributes.GetFullAttributeName(
+            _options.ExternalId.ExtensionAppId,
+            MigrationExtensionAttributes.B2CObjectId);
+    }
+
+    private string GetRequireMigrationAttributeName()
+    {
+        if (!string.IsNullOrEmpty(_options.Import.MigrationAttributes.RequireMigrationTarget))
+            return _options.Import.MigrationAttributes.RequireMigrationTarget;
+
+        return MigrationExtensionAttributes.GetFullAttributeName(
+            _options.ExternalId.ExtensionAppId,
+            MigrationExtensionAttributes.RequiresMigration);
+    }
+
+    private string TransformUpnForExternalId(string b2cUpn)
+    {
+        if (string.IsNullOrEmpty(b2cUpn))
+            return b2cUpn;
+
+        var atIndex = b2cUpn.IndexOf('@');
+        if (atIndex == -1)
+            return b2cUpn;
+
+        var localPart = b2cUpn.Substring(0, atIndex);
+
+        if (string.IsNullOrEmpty(localPart))
+            localPart = Guid.NewGuid().ToString("N").Substring(0, 8);
+
+        var newUpn = $"{localPart}@{_options.ExternalId.TenantDomain}";
+
+        if (_options.VerboseLogging)
+            _logger.LogDebug("Transformed UPN: {OldUpn} → {NewUpn}", b2cUpn, newUpn);
+
+        return newUpn;
+    }
+
+    private void EnsureEmailIdentity(UserProfile user)
+    {
+        var hasEmailIdentity = user.Identities?.Any(i =>
+            string.Equals(i.SignInType, "emailAddress", StringComparison.OrdinalIgnoreCase)) ?? false;
+
+        if (!hasEmailIdentity)
+        {
+            var email = user.Mail;
+
+            if (string.IsNullOrEmpty(email))
+            {
+                email = user.UserPrincipalName;
+
+                if (_options.VerboseLogging)
+                {
+                    _logger.LogWarning(
+                        "User {UPN} has no email in 'mail' field. Using userPrincipalName as email fallback.",
+                        user.UserPrincipalName);
+                }
+            }
+
+            user.Identities ??= new List<ObjectIdentity>();
+            user.Identities.Add(new ObjectIdentity
+            {
+                SignInType = "emailAddress",
+                Issuer = _options.ExternalId.TenantDomain,
+                IssuerAssignedId = email
+            });
+
+            if (_options.VerboseLogging)
+                _logger.LogDebug("Added email identity (password-based): {Email}", email);
+        }
+    }
+
+    private static string GenerateRandomPassword()
+    {
+        const string uppercase = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+        const string lowercase = "abcdefghijkmnpqrstuvwxyz";
+        const string digits = "23456789";
+        const string special = "!@#$%^&*";
+        const string allChars = uppercase + lowercase + digits + special;
+
+        var random = new Random();
+        var password = new List<char>();
+
+        password.Add(uppercase[random.Next(uppercase.Length)]);
+        password.Add(lowercase[random.Next(lowercase.Length)]);
+        password.Add(digits[random.Next(digits.Length)]);
+        password.Add(special[random.Next(special.Length)]);
+
+        for (int i = 4; i < 16; i++)
+            password.Add(allChars[random.Next(allChars.Length)]);
+
+        for (int i = password.Count - 1; i > 0; i--)
+        {
+            int j = random.Next(i + 1);
+            (password[i], password[j]) = (password[j], password[i]);
+        }
+
+        return new string(password.ToArray());
+    }
+}
+
 
         // Track aggregated metrics for cost estimation
         long totalBlobBytesRead = 0;
@@ -65,6 +541,43 @@ public class ImportOrchestrator : IOrchestrator<ExecutionResult>
             _logger.LogInformation("Import audit logs will be saved to container: {Container}",
                 _options.Storage.ImportAuditContainerName);
 
+            // ---------------------------------------------------------------
+            // Load phone-harvest lookup (phones_*.json blobs written by phone-harvest workers)
+            // ---------------------------------------------------------------
+            var phoneLookup = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var phoneBlobs = (await _blobClient.ListBlobsAsync(
+                _options.Storage.ExportContainerName,
+                "phones_",
+                cancellationToken)).ToList();
+
+            foreach (var phoneBlobName in phoneBlobs)
+            {
+                try
+                {
+                    var phoneJson = await _blobClient.ReadBlobAsync(
+                        _options.Storage.ExportContainerName,
+                        phoneBlobName,
+                        cancellationToken);
+                    var phoneEntries = JsonSerializer.Deserialize<List<PhoneLookupEntry>>(phoneJson);
+                    if (phoneEntries != null)
+                    {
+                        foreach (var entry in phoneEntries)
+                        {
+                            phoneLookup[entry.UserId] = entry.PhoneNumber;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Could not read phone lookup blob {Blob} — skipping.", phoneBlobName);
+                }
+            }
+
+            _logger.LogInformation(
+                "Phone lookup loaded: {Count:N0} users have an MFA phone number (from {BlobCount} phone blobs).",
+                phoneLookup.Count, phoneBlobs.Count());
+
+            // ---------------------------------------------------------------
             // List all export blobs
             var blobs = await _blobClient.ListBlobsAsync(
                 _options.Storage.ExportContainerName,
@@ -115,6 +628,12 @@ public class ImportOrchestrator : IOrchestrator<ExecutionResult>
                         // Prepare users for import
                         foreach (var user in batch)
                         {
+                            // Enrich with MFA phone number from phone-harvest phase
+                            if (user.Id != null && phoneLookup.TryGetValue(user.Id, out var mfaPhone))
+                            {
+                                user.MfaPhoneNumber = mfaPhone;
+                            }
+
                             // Apply attribute mappings and transformations
                             ApplyAttributeMappings(user);
 
@@ -749,7 +1268,7 @@ public class ImportOrchestrator : IOrchestrator<ExecutionResult>
                 continue;
             }
 
-            if (string.IsNullOrWhiteSpace(user.MobilePhone) ||
+            if (string.IsNullOrWhiteSpace(user.MfaPhoneNumber) ||
                 string.IsNullOrWhiteSpace(user.UserPrincipalName))
             {
                 skipped++;
@@ -759,7 +1278,7 @@ public class ImportOrchestrator : IOrchestrator<ExecutionResult>
             var msg = new PhoneRegistrationMessage
             {
                 Upn = user.UserPrincipalName,
-                PhoneNumber = user.MobilePhone
+                PhoneNumber = user.MfaPhoneNumber
             };
 
             var json = JsonSerializer.Serialize(msg);

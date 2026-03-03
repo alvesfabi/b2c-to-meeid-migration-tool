@@ -13,8 +13,8 @@
 3. [Design Principles](#3-design-principles)
 4. [Component Architecture](#4-component-architecture)
 5. [Bulk Migration Components](#5-bulk-migration-components)
-   - [5.1 Export — Master/Worker Architecture](#51-export--masterworker-architecture)
-   - [5.2 Bulk Import Architecture](#52-bulk-import-architecture)
+   - [5.1 Harvest — Master/Producer Phase](#51-harvest--masterproducer-phase)
+   - [5.2 Worker Migrate — B2C Fetch + EEID Create](#52-worker-migrate--b2c-fetch--eeid-create)
    - [5.3 Phone Registration Worker](#53-phone-registration-worker)
 6. [Just-In-Time (JIT) Migration Architecture](#6-just-in-time-jit-migration-architecture)
 7. [Security Architecture](#7-security-architecture)
@@ -32,7 +32,7 @@
 
 The **B2C Migration Kit** is a sample solution for migrating user identities from **Azure AD B2C** to **Microsoft Entra External ID**. It currently supports:
 
-- **Bulk Export/Import**: Migrate users with parallel processing (validated with 200k users locally)
+- **Bulk Migration**: Migrate users with a queue-based (harvest → worker-migrate → phone-registration)
 - **Just-In-Time (JIT) Password Migration**: Seamless password validation during first login (tested with Custom Authentication Extension)
 
 ### What will be added in the future?
@@ -51,11 +51,9 @@ The **B2C Migration Kit** is a sample solution for migrating user identities fro
 
 | Scenario | Recommendation |
 |----------|----------------|
-| Migrating from B2C to External ID | ✅ Primary use case |
+| Migrating from B2C to External ID when User Flows are implemented (no custom policies) | ✅ Primary use case |
 | Local development & testing | ✅ Fully validated |
-| Proof of concept (< 200K users) | ✅ Sample tested with 181K users |
 | Production with SFI requirements | ⚠️ Wait for future release or implement security hardening |
-| User count > 1M | ⚠️ Use architecture guidance, requires scaling |
 
 ---
 
@@ -68,9 +66,9 @@ The **B2C Migration Kit** is a sample solution for migrating user identities fro
 │                    Azure Subscription                           │
 │                                                                 │
 │  ┌──────────────────────────┐  ┌──────────────┐               │
-│  │ Console App              │  │Azure Function│               │
-│  │(Harvest/WorkerExport/    │  │(JIT Auth)    │               │
-│  │ Import/PhoneRegistration)│  │              │               │
+│  │ Console App                    │  │Azure Function│               │
+│  │(Harvest/WorkerMigrate/          │  │(JIT Auth)    │               │
+│  │ PhoneRegistration)              │  │              │               │
 │  └──────┬───────────────────┘  └──────┬───────┘               │
 │         │                             │                        │
 │  ┌──────▼─────────────────────────────▼───────────────┐       │
@@ -79,11 +77,11 @@ The **B2C Migration Kit** is a sample solution for migrating user identities fro
 │  └──────┬───────────┬───────────┬──────────┬──────────┘       │
 │         │           │           │          │                   │
 │         ▼           ▼           ▼          ▼                   │
-│  ┌──────────┐ ┌─────────┐ ┌─────────┐ ┌──────────┐           │
-│  │ Blob     │ │Key Vault│ │App      │ │ Storage  │           │
-│  │ Storage  │ │         │ │ Insights│ │ Queue    │           │
-│  │          │ │*Future  │ │         │ │          │           │
-│  └──────────┘ └─────────┘ └─────────┘ └──────────┘           │
+│  ┌──────────┐ ┌─────────┐ ┌──────────┐ ┌──────────┐          │
+│  │ Storage  │ │ Table   │ │Key Vault │ │App       │          │
+│  │ Queue    │ │ Storage │ │          │ │ Insights │          │
+│  │(pipeline)│ │ (audit) │ │ *Future  │ │          │          │
+│  └──────────┘ └─────────┘ └──────────┘ └──────────┘          │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
          │                           │
@@ -97,40 +95,69 @@ The **B2C Migration Kit** is a sample solution for migrating user identities fro
 
 ### Data Flow
 
-#### Phase 1a: Harvest (Master/Producer)
+The bulk migration pipeline consists of three commands that run sequentially. Start each command only after the previous step has finished (or with enough queue depth to keep workers busy).
+
+#### Step 1 — `harvest` (run once)
+
 ```
-B2C Tenant → Graph API ($select=id only) → HarvestOrchestrator → Queue: user-ids-to-process
+B2C Tenant
+└─ GET /users?$select=id&$top=999  (ID-only pages, very cheap)
+   └─ HarvestOrchestrator
+      └─► Queue: user-ids-to-process  (JSON arrays of 20 IDs per message)
 ```
 
-#### Phase 1b: Worker Export (Consumer × N)
+`HarvestOrchestrator` pages through B2C using `$select=id` — the least expensive Graph query. Each page is split into batches of 20 IDs and enqueued as individual messages. No blob files are produced. The command exits when all IDs are enqueued.
+
+The key insight is that **fetching only IDs is fast and cheap** (no heavy user-profile data), and placing them in a shared queue lets **any number of `worker-migrate` instances pull work concurrently and independently** — there is no central coordinator assigning ranges, no risk of overlap, and no wasted capacity when one worker finishes ahead of others.
+
+#### Step 2a — `worker-migrate` (run N parallel instances)
+
 ```
-Queue: user-ids-to-process → WorkerExportOrchestrator → Graph $batch → Blob Storage (JSON files)
+Queue: user-ids-to-process
+└─ WorkerMigrateOrchestrator (one per instance, independent App Registration)
+   ├─ GET /$batch → B2C (up to 20 full user profiles per batch request)
+   ├─ Transform: UPN domain rewrite · extension attrs · email identity · random password
+   ├─ POST /users → Entra External ID
+   │   ├─ 201 Created  → audit(Created)   + enqueue phone task
+   │   ├─ 409 Conflict → audit(Duplicate) + enqueue phone task
+   │   └─ Other error  → audit(Failed, errorCode, errorMessage)
+   ├─► Table Storage: migration-audit  (every outcome written in real time)
+   └─► Queue: phone-registration  ({ B2CUserId, EEIDUpn } — no phone number stored)
 ```
 
-> For small tenants the classic single-instance `export` command is also available and combines both phases.
+Each worker instance uses an **independent app registration** and (ideally) a separate IP address so API quotas scale linearly. Workers exit automatically when the queue is empty (`MaxEmptyPolls` reached).
 
-#### Phase 2a: Bulk Import
-```
-Blob Storage → JSON Files → ImportOrchestrator → Graph API ($batch) → External ID Tenant
-                                               ↓ (opt-in)
-                                    Queue: phone-registration
-```
+#### Step 2b — `phone-registration` (run M parallel instances)
 
-#### Phase 2b: Phone Registration (async worker)
 ```
-Queue: phone-registration → PhoneRegistrationWorker → POST /users/{upn}/authentication/phoneMethods → External ID
-```
-
-The phone registration worker runs independently from import, consuming the queue at a configurable throttle-safe rate (`ThrottleDelayMs`) to stay within the lower API budget of the `/authentication/phoneMethods` endpoint.
-
-#### Phase 3: JIT Migration (First Login)
-```
-User Login → External ID → Custom Extension → JIT Function → B2C ROPC Validation
-          ↓
-External ID sets password + marks migrated → Complete authentication
+Queue: phone-registration
+└─ PhoneRegistrationWorker (one per instance, independent App Registrations for B2C and EEID)
+   ├─ GET /users/{B2CUserId}/authentication/phoneMethods → B2C  (0.5 RPS per worker)
+   ├─ If phone found: POST /users/{EEIDUpn}/authentication/phoneMethods → EEID
+   │   ├─ 201 Created  → audit(PhoneRegistered)
+   │   └─ 409 Conflict → audit(PhoneRegistered, idempotent)
+   ├─ If no phone:     → audit(PhoneSkipped)
+   └─► Table Storage: migration-audit
 ```
 
-Because MFA phone numbers are already registered (Phase 2b), users are only prompted to **confirm** their existing phone (receive an SMS code), not perform a full re-registration.
+Phone numbers are fetched from B2C **at drain time** — they are never stored in the queue. This keeps PII out of the message store and in memory only for the duration of a single API call pair.
+
+> **Throttle limit**: The `authenticationMethod` Graph API family is limited to **5 req / 10 s (0.5 RPS) per app per tenant**. The default `ThrottleDelayMs` of **2 000 ms** matches this limit. Run additional `phone-registration` instances each with their own EEID app registration to increase throughput — 3 instances ≈ 1.5 RPS ≈ 138 K phones in ~26 hours.
+
+#### Step 3 — JIT Migration (first login — Azure Function, always running)
+
+```
+User Login → EEID checks RequiresMigration = true
+          └─ Custom Authentication Extension → Azure Function (JitAuthenticationFunction)
+             ├─ Decrypt password (RSA private key from Key Vault)
+             ├─ Reverse UPN transform: user@eeid.onmicrosoft.com → user@b2c.onmicrosoft.com
+             ├─ POST /oauth2/v2.0/token (ROPC) → B2C
+             │   ├─ Valid   → { action: MigratePassword }  → EEID sets password + RequiresMigration=false
+             │   └─ Invalid → { action: BlockSignIn }
+             └─ Subsequent logins: authenticate directly in EEID (RequiresMigration=false)
+```
+
+After `phone-registration` has run, users whose phones were registered are prompted to **confirm** their existing phone (SMS code) on first JIT login — not to register a new MFA method from scratch.
 
 ---
 
@@ -173,14 +200,14 @@ Because MFA phone numbers are already registered (Phase 2b), users are only prom
 
 - **Idempotency**: Safe to retry operations without duplication
 - **Graceful Degradation**: Continue processing on non-critical failures
-- **Checkpoint/Resume**: Export/Import can restart from last successful batch
+- **Checkpoint/Resume**: Workers restart automatically by re-processing any queue message that returned after a visibility timeout (at-least-once delivery)
 - **Circuit Breaker**: Automatic backoff on API throttling (HTTP 429)
 
 ### 3.5 Scalability
 
 - **Multi-App Parallelization**: Use 3-5 app registrations to multiply throughput
 - **Stateless Design**: Horizontal scaling without shared state
-- **Batching**: Efficient Graph API batch requests (50-100 users per call)
+- **Batching**: Efficient Graph API batch requests (20 user IDs per queue message, resolved via `$batch`)
 
 ---
 
@@ -193,41 +220,51 @@ B2CMigrationKit.Core/
 ├── Abstractions/
 │   ├── IOrchestrator.cs              # Coordinates multi-step workflows
 │   ├── IGraphClient.cs               # Graph API operations (CRUD users)
-│   ├── IBlobStorageClient.cs         # Export/import file storage
+│   ├── IBlobStorageClient.cs         # Blob storage (JIT RSA key PEM)
+│   ├── IQueueClient.cs               # Azure Queue operations
+│   ├── ITableStorageClient.cs        # Azure Table Storage (audit trail)
 │   ├── IAuthenticationService.cs     # B2C ROPC validation
+│   ├── ICredentialManager.cs         # App credential resolution
 │   ├── ISecretProvider.cs            # Key Vault integration
 │   └── ITelemetryService.cs          # Custom metrics/events
 ├── Configuration/
 │   ├── MigrationOptions.cs           # Root configuration binding
 │   ├── B2COptions.cs                 # B2C tenant configuration
-│   ├── ExternalIdOptions.cs          # External ID configuration
-│   ├── JitAuthenticationOptions.cs   # JIT function settings
-│   ├── StorageOptions.cs             # Blob storage configuration
-│   └── RetryOptions.cs               # Throttling/backoff settings
+│   ├── ExternalIdOptions.cs          # External ID tenant configuration
+│   ├── ExportOptions.cs              # $select fields for $batch fetch
+│   ├── HarvestOptions.cs             # Harvest page size, batch size
+│   ├── ImportOptions.cs              # UPN transform, attribute mapping
+│   ├── PhoneRegistrationOptions.cs   # Throttle delay, poll settings
+│   ├── StorageOptions.cs             # Queue names + AuditTableName
+│   ├── RetryOptions.cs               # Throttling/backoff settings
+│   └── JitAuthenticationOptions.cs   # JIT function settings
 ├── Models/
 │   ├── UserProfile.cs                # Unified user model
-│   ├── ExportResult.cs               # Export operation outcome
-│   ├── ImportResult.cs               # Import operation outcome
+│   ├── ExecutionResult.cs            # Per-user operation outcome
+│   ├── RunSummary.cs                 # Aggregated run statistics
+│   ├── MigrationAuditRecord.cs       # ITableEntity for audit table
+│   ├── PhoneRegistrationMessage.cs   # { B2CUserId, EEIDUpn } queue message
 │   ├── JitAuthenticationRequest.cs   # JIT payload from External ID
 │   └── JitAuthenticationResponse.cs  # JIT response to External ID
 ├── Services/
 │   ├── Orchestrators/
-│   │   ├── ExportOrchestrator.cs     # Bulk export workflow
-│   │   ├── ImportOrchestrator.cs     # Bulk import workflow
-│   │   └── JitMigrationService.cs    # JIT validation logic
-│   ├── Graph/
-│   │   ├── B2CGraphClient.cs         # B2C-specific operations
-│   │   └── ExternalIdGraphClient.cs  # External ID operations
-│   ├── Storage/
-│   │   └── BlobStorageClient.cs      # Azure Blob operations
-│   ├── Authentication/
-│   │   ├── AuthenticationService.cs  # B2C ROPC implementation
-│   │   └── RsaKeyProvider.cs         # JIT RSA key management
+│   │   ├── HarvestOrchestrator.cs        # harvest command
+│   │   ├── WorkerMigrateOrchestrator.cs  # worker-migrate command
+│   │   ├── PhoneRegistrationWorker.cs    # phone-registration command
+│   │   └── JitMigrationService.cs        # JIT validation logic (Function)
+│   ├── Infrastructure/
+│   │   ├── GraphClient.cs                # Graph API implementation
+│   │   ├── GraphClientFactory.cs         # Creates typed IGraphClient instances
+│   │   ├── BlobStorageClient.cs          # Azure Blob operations
+│   │   ├── QueueStorageClient.cs         # Azure Queue operations
+│   │   ├── TableStorageClient.cs         # Azure Table Storage (audit)
+│   │   ├── CredentialManager.cs          # Credential resolution
+│   │   ├── AuthenticationService.cs      # B2C ROPC implementation
+│   │   └── SecretProvider.cs             # Key Vault / inline secret provider
 │   └── Observability/
-│       └── TelemetryService.cs       # Application Insights wrapper
+│       └── TelemetryService.cs           # Application Insights wrapper
 └── Extensions/
-    ├── ServiceCollectionExtensions.cs # DI registration
-    └── RetryPolicyExtensions.cs       # Polly retry policies
+    └── ServiceCollectionExtensions.cs    # DI registration for all services
 ```
 
 ### 4.2 Dependency Injection Pattern
@@ -238,19 +275,23 @@ All services use **constructor injection** with interface-based abstractions:
 // Registration (Console + Function)
 services.AddCoreServices(configuration);
 
-// Example service dependencies
-public class ImportOrchestrator : IOrchestrator<ImportResult>
+// Example: worker-migrate orchestrator receives dual graph clients + queue + table
+public class WorkerMigrateOrchestrator : IOrchestrator
 {
+    private readonly IGraphClient _b2cClient;
     private readonly IGraphClient _externalIdClient;
-    private readonly IBlobStorageClient _blobClient;
+    private readonly IQueueClient _queueClient;
+    private readonly ITableStorageClient _auditClient;
     private readonly ITelemetryService _telemetry;
-    private readonly ILogger<ImportOrchestrator> _logger;
+    private readonly ILogger<WorkerMigrateOrchestrator> _logger;
 
-    public ImportOrchestrator(
-        IGraphClient externalIdClient,
-        IBlobStorageClient blobClient,
+    public WorkerMigrateOrchestrator(
+        [FromKeyedServices("b2c")] IGraphClient b2cClient,
+        [FromKeyedServices("externalId")] IGraphClient externalIdClient,
+        IQueueClient queueClient,
+        ITableStorageClient auditClient,
         ITelemetryService telemetry,
-        ILogger<ImportOrchestrator> logger)
+        ILogger<WorkerMigrateOrchestrator> logger)
     {
         // ...
     }
@@ -261,226 +302,163 @@ public class ImportOrchestrator : IOrchestrator<ImportResult>
 
 ## 5. Bulk Migration Components
 
-### 5.1 Export — Master/Worker Architecture
+### 5.1 Harvest — Master/Producer Phase
 
-**Purpose**: Extract all user profiles from B2C into JSON files for bulk import. For large tenants the **Master/Worker (Producer/Consumer) pattern** is recommended to overcome per-app-registration Graph API throttle limits.
+**Purpose**: Page through the entire B2C tenant using `$select=id` (the cheapest possible Graph query), split the IDs into batches of 20, and enqueue each batch to `user-ids-to-process`. This decouples *work discovery* from *work execution*: a single harvest instance does the cheap enumeration upfront, then any number of `worker-migrate` instances can drain the queue in parallel without any central assignment logic — each worker simply pulls the next available message, processes it, and loops. This is the Producer/Consumer pattern that enables the horizontal scaling described in section 5.2.
 
 #### Architecture Overview
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  MASTER  — HarvestOrchestrator                                  │
-│  GET /users?$select=id&$top=999 (IDs only, very cheap)           │
-│  → enqueues batches of 20 IDs to Queue: user-ids-to-process      │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │ Azure Queue Storage
-           ┌─────────────────┼─────────────────┐
-           ▼                 ▼                 ▼
-┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐
-│ WORKER 1         │ │ WORKER 2         │ │ WORKER N         │
-│ WorkerExport     │ │ WorkerExport     │ │ WorkerExport     │
-│ App Reg 1        │ │ App Reg 2        │ │ App Reg N        │
-│ $batch(20 users) │ │ $batch(20 users) │ │ $batch(20 users) │
-│ → Blob: users_*  │ │ → Blob: users_*  │ │ → Blob: users_*  │
-└──────────────────┘ └──────────────────┘ └──────────────────┘
+│  HarvestOrchestrator  (single instance, `harvest` command)      │
+│                                                                  │
+│  GET /users?$select=id&$top=999                                  │
+│  ↺  follow @odata.nextLink until exhausted                       │
+│                                                                  │
+│  for every 20 IDs collected:                                     │
+│    SendMessage(queue: user-ids-to-process, ["id1","id2",...])    │
+│                                                                  │
+│  Exits when all pages are processed                              │
+└──────────────────────────────────────────────────────────────────┘
+                             │
+                             │  Azure Queue Storage
+                             ▼
+                   Queue: user-ids-to-process
+                   (each message = JSON array of up to 20 IDs)
 ```
-
-Each worker uses a **separate app registration** on a separate machine/IP so their API quotas are fully independent. A harvested message is invisible to other workers while being processed (visibility timeout), and only deleted after a successful blob upload — ensuring at-least-once delivery.
 
 #### Key Features
 
-- **Harvest phase**: Pages B2C using only `$select=id` — ~10× cheaper than full profile fetch
-- **Worker phase**: Each worker dequeues up to a full batch of 20 IDs and resolves them via `POST /$batch`
-- **Single-instance fallback**: The `export` command combines both phases in one process for small tenants
-- **Resume support**: Workers restart by re-processing any message that returned to the queue after a crash
-- **Throttling control**: Exponential backoff on HTTP 429 via Polly resilience pipeline
-
-#### Process Flow (Master/Producer)
-
-```
-┌──────────────────────────┐
-│ 1. Initialize Harvest    │
-│    - Ensure queue exists │
-└────────────┬─────────────┘
-             │
-             ▼
-┌──────────────────────────────────────────────────────────────────┐
-│ 2. Page B2C Users ($select=id only, PageSize=999)               │
-│    GET /users?$top=999&$select=id                                │
-│    - Process continuation tokens                                 │
-└────────────┬─────────────────────────────────────────────────────┘
-             │
-             ▼
-┌──────────────────────────────────────────────────────────────────┐
-│ 3. Enqueue Batches of 20 IDs                                     │
-│    SendMessage(queue, "[\"id1\",\"id2\",...\"id20\"]")            │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-#### Process Flow (Worker/Consumer)
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│ 1. Dequeue Message (20 IDs) with visibility timeout             │
-└────────────┬─────────────────────────────────────────────────────┘
-             │
-             ▼
-┌──────────────────────────────────────────────────────────────────┐
-│ 2. Fetch Full Profiles via Graph $batch                          │
-│    POST /v1.0/$batch (up to 20 GET /users/{id} in one call)      │
-└────────────┬─────────────────────────────────────────────────────┘
-             │
-             ▼
-┌──────────────────────────────────────────────────────────────────┐
-│ 3. Write to Blob Storage (users_{prefix}{counter:D6}.json)       │
-│    - Atomic write with retry                                     │
-└────────────┬─────────────────────────────────────────────────────┘
-             │
-             ▼
-┌──────────────────────────────────────────────────────────────────┐
-│ 4. Delete message from queue (ACK)                               │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-#### Multi-App Parallelization Strategy
-
-Run **N workers simultaneously**, each with its own app registration and (ideally) its own IP:
-
-```
-┌──────────────────┐
-│ Worker 1         │  App Registration 1 — ~60 reads/sec
-│ appsettings.app1 │
-└──────────────────┘
-        +
-┌──────────────────┐
-│ Worker 2         │  App Registration 2 — ~60 reads/sec
-│ appsettings.app2 │
-└──────────────────┘
-        +
-┌──────────────────┐
-│ Worker 3         │  App Registration 3 — ~60 reads/sec
-│ appsettings.app3 │
-└──────────────────┘
-        =
-  ~180 reads/sec combined
-```
-
-#### Security Measures
-
-- **Service Principal**: `Directory.Read.All` (application permission) in B2C
-- **Credential Storage**: Client secret in Azure Key Vault
-- **Network**: Private endpoint to Blob Storage and Queue Storage
-- **Data Protection**: Exported files encrypted at rest (Azure Storage SSE)
-
-### 5.2 Bulk Import Architecture
-
-**Purpose**: Create all users in External ID tenant from exported JSON files, and optionally enqueue MFA phone-registration tasks for asynchronous processing.
-
-#### Key Features
-
-- **Chunked Reading**: Stream large JSON files without loading entire file in memory
-- **Batch Requests**: Combine up to 20 user creations in a single Graph `$batch` call
-- **UPN Domain Transformation**: Replace B2C domain with External ID domain (reversed during JIT)
-- **Extended Attributes**: Set `B2CObjectId` and `RequiresMigration` custom attributes
-- **Placeholder Passwords**: Generate random strong passwords (users cannot login until JIT)
-- **Phone Registration Enqueue** *(opt-in)*: After each batch succeeds, enqueue `{ upn, mobilePhone }` to the `phone-registration` queue for each user that has a `mobilePhone` value. Set `Import.PhoneRegistration.EnqueuePhoneRegistration: true` to enable.
-- **Verification**: Post-import user count validation
+- **Enables parallelization**: By depositing all user IDs into a shared queue before migration begins, an arbitrary number of `worker-migrate` instances can pull and process messages concurrently. Workers need no coordination — queue visibility timeouts guarantee each message is processed by exactly one worker at a time.
+- **Minimal API cost**: `$select=id` returns only the object ID — approximately 10× cheaper per page than a full profile fetch, so the harvest finishes quickly even for multi-million-user tenants
+- **No blob files produced**: IDs flow directly from B2C into the queue; there are no intermediate exports
+- **Configurable batch/page size**: `HarvestOptions.BatchSize` (default: 20 IDs per message) and `HarvestOptions.PageSize` (default: 999 users per Graph page)
+- **Single-pass, exits on completion**: Once all `@odata.nextLink` pages are exhausted and every ID is enqueued, the `harvest` command exits automatically
 
 #### Process Flow
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│ 1. Read Export Files from Blob Storage                          │
-│    - List all users_*.json files                                │
-│    - Process sequentially or in parallel                        │
-└────────────┬────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│ 1. Ensure queue exists (create if missing)                      │
+└────────────┬─────────────────────────────────────────────────────┘
              │
              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ 2. Parse JSON & Prepare Users                                   │
-│    - Read 50-100 users per batch                                │
-│    - Generate random password (16 chars, complex)               │
-│    - Set forceChangePasswordNextSignIn = true                   │
-└────────────┬────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│ 2. Fetch page of IDs from B2C                                   │
+│    GET /users?$select=id&$top=999                                │
+│    Follow @odata.nextLink until no next page                     │
+└────────────┬─────────────────────────────────────────────────────┘
              │
              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ 3. Transform UPN for External ID Compatibility                  │
-│    - Replace B2C domain with External ID domain                 │
-│    - Example: user@b2ctenant.onmicrosoft.com →                  │
-│               user@externalidtenant.onmicrosoft.com             │
-│    - Preserve local-part (username remains same)                │
-│    - Update both UserPrincipalName and Identities               │
-└────────────┬────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│ 3. Accumulate IDs into batches of 20                            │
+│    When batch is full (or last page end), enqueue:              │
+│    SendMessage(queue, "[\"id1\",\"id2\",...\"id20\"]")           │
+└────────────┬─────────────────────────────────────────────────────┘
              │
              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ 4. Set Custom Attributes                                        │
-│    - extension_{ExtensionAppId}_B2CObjectId = <B2C GUID>        │
-│    - extension_{ExtensionAppId}_RequiresMigration = true        │
-│    (true because password NOT yet migrated)                     │
-└────────────┬────────────────────────────────────────────────────┘
-             │
-             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ 5. Create Users via Graph API (Batch Request)                   │
-│    POST /v1.0/$batch                                             │
-│    {                                                             │
-│      "requests": [                                               │
-│        { "method": "POST", "url": "/users", "body": {...} },    │
-│        ...                                                       │
-│      ]                                                           │
-│    }                                                             │
-└────────────┬────────────────────────────────────────────────────┘
-             │
-             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ 6. Handle Responses & Retry Failures                            │
-│    - Success: Log user created                                  │
-│    - Failure: Log error + retry with exponential backoff        │
-│    - Collect failures for manual review                         │
-└────────────┬────────────────────────────────────────────────────┘
-             │
-             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ 7. Post-Import Verification                                     │
-│    - Query External ID: Total user count                        │
-│    - Compare with B2C export count                              │
-│    - Report discrepancies                                       │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│ 4. Log RunSummary (total IDs enqueued, messages sent, duration) │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-#### Multi-App Parallelization Strategy
+#### Required Permissions
 
-Similar to export, use **3-5 app registrations** to boost throughput:
+The harvest instance uses **one** app registration:
 
+**B2C app registration**:
 ```
-┌──────────────────┐
-│ Import Instance 1│  App Registration 1
-│ Files: 1-50      │  ~60 writes/sec
-└──────────────────┘
-        +
-┌──────────────────┐
-│ Import Instance 2│  App Registration 2
-│ Files: 51-100    │  ~60 writes/sec
-└──────────────────┘
-        +
-┌──────────────────┐
-│ Import Instance 3│  App Registration 3
-│ Files: 101-150   │  ~60 writes/sec
-└──────────────────┘
-        =
-  ~180 writes/sec combined
+User.Read.All   (Application permission)   # or Directory.Read.All
 ```
 
-**Critical**: Each instance must run on **different IP addresses** to avoid IP-level throttling (see [Section 8.2](#82-multi-instance-scaling-architecture)).
+No write permissions are required; no access to External ID is needed during harvest.
 
 #### Security Measures
 
-- **Service Principal**: `User.ReadWrite.All` (application permission) in External ID
-- **Credential Storage**: Client secret in Azure Key Vault
-- **Network**: Private endpoint to Blob Storage and Key Vault
-- **Audit Logging**: All user creations logged to Application Insights
+- **Service Principal**: Minimal read-only access to B2C (`User.Read.All`)
+- **Network**: Queue writes go through the shared `IQueueClient` (Managed Identity or connection string)
+
+### 5.2 Worker Migrate — B2C Fetch + EEID Create
+
+**Purpose**: Consume the harvest queue, fetch full user profiles from B2C, transform them, create the accounts in Entra External ID, and enqueue lightweight phone-registration tasks for the parallel phone worker. This single step replaces the old three-step blob pipeline (worker-export → blob → import).
+
+#### Architecture Overview
+
+```
+          Azure Queue: user-ids-to-process
+                       │
+     ┌─────────────────┼─────────────────┐
+     │                 │                 │
+┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
+│ WORKER 1         │ │ WORKER 2         │ │ WORKER N         │
+│ WorkerMigrate    │ │ WorkerMigrate    │ │ WorkerMigrate    │
+│ App Reg 1        │ │ App Reg 2        │ │ App Reg N        │
+│ 1. $batch B2C    │ │ 1. $batch B2C    │ │ 1. $batch B2C    │
+│ 2. POST EEID     │ │ 2. POST EEID     │ │ 2. POST EEID     │
+│ 3. Audit Table   │ │ 3. Audit Table   │ │ 3. Audit Table   │
+│ 4. Enqueue phone │ │ 4. Enqueue phone │ │ 4. Enqueue phone │
+└─────────────────┘ └─────────────────┘ └─────────────────┘
+     │                 │                 │
+     └─────────────────┼─────────────────┘
+                       │
+          Azure Queue: phone-registration
+```
+
+#### Key Features
+
+- **No intermediate blob hop**: B2C fetch and EEID create happen in the same process, eliminating the export→blob→import latency overhead
+- **Unified transformation**: UPN domain rewrite, extension-attribute stamping, email identity injection, and random-password generation are all applied inline
+- **409 Duplicate handling**: If a user already exists in EEID (idempotent re-run), status is recorded as `Duplicate` and a phone-registration task is still enqueued
+- **Azure Table Storage audit trail**: Every user outcome (Created / Duplicate / Failed) is written to the `migration-audit` table with error code and duration
+- **Parallel scalability**: N worker instances share the same queue; each uses an independent app registration and (ideally) a separate IP for full API-quota independence
+
+#### Process Flow (per message)
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ 1. Dequeue message (20 IDs) with visibility timeout             │
+└──────────────────────────────────────────────────────────────────┘
+             │
+             │
+┌──────────────────────────────────────────────────────────────────┐
+│ 2. Fetch full profiles from B2C: GET /$batch (up to 20 IDs)     │
+└──────────────────────────────────────────────────────────────────┘
+             │
+             │ for each user:
+┌──────────────────────────────────────────────────────────────────┐
+│ 3. Transform: UPN domain, ext attrs, email identity, password   │
+└──────────────────────────────────────────────────────────────────┘
+             │
+┌──────────────────────────────────────────────────────────────────┐
+│ 4. POST /users in EEID                                          │
+│    ─── Created (201) → audit(Created) + enqueue phone task       │
+│    ─── Conflict (409) → audit(Duplicate) + enqueue phone task    │
+│    ─── Other error → audit(Failed + errorCode + message)         │
+└──────────────────────────────────────────────────────────────────┘
+             │
+┌──────────────────────────────────────────────────────────────────┐
+│ 5. Delete queue message (ACK)                                   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+#### Audit Trail
+
+Every user outcome is written to Azure Table Storage (`migration-audit` table) in real time:
+
+| Field | Description |
+|---|---|
+| `PartitionKey` | Date in `yyyyMMdd` format |
+| `RowKey` | `migrate_{B2CObjectId}` |
+| `Status` | `Created`, `Duplicate`, or `Failed` |
+| `ErrorCode` | HTTP status or exception type |
+| `ErrorMessage` | Truncated to 4 KB |
+| `DurationMs` | Time taken for the API call |
+
+#### Security Measures
+
+- **B2C Service Principal**: `Directory.Read.All` (application permission)
+- **EEID Service Principal**: `User.ReadWrite.All` (application permission)
+- **Audit Storage**: Managed Identity or storage key (Key Vault recommended for production)
 
 ---
 
@@ -490,34 +468,34 @@ Similar to export, use **3-5 app registrations** to boost throughput:
 
 #### Why a Separate Async Worker?
 
-The Graph endpoint `POST /users/{id}/authentication/phoneMethods` has a significantly lower throttle budget than the main `/users` endpoints. Calling it inline during import would:
+The Graph endpoint `POST /users/{id}/authentication/phoneMethods` has a significantly lower throttle budget than the main `/users` endpoints. Calling it inline during the migrate phase would stall the creation pipeline. Instead, `WorkerMigrateOrchestrator` enqueues a lightweight `{ B2CUserId, EEIDUpn }` message — no phone number stored — and this dedicated worker fetches the phone from B2C at drain time, then registers it in EEID.
 
-- Stall the import pipeline waiting for each call to complete
-- Rapidly exhaust the per-tenant quota, triggering 429 errors
-- Make overall import throughput unpredictable
+**Why not store the phone in the queue?**
 
-Instead, `ImportOrchestrator` **enqueues** `{ upn, phoneNumber }` messages after each batch — a near-zero-cost queue write — and a dedicated `PhoneRegistrationWorker` drains the queue at a controlled, configurable rate.
+Phone numbers are PII. Storing them in plain-text queue messages creates an unnecessary data risk. Fetching at drain time means the phone number is only held in memory for the duration of a single API call pair and never persists outside the two tenants.
 
 #### Architecture
 
 ```
-Import ──► Queue: phone-registration ──► PhoneRegistrationWorker
- (enqueue { upn, phone })                 (ThrottleDelayMs between calls)
-                                          POST /users/{upn}/authentication/phoneMethods
-                                          409 Conflict → treated as success (idempotent)
-                                          Failure → message stays in queue (retry via visibility timeout)
+WorkerMigrate ──► Queue: phone-registration ──► PhoneRegistrationWorker
+ (enqueue { B2CUserId, EEIDUpn })               1. GET B2C phone (phoneMethods API)
+                                                 2. POST EEID /authentication/phoneMethods
+                                                 3. audit(PhoneRegistered / PhoneSkipped / PhoneFailed)
+                                                 409 Conflict → treated as success (idempotent)
+                                                 null phone → audit(PhoneSkipped), delete message
+                                                 Failure → message stays in queue (retry via visibility timeout)
 ```
 
 #### Throttle Strategy
 
 | Setting | Default | Notes |
 |---|---|---|
-| `ThrottleDelayMs` | 1200 ms | ~50 calls/min — well below typical tenant limit |
+| `ThrottleDelayMs` | 2000 ms | 0.5 RPS — matches documented `phoneMethods` tenant limit |
 | `MessageVisibilityTimeoutSeconds` | 120 s | If processing fails, message re-appears after this delay |
 | `MaxEmptyPolls` | 3 | Worker exits after 3 consecutive empty polls (for CLI use) |
 | `EmptyQueuePollDelayMs` | 5000 ms | Wait before re-polling when queue is empty |
 
-Multiple `PhoneRegistrationWorker` instances can run in parallel with different app registrations to increase throughput proportionally.
+Multiple `PhoneRegistrationWorker` instances can run in parallel with different app registrations to increase throughput: 3 instances = 1.5 RPS ≈ 138K phones registered in ~26 hours.
 
 #### User Experience Result
 
@@ -528,13 +506,17 @@ Multiple `PhoneRegistrationWorker` instances can run in parallel with different 
 
 #### Required Permissions
 
-The External ID app registration used by the `PhoneRegistrationWorker` needs:
+The phone worker uses **two** app registrations:
 
+**B2C app registration** (for reading MFA phones):
+```
+UserAuthenticationMethod.Read.All   (Application permission)
+```
+
+**External ID app registration** (for registering phones):
 ```
 UserAuthenticationMethod.ReadWrite.All  (Application permission)
 ```
-
-This is in addition to the standard `User.ReadWrite.All` already required for import.
 
 ---
 
@@ -754,8 +736,8 @@ private static readonly SemaphoreSlim _keyLoadLock = new(1, 1);
 │  ┌─────────────────────────────────────────────────────────┐  │
 │  │ Private Endpoint Subnet (10.0.2.0/24)                   │  │
 │  │ ┌────────────┐  ┌────────────┐  ┌────────────┐          │  │
-│  │ │ PE: Blob   │  │ PE: Key    │  │ PE: Queue  │          │  │
-│  │ │ Storage    │  │ Vault      │  │            │          │  │
+│  │ │ PE: Blob/  │  │ PE: Key    │  │ PE: Queue/ │          │  │
+│  │ │ Table      │  │ Vault      │  │ Table      │          │  │
 │  │ └────────────┘  └────────────┘  └────────────┘          │  │
 │  └─────────────────────────────────────────────────────────┘  │
 │                                                                │
@@ -823,30 +805,33 @@ All Azure services use **System-Assigned Managed Identity** (no service principa
 ┌────────────────────────────────────────────────────────────┐
 │ Azure Resources                                            │
 │                                                            │
-│ ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
-│ │ Key Vault    │  │ Blob Storage │  │ Queue        │      │
-│ │ Role:        │  │ Role:        │  │ Role:        │      │
-│ │ Get Secret   │  │ Blob Data    │  │ Queue Data   │      │
-│ │              │  │ Contributor  │  │ Contributor  │      │
-│ └──────────────┘  └──────────────┘  └──────────────┘      │
+│ ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
+│ │ Key Vault    │  │ Blob Storage │  │ Queue        │  │ Table        │ │
+│ │ Role:        │  │ Role:        │  │ Role:        │  │ Storage      │ │
+│ │ Get Secret   │  │ Blob Data    │  │ Queue Data   │  │ Role:        │ │
+│ │              │  │ Contributor  │  │ Contributor  │  │ Table Data   │ │
+│ └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘ │
 └────────────────────────────────────────────────────────────┘
 ```
 
 #### Service Principal Permissions
 
-**B2C App Registration** (for export and JIT ROPC):
-- `Directory.Read.All` (application permission)
+**B2C App Registration** (for bulk migration reading and JIT ROPC):
+- `User.Read.All` (application permission) — sufficient for harvest and $batch profile reads
 - NO write permissions to B2C
 
-**External ID App Registration** (for import and JIT updates):
-- `User.ReadWrite.All` (application permission)
-- Restricted to specific user properties (no global admin rights)
+**External ID App Registration** (for bulk user creation, phone registration, and JIT updates):
+- `User.ReadWrite.All` (application permission) — user creation and attribute updates
+- `UserAuthenticationMethod.ReadWrite.All` (application permission) — phone registration
+- Restricted to listed permissions (no Global Administrator role required)
 
 ### 7.3 Data Protection
 
 #### Encryption at Rest
 
-- **Blob Storage**: Azure Storage Service Encryption (SSE) with Microsoft-managed keys
+- **Queue Storage**: Azure Storage Service Encryption (SSE) with Microsoft-managed keys
+- **Table Storage**: Azure Storage Service Encryption (SSE) — audit records at rest
+- **Blob Storage**: Azure Storage Service Encryption (SSE) — JIT RSA key PEM files
 - **Key Vault**: Hardware Security Module (HSM) backed keys (Premium tier)
 - **Application Insights**: Encrypted logs with 90-day retention
 
@@ -939,10 +924,10 @@ To scale beyond 60 ops/sec, deploy **multiple instances** on **different IP addr
 **Option 1: Azure Container Instances (ACI)**
 ```bash
 az container create \
-  --name migration-import-1 \
+  --name migration-worker-migrate-1 \
   --image migrationkit:latest \
   --vnet my-vnet --subnet subnet-1 \
-  --environment-variables APPSETTINGS_PATH=appsettings.app1.json
+  --environment-variables APPSETTINGS_PATH=appsettings.worker1.json
 ```
 
 **Option 2: Azure Kubernetes Service (AKS)**
@@ -1057,8 +1042,8 @@ var circuitBreakerPolicy = Policy
 │  ┌────────────────────────────────────────────────────┐    │
 │  │ Private Endpoint Subnet                            │    │
 │  │ ┌────────────┐  ┌────────────┐  ┌────────────┐    │    │
-│  │ │ PE: Key    │  │ PE: Blob   │  │ PE: Queue  │    │    │
-│  │ │ Vault      │  │ Storage    │  │            │    │    │
+│  │ │ PE: Key    │  │ PE: Blob/  │  │ PE: Queue/ │    │    │
+│  │ │ Vault      │  │ Table      │  │ Table      │    │    │
 │  │ └────────────┘  └────────────┘  └────────────┘    │    │
 │  └────────────────────────────────────────────────────┘    │
 │                                                             │
@@ -1098,15 +1083,15 @@ var circuitBreakerPolicy = Policy
 
 **Migration Progress**:
 ```kql
-// Export progress (last 24 hours)
+// worker-migrate progress (last 24 hours)
 traces
 | where message contains "RUN SUMMARY"
-| where message contains "Export"
+| where message contains "worker-migrate" or message contains "WorkerMigrate"
 | extend TotalUsers = toint(extract("Total: ([0-9]+)", 1, message))
 | extend SuccessCount = toint(extract("Success: ([0-9]+)", 1, message))
 | extend FailureCount = toint(extract("Failed: ([0-9]+)", 1, message))
 | summarize 
-    TotalExported = sum(SuccessCount),
+    TotalMigrated = sum(SuccessCount),
     TotalFailed = sum(FailureCount)
     by bin(timestamp, 1h)
 | render timechart
@@ -1152,7 +1137,7 @@ customEvents
 | where ErrorRate > 5.0
 ```
 
-**2. Import/Export Stalled (No progress in 30 minutes)**
+**2. Migration Stalled (No progress in 30 minutes)**
 ```kql
 traces
 | where message contains "RUN SUMMARY"

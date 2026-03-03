@@ -60,11 +60,9 @@ B2CMigrationKit.Function/  # Azure Function for JIT
 
 | Class | Operation | Description |
 |---|---|---|
-| `ExportOrchestrator` | `export` | Single-instance full export (reads + writes in one process) |
-| `HarvestOrchestrator` | `harvest` | Master phase — pages B2C IDs only, enqueues batches |
-| `WorkerExportOrchestrator` | `worker-export` | Worker phase — dequeues IDs, fetches full profiles, uploads blobs |
-| `ImportOrchestrator` | `import` | Creates users in EEID; optionally enqueues phone-registration tasks |
-| `PhoneRegistrationWorker` | `phone-registration` | Async worker that registers MFA phones in EEID at a throttle-safe rate |
+| `HarvestOrchestrator` | `harvest` | Step 1 — pages B2C user IDs, enqueues batches to the migrate queue |
+| `WorkerMigrateOrchestrator` | `worker-migrate` | Step 2a — dequeues ID batches, fetches users from B2C, creates in EEID, enqueues phone tasks |
+| `PhoneRegistrationWorker` | `phone-registration` | Step 2b — dequeues phone tasks, fetches MFA phone from B2C, registers in EEID at 0.5 RPS |
 | `JitMigrationService` | *(Azure Function)* | Validates B2C credentials and returns `MigratePassword` action |
 
 ## Project Structure
@@ -96,8 +94,9 @@ B2CMigrationKit.Function/  # Azure Function for JIT
 - `AuthenticationService` - ROPC-based credential validation
 
 *Orchestrators*
-- `ExportOrchestrator` - B2C user export
-- `ImportOrchestrator` - External ID user import
+- `HarvestOrchestrator` - Step 1: B2C user ID harvest and queue enqueue
+- `WorkerMigrateOrchestrator` - Step 2a: B2C user fetch + EEID create + phone enqueue
+- `PhoneRegistrationWorker` - Step 2b: B2C MFA phone fetch + EEID registration (throttled)
 - `JitMigrationService` - JIT authentication and migration
 
 ## Configuration Guide
@@ -169,7 +168,9 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
   "QueueName": "user-ids-to-process",
   "IdsPerMessage": 20,
   "PageSize": 999,
-  "MessageVisibilityTimeout": "00:05:00"
+  "MessageVisibilityTimeout": "00:05:00",
+  "EnablePhoneHarvest": true,
+  "PhoneHarvestQueueName": "phone-ids-to-fetch"
 }
 ```
 
@@ -178,6 +179,33 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
 - `IdsPerMessage` — Number of user IDs packed into a single queue message (tune based on profile size)
 - `PageSize` — How many users to request per Graph API page (max 999)
 - `MessageVisibilityTimeout` — How long a dequeued message is hidden before becoming visible again if a worker crashes
+- `EnablePhoneHarvest` — When `true` (default), harvest enqueues each batch to **both** `QueueName` and `PhoneHarvestQueueName` simultaneously
+- `PhoneHarvestQueueName` — The second queue drained by `phone-harvest` workers
+
+### Phone Harvest Configuration
+
+```json
+"PhoneHarvest": {
+  "QueueName": "phone-ids-to-fetch",
+  "WorkerBlobPrefix": "phones_w1_",
+  "ThrottleDelayMs": 2000,
+  "MessageVisibilityTimeoutSeconds": 120,
+  "EmptyQueuePollDelayMs": 5000,
+  "MaxEmptyPolls": 3
+}
+```
+
+**Options:**
+- `QueueName` — Must match `Harvest.PhoneHarvestQueueName`
+- `WorkerBlobPrefix` — Prefix for output blobs (e.g., `phones_w1_`, `phones_w2_`). Auto-generated when omitted.
+- `ThrottleDelayMs` — Delay between each `GET /authentication/phoneMethods` call. Default **2000 ms = 0.5 RPS** (documented per-app-per-tenant limit). Do **not** lower this without running each worker under a separate app registration.
+- `MessageVisibilityTimeoutSeconds`, `EmptyQueuePollDelayMs`, `MaxEmptyPolls` — same semantics as worker-export.
+
+**Rate math:**
+- 1 worker = 0.5 RPS → 138 000 users ÷ 0.5 = **76.7 hours**
+- 3 workers (3 separate app registrations) = 1.5 RPS → 138 000 ÷ 1.5 = **~25.6 hours**
+
+Phone-harvest runs in **parallel** with worker-export (both drain from separate queues populated by the same harvest pass).
 
 ### Phone Registration Configuration
 
@@ -191,13 +219,13 @@ Two config blocks control the async phone registration pipeline:
   }
 }
 ```
-Set `EnqueuePhoneRegistration: true` to have `import` push `{ upn, phoneNumber }` messages to the phone-registration queue for users who have a `MobilePhone` value in their profile.
+Set `EnqueuePhoneRegistration: true` to have `import` push `{ upn, phoneNumber }` messages to the phone-registration queue for users who have an `MfaPhoneNumber` value loaded from `phones_*.json` blobs (written by `phone-harvest` workers). Users without a recorded MFA phone are skipped.
 
 **Top-level `PhoneRegistration`** — controls the async worker:
 ```json
 "PhoneRegistration": {
   "QueueName": "phone-registration",
-  "ThrottleDelayMs": 1200,
+  "ThrottleDelayMs": 2000,
   "MessageVisibilityTimeoutSeconds": 120,
   "EmptyQueuePollDelayMs": 5000,
   "MaxEmptyPolls": 3
@@ -205,12 +233,12 @@ Set `EnqueuePhoneRegistration: true` to have `import` push `{ upn, phoneNumber }
 ```
 
 **Options:**
-- `ThrottleDelayMs` — Delay between each `POST /authentication/phoneMethods` call. Default 1200 ms ≈ 50 calls/min. Increase if you see 429 responses.
+- `ThrottleDelayMs` — Delay between each `POST /authentication/phoneMethods` call. Default **2000 ms = 0.5 RPS**, which matches the documented Microsoft Graph per-tenant limit for the `authenticationMethod` resource family (5 req / 10 s per app per tenant). Do **not** lower this below 2000 ms for a single worker per app registration, or you risk sustained HTTP 429 responses. To increase throughput, run multiple workers each using a **separate app registration** (see [Scaling Patterns](#scaling-patterns)).
 - `MessageVisibilityTimeoutSeconds` — How long a message is invisible while being processed. If the worker crashes, the message reappears after this timeout.
 - `EmptyQueuePollDelayMs` — How long the worker sleeps between polls when the queue is empty.
 - `MaxEmptyPolls` — How many consecutive empty polls before the CLI process exits cleanly.
 
-> **Why async?** The `POST /users/{id}/authentication/phoneMethods` API has a much lower throttle quota than the user-creation API. Running phone registration inline with import would stall the import pipeline. Decoupling via queue lets import proceed at full speed while phone registration runs independently at a safe rate.
+> **Why async?** The `POST /users/{id}/authentication/phoneMethods` API has a documented per-tenant limit of **5 requests / 10 seconds (0.5 RPS)** — far lower than the ~60 ops/sec budget of the user-creation API. Running phone registration inline with import would stall the import pipeline. Decoupling via queue lets import proceed at full speed while phone registration runs independently at a safe rate.
 
 ### Storage Configuration
 
@@ -1215,7 +1243,8 @@ az functionapp config appsettings set `
 - User must reset password via SSPR
 
 **Scenario: Graph API Throttling (HTTP 429)**
-- Graph API limit: ~60 ops/sec per app registration
+- General Users API limit: ~60 ops/sec per app registration
+- `authenticationMethod` API limit: **5 req/10s per app per tenant (0.5 RPS)** — ensure `ThrottleDelayMs ≥ 2000`
 - View retry logs: `[GraphClient] Request throttled (429/503) - Retrying in X ms...`
 - For load testing, add delays between requests
 
@@ -2157,6 +2186,22 @@ This means:
 - ✅ 3 instances (3 different IPs) with 1 app each = ~180 ops/sec
 
 **Key Principle**: Each instance (Console App or Azure Function) uses **1 app registration**. To scale, deploy **multiple instances** on **different IP addresses**.
+
+#### Authentication Methods API — Documented Service Limits
+
+The `POST /users/{id}/authentication/phoneMethods` endpoint belongs to the `authenticationMethod` resource family, which has **stricter documented limits** than the general Users API ([source: Microsoft Graph service-specific limits](https://learn.microsoft.com/en-us/graph/throttling-limits#identity-and-access-reports-service-limits)):
+
+| Limit scope | Limit |
+|---|---|
+| Per app, across all tenants | 122 requests / 10 seconds (~12.2 RPS) |
+| **Per app, per tenant** | **5 requests / 10 seconds (0.5 RPS)** ← binding |
+
+The **per-tenant** limit is the binding constraint for our workload (single target tenant — External ID). At 0.5 RPS, a single worker requires at minimum **2 000 ms** between calls.
+
+**Scaling phone registration** (if 0.5 RPS is too slow):
+- Run multiple `phone-registration` workers, each with a **dedicated EEID app registration**
+- Each additional app registration adds another 0.5 RPS budget for that tenant
+- e.g., 4 workers × 4 app registrations = ~2 RPS = ~7 200 phone registrations/hour
 
 #### Console App Scaling
 

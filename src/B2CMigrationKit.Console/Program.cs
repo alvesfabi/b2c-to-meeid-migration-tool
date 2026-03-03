@@ -41,10 +41,8 @@ class Program
             // Execute operation
             var exitCode = operation switch
             {
-                "export"               => await RunExportAsync(host),
-                "import"               => await RunImportAsync(host),
                 "harvest"              => await RunHarvestAsync(host),
-                "worker-export"        => await RunWorkerExportAsync(host),
+                "worker-migrate"       => await RunWorkerMigrateAsync(host),
                 "phone-registration"   => await RunPhoneRegistrationAsync(host),
                 _ => ShowError($"Unknown operation: {operation}")
             };
@@ -97,6 +95,43 @@ class Program
             });
     }
 
+    static async Task<int> RunWorkerMigrateAsync(IHost host)
+    {
+        System.Console.WriteLine("Starting worker-migrate phase...");
+        System.Console.WriteLine("Dequeuing user-ID batches from B2C, creating accounts in Entra External ID,");
+        System.Console.WriteLine("and enqueuing phone-registration tasks.");
+        System.Console.WriteLine();
+
+        var orchestrator = host.Services.GetRequiredService<WorkerMigrateOrchestrator>();
+        var result = await orchestrator.ExecuteAsync();
+
+        if (result.Success)
+        {
+            System.Console.ForegroundColor = ConsoleColor.Green;
+            System.Console.WriteLine();
+            System.Console.WriteLine("Worker migrate completed successfully!");
+            System.Console.WriteLine($"Total users processed  : {result.Summary?.TotalItems ?? 0:N0}");
+            System.Console.WriteLine($"Users created          : {result.Summary?.SuccessCount ?? 0:N0}");
+            System.Console.WriteLine($"Duplicates             : {result.Summary?.SkippedCount ?? 0:N0}");
+            System.Console.WriteLine($"Failed                 : {result.Summary?.FailureCount ?? 0:N0}");
+            System.Console.WriteLine($"Duration               : {result.Duration}");
+            System.Console.ResetColor();
+            return 0;
+        }
+        else
+        {
+            System.Console.ForegroundColor = ConsoleColor.Red;
+            System.Console.WriteLine();
+            System.Console.WriteLine("Worker migrate finished with errors!");
+            System.Console.WriteLine($"Total processed  : {result.Summary?.TotalItems ?? 0:N0}");
+            System.Console.WriteLine($"Created          : {result.Summary?.SuccessCount ?? 0:N0}");
+            System.Console.WriteLine($"Failed           : {result.Summary?.FailureCount ?? 0}");
+            System.Console.WriteLine($"Error            : {result.ErrorMessage}");
+            System.Console.ResetColor();
+            return 1;
+        }
+    }
+
     static async Task<int> RunPhoneRegistrationAsync(IHost host)
     {
         System.Console.WriteLine("Starting phone-registration worker...");
@@ -146,7 +181,9 @@ class Program
             System.Console.WriteLine($"Total IDs enqueued: {result.Summary?.TotalItems ?? 0:N0}");
             System.Console.WriteLine($"Duration: {result.Duration}");
             System.Console.WriteLine();
-            System.Console.WriteLine("Next step: run worker-export on one or more consoles (each with its own --config).");
+            System.Console.WriteLine("Next steps (run in parallel, each with its own --config):");
+            System.Console.WriteLine("  B2CMigrationKit.Console worker-migrate --config appsettings.worker1.json");
+            System.Console.WriteLine("  B2CMigrationKit.Console phone-registration --config appsettings.worker1.json");
             System.Console.ResetColor();
             return 0;
         }
@@ -161,98 +198,6 @@ class Program
         }
     }
 
-    static async Task<int> RunWorkerExportAsync(IHost host)
-    {
-        System.Console.WriteLine("Starting Worker/Consumer export phase...");
-        System.Console.WriteLine("Dequeuing user-ID batches and fetching full profiles from Azure AD B2C.");
-        System.Console.WriteLine();
-
-        var orchestrator = host.Services.GetRequiredService<WorkerExportOrchestrator>();
-        var result = await orchestrator.ExecuteAsync();
-
-        if (result.Success)
-        {
-            System.Console.ForegroundColor = ConsoleColor.Green;
-            System.Console.WriteLine();
-            System.Console.WriteLine("Worker export completed successfully!");
-            System.Console.WriteLine($"Total users exported: {result.Summary?.TotalItems ?? 0:N0}");
-            System.Console.WriteLine($"Duration: {result.Duration}");
-            System.Console.ResetColor();
-            return 0;
-        }
-        else
-        {
-            System.Console.ForegroundColor = ConsoleColor.Red;
-            System.Console.WriteLine();
-            System.Console.WriteLine("Worker export finished with errors!");
-            System.Console.WriteLine($"Users exported: {result.Summary?.TotalItems ?? 0:N0}");
-            System.Console.WriteLine($"Failed messages: {result.Summary?.FailureCount ?? 0}");
-            System.Console.WriteLine($"Error: {result.ErrorMessage}");
-            System.Console.ResetColor();
-            return 1;
-        }
-    }
-
-    static async Task<int> RunExportAsync(IHost host)
-    {
-        System.Console.WriteLine("Starting user export from Azure AD B2C...");
-        System.Console.WriteLine();
-
-        var orchestrator = host.Services.GetRequiredService<ExportOrchestrator>();
-        var result = await orchestrator.ExecuteAsync();
-
-        if (result.Success)
-        {
-            System.Console.ForegroundColor = ConsoleColor.Green;
-            System.Console.WriteLine();
-            System.Console.WriteLine("Export completed successfully!");
-            System.Console.WriteLine($"Total users exported: {result.Summary?.TotalItems ?? 0}");
-            System.Console.WriteLine($"Duration: {result.Duration}");
-            System.Console.ResetColor();
-            return 0;
-        }
-        else
-        {
-            System.Console.ForegroundColor = ConsoleColor.Red;
-            System.Console.WriteLine();
-            System.Console.WriteLine("Export failed!");
-            System.Console.WriteLine($"Error: {result.ErrorMessage}");
-            System.Console.ResetColor();
-            return 1;
-        }
-    }
-
-    static async Task<int> RunImportAsync(IHost host)
-    {
-        System.Console.WriteLine("Starting user import to Entra External ID...");
-        System.Console.WriteLine();
-
-        var orchestrator = host.Services.GetRequiredService<ImportOrchestrator>();
-        var result = await orchestrator.ExecuteAsync();
-
-        if (result.Success)
-        {
-            System.Console.ForegroundColor = ConsoleColor.Green;
-            System.Console.WriteLine();
-            System.Console.WriteLine("Import completed successfully!");
-            System.Console.WriteLine($"Total users processed: {result.Summary?.TotalItems ?? 0}");
-            System.Console.WriteLine($"Successful: {result.Summary?.SuccessCount ?? 0}");
-            System.Console.WriteLine($"Failed: {result.Summary?.FailureCount ?? 0}");
-            System.Console.WriteLine($"Duration: {result.Duration}");
-            System.Console.ResetColor();
-            return result.Summary?.FailureCount > 0 ? 2 : 0;
-        }
-        else
-        {
-            System.Console.ForegroundColor = ConsoleColor.Red;
-            System.Console.WriteLine();
-            System.Console.WriteLine("Import failed!");
-            System.Console.WriteLine($"Error: {result.ErrorMessage}");
-            System.Console.ResetColor();
-            return 1;
-        }
-    }
-
     static void ShowHelp()
     {
         System.Console.WriteLine("B2C Migration Kit - Console Runner");
@@ -261,25 +206,29 @@ class Program
         System.Console.WriteLine("Usage: B2CMigrationKit.Console <operation> [options]");
         System.Console.WriteLine();
         System.Console.WriteLine("Operations:");
-        System.Console.WriteLine("  export                Export users from Azure AD B2C to Blob Storage (single-instance pagination)");
-        System.Console.WriteLine("  import                Import users from Blob Storage to Entra External ID");
-        System.Console.WriteLine("  harvest               Master phase: fetch all user IDs from B2C and enqueue batches (queue-based)");
-        System.Console.WriteLine("  worker-export         Worker phase: dequeue batches, fetch full profiles, upload to Blob Storage");
-        System.Console.WriteLine("  phone-registration    Register MFA phone numbers in Entra External ID (async, throttled)");
+        System.Console.WriteLine("  harvest               Step 1: Fetch all user IDs from Azure AD B2C and enqueue batches");
+        System.Console.WriteLine("  worker-migrate        Step 2a: Dequeue batches, create users in Entra External ID, enqueue phone tasks");
+        System.Console.WriteLine("  phone-registration    Step 2b: Dequeue phone tasks, fetch MFA phone from B2C, register in EEID");
         System.Console.WriteLine("  help                  Show this help message");
         System.Console.WriteLine();
         System.Console.WriteLine("Options:");
         System.Console.WriteLine("  --config <path>    Path to configuration file (default: appsettings.json)");
         System.Console.WriteLine("  --verbose          Enable verbose logging");
         System.Console.WriteLine();
-        System.Console.WriteLine("Master/Worker pattern (recommended for large tenants):");
+        System.Console.WriteLine("Unified queue-based pipeline (recommended for large tenants):");
+        System.Console.WriteLine();
         System.Console.WriteLine("  Step 1 – one instance runs 'harvest' to enqueue all user IDs:");
         System.Console.WriteLine("    B2CMigrationKit.Console harvest --config appsettings.master.json");
         System.Console.WriteLine();
-        System.Console.WriteLine("  Step 2 – N workers run 'worker-export' in parallel (each with its own App Registration):");
-        System.Console.WriteLine("    B2CMigrationKit.Console worker-export --config appsettings.app1.json");
-        System.Console.WriteLine("    B2CMigrationKit.Console worker-export --config appsettings.app2.json");
-        System.Console.WriteLine("    B2CMigrationKit.Console worker-export --config appsettings.app3.json");
+        System.Console.WriteLine("  Step 2a – N workers run 'worker-migrate' in parallel (each with its own App Registration):");
+        System.Console.WriteLine("    B2CMigrationKit.Console worker-migrate --config appsettings.worker1.json");
+        System.Console.WriteLine("    B2CMigrationKit.Console worker-migrate --config appsettings.worker2.json");
+        System.Console.WriteLine();
+        System.Console.WriteLine("  Step 2b – (run simultaneously with 2a) M workers run 'phone-registration':");
+        System.Console.WriteLine("    B2CMigrationKit.Console phone-registration --config appsettings.worker1.json");
+        System.Console.WriteLine("    B2CMigrationKit.Console phone-registration --config appsettings.worker2.json");
+        System.Console.WriteLine("    Note: phone-registration is throttled to 0.5 RPS per app-registration.");
+        System.Console.WriteLine("          3 workers = 1.5 RPS ≈ 138K MFA phones registered per 26 hours.");
     }
 
     static int ShowError(string message)

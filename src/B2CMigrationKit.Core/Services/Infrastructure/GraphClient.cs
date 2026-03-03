@@ -376,6 +376,36 @@ public class GraphClient : IGraphClient
         }, cancellationToken);
     }
 
+    public async Task<string?> GetMfaPhoneNumberAsync(
+        string userId,
+        CancellationToken cancellationToken = default)
+    {
+        // Fixed GUID for the mobile phone authentication method type.
+        // Source: https://learn.microsoft.com/en-us/graph/api/phoneauthenticationmethod-get
+        const string MobilePhoneMethodId = "3179e48a-750b-4051-897c-87b9720928f7";
+
+        try
+        {
+            return await _retryPipeline.ExecuteAsync(async ct =>
+            {
+                var method = await _client.Users[userId]
+                    .Authentication
+                    .PhoneMethods[MobilePhoneMethodId]
+                    .GetAsync(cancellationToken: ct);
+
+                _telemetry.IncrementCounter("GraphClient.MfaPhoneFetched");
+                return method?.PhoneNumber;
+            }, cancellationToken);
+        }
+        catch (Microsoft.Graph.Models.ODataErrors.ODataError odataError)
+            when (odataError.ResponseStatusCode == (int)System.Net.HttpStatusCode.NotFound)
+        {
+            // 404 = no mobile phone method registered for this user — normal, not an error
+            _telemetry.IncrementCounter("GraphClient.MfaPhoneNotFound");
+            return null;
+        }
+    }
+
     public async Task RegisterPhoneAuthMethodAsync(
         string userIdOrUpn,
         string phoneNumber,

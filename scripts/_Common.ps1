@@ -203,7 +203,7 @@ function Invoke-ConsoleApp {
         Push-Location $AppDir
 
         Write-Info "Building console application..."
-        dotnet build --configuration Debug --nologo --verbosity quiet
+        dotnet build --configuration Debug --nologo --verbosity quiet | Out-Host
 
         if ($LASTEXITCODE -ne 0) {
             Write-Err "Build failed."
@@ -213,7 +213,7 @@ function Invoke-ConsoleApp {
         Write-Success "✓ Build successful"
         Write-Host ""
 
-        dotnet run --no-build --configuration Debug -- $appArgs
+        dotnet run --no-build --configuration Debug -- $appArgs | Out-Host
         return $LASTEXITCODE
     }
     finally {

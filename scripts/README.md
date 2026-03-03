@@ -122,8 +122,20 @@ all user IDs have been enqueued.
 4. Groups IDs into batches and sends each batch as one queue message
 5. Prints a summary with next-step instructions
 
-**Smoke-test cap:** Set `Harvest.MaxUsers` in your config to limit the number of users
-enqueued (e.g., `20`) for a quick end-to-end test. Set to `0` for unlimited.
+**Smoke-test cap (`MaxUsers`):** To run an end-to-end test with a small number of users,
+set `Harvest.MaxUsers` in `appsettings.master.json` before running the script:
+
+```json
+"Harvest": {
+  "QueueName": "user-ids-to-process",
+  "IdsPerMessage": 20,
+  "PageSize": 999,
+  "MaxUsers": 20
+}
+```
+
+- `MaxUsers: 20` — stops after enqueuing 20 users (smoke test)
+- `MaxUsers: 0` — no cap, enqueues all users (full migration)
 
 ---
 

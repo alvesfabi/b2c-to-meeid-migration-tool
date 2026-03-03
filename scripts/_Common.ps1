@@ -162,9 +162,9 @@ function Initialize-LocalStorage {
     }
 
     # Audit table
-    $out = az storage table create --name "migration-audit" --connection-string $cs --only-show-errors 2>&1
+    $out = az storage table create --name "migrationAudit" --connection-string $cs --only-show-errors 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Warn "  ⚠ Could not create table 'migration-audit' (may already exist)"
+        Write-Warn "  ⚠ Could not create table 'migrationAudit' (may already exist)"
         # not counted as blocking error
     }
 

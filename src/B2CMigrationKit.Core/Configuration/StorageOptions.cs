@@ -46,7 +46,7 @@ public class StorageOptions
     /// Azure Table Storage table name for migration audit records.
     /// Each <c>worker-migrate</c> user-create and <c>worker-phone</c> phone-register
     /// outcome is written here as a searchable row.
-    /// Default: "migration-audit"
+    /// Default: "migrationAudit"
     /// </summary>
-    public string AuditTableName { get; set; } = "migration-audit";
+    public string AuditTableName { get; set; } = "migrationAudit";
 }

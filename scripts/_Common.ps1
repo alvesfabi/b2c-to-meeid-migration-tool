@@ -145,23 +145,14 @@ function Initialize-LocalStorage {
     $cs = "UseDevelopmentStorage=true"
     $errors = 0
 
-    # Blob containers
-    foreach ($container in @("user-exports", "migration-errors", "import-audit")) {
-        $out = az storage container create --name $container --connection-string $cs --only-show-errors 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warn "  ⚠ Could not create blob container '$container' (may already exist)"
-            $errors++
-        }
-    }
-
-    # Harvest queue (Master/Worker pattern)
+    # Harvest queue (producer → worker-migrate)
     $out = az storage queue create --name $HarvestQueueName --connection-string $cs --only-show-errors 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Warn "  ⚠ Could not create queue '$HarvestQueueName' (may already exist)"
         $errors++
     }
 
-    # Phone-registration queue (async phone reg worker)
+    # Phone-registration queue (worker-migrate → phone-registration workers)
     if ($PhoneRegQueueName) {
         $out = az storage queue create --name $PhoneRegQueueName --connection-string $cs --only-show-errors 2>&1
         if ($LASTEXITCODE -ne 0) {
@@ -170,8 +161,15 @@ function Initialize-LocalStorage {
         }
     }
 
+    # Audit table
+    $out = az storage table create --name "migration-audit" --connection-string $cs --only-show-errors 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn "  ⚠ Could not create table 'migration-audit' (may already exist)"
+        # not counted as blocking error
+    }
+
     if ($errors -eq 0) {
-        Write-Success "✓ Storage resources ready (containers + queues '$HarvestQueueName', '$PhoneRegQueueName')"
+        Write-Success "✓ Storage resources ready (queues + audit table)"
     }
     else {
         Write-Warn "  Some resources could not be pre-created – the app will create them on first use."
@@ -184,7 +182,7 @@ function Initialize-LocalStorage {
 .PARAMETER AppDir
     Directory containing the .csproj (must be the working directory for dotnet run).
 .PARAMETER Operation
-    The operation to pass as the first argument (export, import, harvest, worker-export).
+    The operation to pass as the first argument (harvest, worker-migrate, phone-registration).
 .PARAMETER ConfigFile
     Config file name (relative to AppDir).
 .PARAMETER VerboseLogging

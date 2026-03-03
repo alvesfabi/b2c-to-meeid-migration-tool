@@ -79,6 +79,7 @@ public class HarvestOrchestrator : IOrchestrator<ExecutionResult>
             string? skipToken = null;
             var pendingIds = new List<string>(idsPerMessage);
             var overallStart = DateTimeOffset.UtcNow;
+            var capReached = false;
 
             do
             {
@@ -109,7 +110,7 @@ public class HarvestOrchestrator : IOrchestrator<ExecutionResult>
                         _logger.LogInformation(
                             "MaxUsers cap reached ({MaxUsers}). Stopping harvest early.",
                             harvestOpts.MaxUsers);
-                        skipToken = null; // break outer do-while
+                        capReached = true;
                         break;
                     }
                 }
@@ -125,7 +126,8 @@ public class HarvestOrchestrator : IOrchestrator<ExecutionResult>
 
                 _telemetry.IncrementCounter("Harvest.IdsHarvested", page.Items.Count);
 
-                skipToken = page.NextPageToken;
+                // Only advance to the next page if the cap has not been hit
+                skipToken = capReached ? null : page.NextPageToken;
                 pageNumber++;
 
                 if (_options.BatchDelayMs > 0 && page.HasMorePages)

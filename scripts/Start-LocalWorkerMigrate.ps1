@@ -2,13 +2,15 @@
 # Licensed under the MIT License.
 <#
 .SYNOPSIS
-    Worker/Consumer phase – dequeues user-ID batches and exports full profiles
-    to Blob Storage using the Graph $batch API.
+    Worker-migrate phase – dequeues user-ID batches, fetches full profiles from
+    B2C via Graph $batch, creates them in Entra External ID, and enqueues phone
+    tasks. Combines what used to be separate worker-export + import steps into
+    one, with no blob files.
 
 .DESCRIPTION
     This script:
     1. Verifies Azurite is running via the VS Code extension (checks ports 10000/10001)
-    2. Builds and runs the B2C Migration Kit console with the 'worker-export' operation
+    2. Builds and runs the B2C Migration Kit console with the 'worker-migrate' operation
 
     Azurite must be started manually from VS Code before running this script:
       Ctrl+Shift+P  →  "Azurite: Start Service"
@@ -17,13 +19,21 @@
     You can open multiple terminals and run this script simultaneously,
     each pointing to a different App Registration config, to multiply throughput:
 
-      Terminal 1:  .\Start-LocalWorkerExport.ps1
-      Terminal 2:  .\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.worker2.json
-      Terminal 3:  .\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.worker3.json
+      Terminal 1:  .\Start-LocalWorkerMigrate.ps1
+      Terminal 2:  .\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker2.json
+      Terminal 3:  .\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker3.json
 
-    Each worker independently dequeues messages, calls Graph $batch for up to 20
-    users per HTTP request, uploads results to Blob Storage, and deletes the message.
-    If a worker crashes, that message reappears after the visibility timeout (5 min).
+    Each worker independently:
+      1. Dequeues a message (20 user IDs) from 'user-ids-to-process'
+      2. Calls Graph $batch to fetch full profiles from B2C
+      3. Transforms (UPN domain rewrite, extension attrs, email identity, random password)
+      4. Creates each user in Entra External ID
+      5. Writes Created/Duplicate/Failed to the 'migration-audit' Table Storage
+      6. Enqueues { B2CUserId, EEIDUpn } to 'phone-registration' queue
+      7. Deletes the queue message (ACK)
+
+    If a worker crashes, the message reappears after the visibility timeout (5 min)
+    and will be retried by any available worker.
 
 .PARAMETER ConfigFile
     Path to the configuration file relative to the console project directory.
@@ -37,13 +47,13 @@
     Skip the Azurite port check. Use when pointing to a real Azure Storage account.
 
 .EXAMPLE
-    .\Start-LocalWorkerExport.ps1
+    .\Start-LocalWorkerMigrate.ps1
 
 .EXAMPLE
-    .\Start-LocalWorkerExport.ps1 -ConfigFile "appsettings.worker2.json" -VerboseLogging
+    .\Start-LocalWorkerMigrate.ps1 -ConfigFile "appsettings.worker2.json" -VerboseLogging
 
 .EXAMPLE
-    .\Start-LocalWorkerExport.ps1 -SkipAzurite
+    .\Start-LocalWorkerMigrate.ps1 -SkipAzurite
 #>
 
 param(
@@ -69,7 +79,7 @@ $configPath    = Join-Path $consoleAppDir $ConfigFile
 # ─── Header ─────────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "  B2C Migration Kit - Worker Export (Consumer phase)" -ForegroundColor Cyan
+Write-Host "  B2C Migration Kit - Worker Migrate (Consumer phase)" -ForegroundColor Cyan
 Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host ""
 
@@ -90,24 +100,27 @@ Confirm-AzuriteRunning -SkipAzurite $skipCheck
 
 # ─── Run ─────────────────────────────────────────────────────────────────────
 Write-Host ""
-Write-Info "Starting worker export: dequeue → Graph `$batch → Blob Storage..."
-Write-Info "Worker will stop automatically when the queue is empty."
+Write-Info "Starting worker-migrate: dequeue → Graph `$batch (B2C) → POST users (EEID) → phone queue..."
+Write-Info "Worker will stop automatically when the queue is empty (MaxEmptyPolls reached)."
 Write-Host ""
 
 $exitCode = Invoke-ConsoleApp `
     -AppDir         $consoleAppDir `
-    -Operation      "worker-export" `
+    -Operation      "worker-migrate" `
     -ConfigFile     $ConfigFile `
     -VerboseLogging $VerboseLogging.IsPresent
 
 Write-Host ""
 if ($exitCode -eq 0) {
     Write-Success "═══════════════════════════════════════════════════════"
-    Write-Success "  Worker export completed successfully!"
+    Write-Success "  Worker migrate completed!"
+    Write-Success ""
+    Write-Success "  Next step – drain the phone-registration queue:"
+    Write-Success "    .\Start-LocalPhoneRegistration.ps1"
     Write-Success "═══════════════════════════════════════════════════════"
 } else {
     Write-Err "═══════════════════════════════════════════════════════"
-    Write-Err "  Worker export finished with errors (exit code $exitCode)"
+    Write-Err "  Worker migrate finished with errors (exit code $exitCode)"
     Write-Err "  Some messages may still be in the queue for retry."
     Write-Err "  Re-run this script to process remaining messages."
     Write-Err "═══════════════════════════════════════════════════════"

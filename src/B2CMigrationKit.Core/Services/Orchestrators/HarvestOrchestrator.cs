@@ -67,6 +67,8 @@ public class HarvestOrchestrator : IOrchestrator<ExecutionResult>
             _logger.LogInformation("Queue           : {Queue}", queueName);
             _logger.LogInformation("IDs per message : {IdsPerMessage}", idsPerMessage);
             _logger.LogInformation("B2C page size   : {PageSize} (requesting only 'id')", pageSize);
+            if (harvestOpts.MaxUsers > 0)
+                _logger.LogInformation("Max users cap   : {MaxUsers} (smoke-test mode)", harvestOpts.MaxUsers);
             _telemetry.TrackEvent("Harvest.Started");
 
             // Ensure the migration queue exists
@@ -99,6 +101,16 @@ public class HarvestOrchestrator : IOrchestrator<ExecutionResult>
                         await EnqueueBatchAsync(queueName, pendingIds, cancellationToken);
                         messagesEnqueued++;
                         pendingIds = new List<string>(idsPerMessage);
+                    }
+
+                    // Honour MaxUsers cap (0 = unlimited)
+                    if (harvestOpts.MaxUsers > 0 && summary.TotalItems >= harvestOpts.MaxUsers)
+                    {
+                        _logger.LogInformation(
+                            "MaxUsers cap reached ({MaxUsers}). Stopping harvest early.",
+                            harvestOpts.MaxUsers);
+                        skipToken = null; // break outer do-while
+                        break;
                     }
                 }
 

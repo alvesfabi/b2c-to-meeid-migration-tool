@@ -8,12 +8,10 @@ This directory contains PowerShell scripts for local development, testing, and J
 
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
-- [Export & Import Scripts](#export--import-scripts)
-  - [Start-LocalExport.ps1](#start-localexportps1)
-  - [Start-LocalImport.ps1](#start-localimportps1)
-  - [Start-LocalHarvest.ps1](#start-localharvestps1--masterproducer-phase)
-  - [Start-LocalWorkerExport.ps1](#start-localworkerexportps1--workerconsumer-phase)
-  - [Start-LocalPhoneRegistration.ps1](#start-localphoneregistrationps1--async-phone-registration)
+- [Migration Scripts](#migration-scripts)
+  - [Start-LocalHarvest.ps1](#start-localharvestps1--producer-phase)
+  - [Start-LocalWorkerMigrate.ps1](#start-localworkermigratemasterps1--worker-phase)
+  - [Start-LocalPhoneRegistration.ps1](#start-localphoneregistrationps1--phone-registration-phase)
 - [JIT Migration Setup](#jit-migration-setup)
   - [Generate RSA Keys](#1-generate-rsa-keys)
   - [Configure External ID](#2-configure-external-id)
@@ -25,7 +23,7 @@ This directory contains PowerShell scripts for local development, testing, and J
 
 ## Prerequisites
 
-### For Export/Import Operations
+### For Migration Operations
 
 1. **.NET 8.0 SDK** - Build and run the console application
    ```powershell
@@ -75,94 +73,37 @@ This directory contains PowerShell scripts for local development, testing, and J
 
 > ⚠️ **Azurite must be running first.** Start it from VS Code: `Ctrl+Shift+P` → `Azurite: Start Service`
 
-### Option A – Single-instance export (simple, smaller tenants)
-
 ```powershell
-.\scripts\Start-LocalExport.ps1     # Export all users via full pagination
-.\scripts\Start-LocalImport.ps1     # Import to External ID
-```
-
-### Option B – Master/Worker export (recommended for 50K+ users)
-
-```powershell
-# Step 1: run ONCE – enqueues all user IDs (fast, only fetches 'id' field)
+# Step 1: run ONCE – enqueues all user IDs (fast, only fetches the 'id' field)
 .\scripts\Start-LocalHarvest.ps1
 
 # Step 2: run in PARALLEL, each in its own terminal with its own App Registration
-.\scripts\Start-LocalWorkerExport.ps1                              # Terminal 1: default config (appsettings.worker1.json)
-.\scripts\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.worker2.json  # Terminal 2
-.\scripts\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.worker3.json  # Terminal 3
+.\scripts\Start-LocalWorkerMigrate.ps1                                        # Terminal 1: default config (appsettings.worker1.json)
+.\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker2.json   # Terminal 2
+.\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker3.json   # Terminal 3
 
-# Step 3: import (same as before)
-.\scripts\Start-LocalImport.ps1
-
-# Step 4: (optional) drain phone-registration queue
+# Step 3: (optional) drain phone-registration queue after workers are done
 .\scripts\Start-LocalPhoneRegistration.ps1
 ```
 
 **✅ What the scripts do automatically:**
 - Verify Azurite is running via the VS Code extension (port check – no npm needed)
 - Auto-detect whether local Azurite or cloud storage is configured
-- Pre-create storage containers (`user-exports`, `migration-errors`, `import-audit`) and queues (`user-ids-to-process`, `phone-registration`) via Azure CLI (if available)
+- Pre-create queues (`user-ids-to-process`, `phone-registration`) and tables (`migration-audit`) via Azure CLI (if available)
 - Build and run the console application
 - Display color-coded progress and status messages
 
 ---
 
-## Export & Import Scripts
+## Migration Scripts
 
-### Start-LocalExport.ps1
-
-Exports users from Azure AD B2C to local Azurite storage using full pagination (single instance).
-
-**Usage:**
-```powershell
-.\Start-LocalExport.ps1 [-VerboseLogging] [-ConfigFile "config.json"] [-SkipAzurite]
-```
-
-**Parameters:**
-- `-ConfigFile` - Configuration file path (default: `appsettings.local.json`)
-- `-VerboseLogging` - Enable detailed logging
-- `-SkipAzurite` - Skip Azurite port check (use cloud storage)
-
-**What it does:**
-1. Validates configuration file exists
-2. Detects storage mode (local vs cloud)
-3. Verifies Azurite ports 10000/10001 are open (VS Code extension)
-4. Pre-creates blob containers via Azure CLI
-5. Builds and runs `export` (full B2C pagination → Blob Storage)
-
-> For large tenants use `Start-LocalHarvest.ps1` + `Start-LocalWorkerExport.ps1` instead.
-
----
-
-### Start-LocalImport.ps1
-
-Imports users from local Azurite Blob Storage to Entra External ID.
-
-**Usage:**
-```powershell
-.\Start-LocalImport.ps1 [-VerboseLogging] [-ConfigFile "config.json"] [-SkipAzurite]
-```
-
-**Parameters:**
-- `-ConfigFile` - Configuration file path (default: `appsettings.local.json`)
-- `-VerboseLogging` - Enable detailed logging
-- `-SkipAzurite` - Skip Azurite port check (use cloud storage)
-
-**What it does:**
-1. Validates configuration file exists
-2. Detects storage mode (local vs cloud)
-3. Verifies Azurite ports 10000/10001 are open (VS Code extension)
-4. Pre-creates blob containers via Azure CLI
-5. Builds and runs `import` (Blob Storage → Entra External ID)
-
----
-
-### Start-LocalHarvest.ps1  *(Master/Producer phase)*
+### Start-LocalHarvest.ps1  *(Producer phase)*
 
 Fetches **only user IDs** from B2C at maximum speed (page size 999, `$select=id`) and
-enqueues batches of 20 IDs to the Azure Queue `user-ids-to-process`.
+enqueues batches of IDs to the Azure Queue `user-ids-to-process`.
+
+Run this **once** before starting any worker instances. It exits automatically when
+all user IDs have been enqueued.
 
 **Usage:**
 ```powershell
@@ -170,45 +111,54 @@ enqueues batches of 20 IDs to the Azure Queue `user-ids-to-process`.
 ```
 
 **Parameters:**
-- `-ConfigFile` - Configuration file (default: `appsettings.master.json`). Copy from `appsettings.master.example.json` and fill in your credentials.
+- `-ConfigFile` - Configuration file (default: `appsettings.master.json`)
 - `-VerboseLogging` - Enable detailed logging
-- `-SkipAzurite` - Skip Azurite port check
+- `-SkipAzurite` - Skip Azurite port check (use cloud storage)
 
 **What it does:**
 1. Verifies Azurite ports are open
-2. Pre-creates the queue (`user-ids-to-process`) and blob containers
-3. Downloads all user IDs from B2C — extremely fast (only `id` field)
-4. Groups IDs into batches of 20 and sends each batch as one queue message
+2. Pre-creates the queues and tables
+3. Downloads all user IDs from B2C — extremely fast (only `id` field, page size 999)
+4. Groups IDs into batches and sends each batch as one queue message
 5. Prints a summary with next-step instructions
+
+**Smoke-test cap:** Set `Harvest.MaxUsers` in your config to limit the number of users
+enqueued (e.g., `20`) for a quick end-to-end test. Set to `0` for unlimited.
 
 ---
 
-### Start-LocalWorkerExport.ps1  *(Worker/Consumer phase)*
+### Start-LocalWorkerMigrate.ps1  *(Worker phase)*
 
-Consumes the queue populated by the harvest phase. Each worker:
-- Dequeues one message (20 user IDs)
-- Calls `POST /$batch` to fetch full profiles in one HTTP request
-- Uploads a blob to `user-exports`
-- Deletes the message (ACK)
-- Repeats until the queue is empty
+Consumes the `user-ids-to-process` queue populated by the harvest phase. Each worker
+performs a complete batch migration per message:
 
-Run multiple instances simultaneously, each with a **different App Registration config**
+1. Dequeues one message (batch of user IDs)
+2. Calls `POST /$batch` to B2C to fetch full profiles in a single HTTP request
+3. Transforms each profile to the External ID schema (UPN, extension attributes, etc.)
+4. Creates each user in Entra External ID (`POST /users`)
+5. Sets the `RequiresMigration` flag and copies extension attributes
+6. Writes each outcome to the `migration-audit` Table Storage
+7. If phone numbers are present, enqueues a `{ B2CUserId, EEIDUpn }` message to
+   the `phone-registration` queue
+8. Deletes the message from the queue (ACK)
+
+Run multiple instances simultaneously — each with a **different App Registration config**
 to multiply the API throttle limit by the number of workers.
 
 **Usage:**
 ```powershell
 # Terminal 1 (default config: appsettings.worker1.json)
-.\Start-LocalWorkerExport.ps1
+.\Start-LocalWorkerMigrate.ps1
 
 # Terminal 2 (simultaneously, dedicated config for worker 2)
-.\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.worker2.json
+.\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker2.json
 
 # Terminal 3 (simultaneously, dedicated config for worker 3)
-.\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.worker3.json
+.\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker3.json
 ```
 
 **Parameters:**
-- `-ConfigFile` - Configuration file (default: `appsettings.worker1.json`). Copy from `appsettings.worker1.example.json` and fill in your credentials.
+- `-ConfigFile` - Configuration file (default: `appsettings.worker1.json`)
 - `-VerboseLogging` - Enable detailed logging
 - `-SkipAzurite` - Skip Azurite port check
 
@@ -218,13 +168,12 @@ worker (or a re-run) will process it.
 
 ---
 
-### Start-LocalPhoneRegistration.ps1  *(Async Phone Registration)*
+### Start-LocalPhoneRegistration.ps1  *(Phone registration phase)*
 
-Drains the `phone-registration` queue populated by the import phase and registers
-MFA phone numbers in Entra External ID at a throttle-safe rate (~50 calls/min by default).
+Drains the `phone-registration` queue populated by the worker-migrate phase and registers
+MFA phone numbers in Entra External ID at a throttle-safe rate (0.5 RPS / 2000 ms gap).
 
-Run **after** (or concurrently with) `Start-LocalImport.ps1`, provided that
-`Import.PhoneRegistration.EnqueuePhoneRegistration` is set to `true` in config.
+Run **after** (or concurrently with) `Start-LocalWorkerMigrate.ps1`.
 
 **Usage:**
 ```powershell
@@ -240,16 +189,19 @@ Run **after** (or concurrently with) `Start-LocalImport.ps1`, provided that
 1. Validates configuration file exists
 2. Detects storage mode (local vs cloud)
 3. Verifies Azurite ports 10000/10001 are open (VS Code extension)
-4. Builds and runs `phone-registration` worker
-5. Worker dequeues `{ upn, phoneNumber }` messages and calls `POST /users/{upn}/authentication/phoneMethods`
-6. Treats 409 Conflict as success (idempotent — phone already registered)
-7. Exits automatically after `MaxEmptyPolls` consecutive empty queue polls
+4. Builds and runs the `phone-registration` worker
+5. Worker dequeues `{ B2CUserId, EEIDUpn }` messages
+6. Fetches the MFA phone number from B2C for each user
+7. Calls `POST /users/{upn}/authentication/phoneMethods` on Entra External ID
+8. Treats 409 Conflict as success (idempotent — phone already registered)
+9. Writes each outcome to the `migration-audit` Table Storage
+10. Exits automatically after `MaxEmptyPolls` consecutive empty queue polls
 
 **Prerequisites:**
-- EEID app registration must have `UserAuthenticationMethod.ReadWrite.All` (Application) granted and admin-consented
-- Import must have run with `EnqueuePhoneRegistration: true`
+- Entra External ID app registration must have `UserAuthenticationMethod.ReadWrite.All` (Application) granted and admin-consented
+- Worker-migrate must have run with phone registration enabled
 
-> **Why async?** The `POST /authentication/phoneMethods` API has a lower throttle budget than the user-creation API. Running phone registration inline with import would stall the pipeline; decoupling via queue lets each run at its own optimal rate.
+> **Why async?** The `POST /authentication/phoneMethods` API has a lower throttle budget than the user-creation API. Running phone registration inline would stall the pipeline; decoupling via queue lets each run at its own optimal rate.
 
 ---
 
@@ -467,7 +419,7 @@ The scripts use `appsettings.local.json` by default, pre-configured for Azurite:
 2. Start Azurite: `Ctrl+Shift+P` → `Azurite: Start Service`
 3. Copy `appsettings.json` to `appsettings.local.json`
 4. Add your B2C/External ID app registration credentials
-5. Run: `.\scripts\Start-LocalHarvest.ps1` then `.\scripts\Start-LocalWorkerExport.ps1`
+5. Run: `.\scripts\Start-LocalHarvest.ps1` then `.\scripts\Start-LocalWorkerMigrate.ps1`
 
 ### Production/Cloud Storage
 
@@ -568,35 +520,31 @@ Complete local development workflow:
 ```powershell
 # 1. Start Azurite (VS Code: Ctrl+Shift+P → "Azurite: Start Service")
 
-# Option A – single-instance export
-.\scripts\Start-LocalExport.ps1 -VerboseLogging
-
-# Option B – Master/Worker export (recommended for large tenants)
-# 2a. Harvest: enqueue all user IDs (run once)
+# 2. Harvest: enqueue all user IDs (run once)
 .\scripts\Start-LocalHarvest.ps1 -VerboseLogging
 
-# 2b. Workers: process queue in parallel (open separate terminals)
-.\scripts\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app1.json
-.\scripts\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app2.json
+# 3. Workers: migrate users in parallel (open separate terminals)
+.\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker1.json
+.\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker2.json
 
-# 3. Inspect exported data (optional – use Azure Storage Explorer, connect to local)
+# 4. (optional) Register MFA phone numbers once workers are done
+.\scripts\Start-LocalPhoneRegistration.ps1 -VerboseLogging
 
-# 4. Import to External ID
-.\scripts\Start-LocalImport.ps1 -VerboseLogging
+# 5. Inspect audit results (use Azure Storage Explorer → Local Emulator → Tables → migration-audit)
 
-# 5. Generate JIT keys
+# 6. Generate JIT keys
 .\scripts\New-LocalJitRsaKeyPair.ps1
 
-# 6. Configure External ID for JIT
+# 7. Configure External ID for JIT
 .\scripts\Configure-ExternalIdJit.ps1 `
     -TenantId "your-tenant-id" `
     -CertificatePath ".\jit-certificate.txt" `
     -FunctionUrl "https://your-ngrok.ngrok-free.dev/api/JitAuthentication" `
     -MigrationPropertyId "extension_{ExtensionAppId}_RequiresMigration"
 
-# 7. Test JIT (use Portal → User flows → Run user flow)
+# 8. Test JIT (use Portal → User flows → Run user flow)
 
-# 8. Stop Azurite when done (VS Code status bar → click Azurite → Stop)
+# 9. Stop Azurite when done (VS Code status bar → click Azurite → Stop)
 ```
 
 ---

@@ -48,4 +48,12 @@ public class HarvestOptions
     /// Default: 5 minutes.
     /// </summary>
     public TimeSpan MessageVisibilityTimeout { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Gets or sets the maximum number of user IDs to harvest. 0 = unlimited (harvest all users).
+    /// Use a small value (e.g. 20) for local smoke-tests so only a limited number
+    /// of queue messages are produced and worker-migrate exits quickly.
+    /// </summary>
+    [Range(0, int.MaxValue)]
+    public int MaxUsers { get; set; } = 0;
 }

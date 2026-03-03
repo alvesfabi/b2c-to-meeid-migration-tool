@@ -13,13 +13,15 @@
     Azurite must be started manually from VS Code before running this script:
       Ctrl+Shift+P  →  "Azurite: Start Service"
 
-    Run AFTER (or concurrently with) Start-LocalImport.ps1, once
-    Import.PhoneRegistration.EnqueuePhoneRegistration is set to true.
+    Run AFTER (or concurrently with) Start-LocalWorkerMigrate.ps1.
+    The worker-migrate step automatically enqueues { B2CUserId, EEIDUpn } messages
+    to the 'phone-registration' queue as it creates users in EEID.
 
     The worker:
-      - Dequeues { upn, phoneNumber } messages from the 'phone-registration' queue
-      - Calls POST /users/{upn}/authentication/phoneMethods for each user
-      - Sleeps ThrottleDelayMs (default 1200 ms ≈ 50 calls/min) between calls
+      - Dequeues { B2CUserId, EEIDUpn } messages from the 'phone-registration' queue
+      - Fetches the MFA phone number from B2C at drain time (GET /authentication/phoneMethods)
+      - Calls POST /users/{EEIDUpn}/authentication/phoneMethods in EEID for each user
+      - Sleeps ThrottleDelayMs (default 2000 ms = 0.5 RPS) between calls
       - Treats 409 Conflict as success (phone already registered – idempotent)
       - Exits automatically after MaxEmptyPolls consecutive empty queue polls
 

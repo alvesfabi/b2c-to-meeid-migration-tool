@@ -14,10 +14,10 @@
     Azurite must be started manually from VS Code before running this script:
       Ctrl+Shift+P  →  "Azurite: Start Service"
 
-    After harvesting, start one or more worker-export instances (each with its own
+    After harvesting, start one or more worker-migrate instances (each with its own
     App Registration config) to consume the queue in parallel:
-      .\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app1.json
-      .\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.app2.json
+      .\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker1.json
+      .\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker2.json
 
 .PARAMETER ConfigFile
     Path to the configuration file relative to the console project directory.
@@ -89,7 +89,7 @@ if (-not $skipCheck) {
 # ─── Run ─────────────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Info "Starting harvest: paging B2C with `$select=id (page size 999) → Azure Queue..."
-Write-Info "This is the MASTER phase. Start worker-export instances once this completes."
+Write-Info "This is the MASTER phase. Start worker-migrate instances once this completes."
 Write-Host ""
 
 $exitCode = Invoke-ConsoleApp `
@@ -104,8 +104,8 @@ if ($exitCode -eq 0) {
     Write-Success "  Harvest completed! Queue is populated."
     Write-Success ""
     Write-Success "  Next step – start workers (open one terminal per worker):"
-    Write-Success "    .\Start-LocalWorkerExport.ps1"
-    Write-Success "    .\Start-LocalWorkerExport.ps1 -ConfigFile appsettings.worker2.json"
+    Write-Success "    .\Start-LocalWorkerMigrate.ps1"
+    Write-Success "    .\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker2.json"
     Write-Success "═══════════════════════════════════════════════════════"
 } else {
     Write-Err "═══════════════════════════════════════════════════════"

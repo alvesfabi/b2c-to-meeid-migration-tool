@@ -38,6 +38,18 @@ public class GraphClient : IGraphClient
         _retryPipeline = CreateRetryPipeline();
     }
 
+    // HTTP status codes that are deterministic failures — retrying will never help.
+    private static readonly HashSet<int> _nonRetryableStatusCodes = new()
+    {
+        400, // Bad Request
+        401, // Unauthorized
+        403, // Forbidden
+        404, // Not Found
+        405, // Method Not Allowed
+        409, // Conflict (duplicate)
+        422, // Unprocessable Entity
+    };
+
     private ResiliencePipeline CreateRetryPipeline()
     {
         return new ResiliencePipelineBuilder()
@@ -47,6 +59,17 @@ public class GraphClient : IGraphClient
                 Delay = TimeSpan.FromMilliseconds(_retryOptions.InitialDelayMs),
                 BackoffType = DelayBackoffType.Exponential,
                 UseJitter = true,
+                ShouldHandle = args =>
+                {
+                    // Never retry deterministic failures — they will always fail the same way.
+                    if (args.Outcome.Exception is Microsoft.Graph.Models.ODataErrors.ODataError odataError
+                        && _nonRetryableStatusCodes.Contains(odataError.ResponseStatusCode))
+                    {
+                        return ValueTask.FromResult(false);
+                    }
+
+                    return ValueTask.FromResult(args.Outcome.Exception is not null);
+                },
                 OnRetry = args =>
                 {
                     _logger.LogWarning("Retry attempt {Attempt} after {Delay}ms due to: {Exception}",
@@ -384,9 +407,9 @@ public class GraphClient : IGraphClient
         // Source: https://learn.microsoft.com/en-us/graph/api/phoneauthenticationmethod-get
         const string MobilePhoneMethodId = "3179e48a-750b-4051-897c-87b9720928f7";
 
-        try
+        return await _retryPipeline.ExecuteAsync(async ct =>
         {
-            return await _retryPipeline.ExecuteAsync(async ct =>
+            try
             {
                 var method = await _client.Users[userId]
                     .Authentication
@@ -395,15 +418,15 @@ public class GraphClient : IGraphClient
 
                 _telemetry.IncrementCounter("GraphClient.MfaPhoneFetched");
                 return method?.PhoneNumber;
-            }, cancellationToken);
-        }
-        catch (Microsoft.Graph.Models.ODataErrors.ODataError odataError)
-            when (odataError.ResponseStatusCode == (int)System.Net.HttpStatusCode.NotFound)
-        {
-            // 404 = no mobile phone method registered for this user — normal, not an error
-            _telemetry.IncrementCounter("GraphClient.MfaPhoneNotFound");
-            return null;
-        }
+            }
+            catch (Microsoft.Graph.Models.ODataErrors.ODataError odataError)
+                when (odataError.ResponseStatusCode == (int)System.Net.HttpStatusCode.NotFound)
+            {
+                // 404 = no mobile phone method registered for this user — normal, not an error
+                _telemetry.IncrementCounter("GraphClient.MfaPhoneNotFound");
+                return null;
+            }
+        }, cancellationToken);
     }
 
     public async Task RegisterPhoneAuthMethodAsync(
@@ -411,9 +434,9 @@ public class GraphClient : IGraphClient
         string phoneNumber,
         CancellationToken cancellationToken = default)
     {
-        try
+        await _retryPipeline.ExecuteAsync(async ct =>
         {
-            await _retryPipeline.ExecuteAsync(async ct =>
+            try
             {
                 var phoneMethod = new GraphModels.PhoneAuthenticationMethod
                 {
@@ -425,17 +448,17 @@ public class GraphClient : IGraphClient
                     .PostAsync(phoneMethod, cancellationToken: ct);
 
                 _telemetry.IncrementCounter("GraphClient.PhoneMethodRegistered");
-            }, cancellationToken);
-        }
-        catch (Microsoft.Graph.Models.ODataErrors.ODataError odataError)
-            when (odataError.ResponseStatusCode == (int)System.Net.HttpStatusCode.Conflict)
-        {
-            // 409 = phone already registered — treat as success (idempotent)
-            _logger.LogDebug(
-                "Phone method already registered for user {User} (409 Conflict — skipping)",
-                userIdOrUpn);
-            _telemetry.IncrementCounter("GraphClient.PhoneMethodAlreadyRegistered");
-        }
+            }
+            catch (Microsoft.Graph.Models.ODataErrors.ODataError odataError)
+                when (odataError.ResponseStatusCode == (int)System.Net.HttpStatusCode.Conflict)
+            {
+                // 409 = phone already registered — treat as success (idempotent)
+                _logger.LogDebug(
+                    "Phone method already registered for user {User} (409 Conflict — skipping)",
+                    userIdOrUpn);
+                _telemetry.IncrementCounter("GraphClient.PhoneMethodAlreadyRegistered");
+            }
+        }, cancellationToken);
     }
 
     private CoreModels.UserProfile MapToUserProfile(GraphModels.User user)

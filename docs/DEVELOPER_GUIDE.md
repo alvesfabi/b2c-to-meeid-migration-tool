@@ -1,21 +1,17 @@
 # B2C Migration Kit - Developer Guide
 
-This comprehensive guide provides detailed information for developers implementing, customizing, and operating the B2C to External ID Migration Kit.
+This guide covers the architecture, configuration, and local development workflow for the B2C to External ID Migration Kit.
 
 ## Table of Contents
 
 - [Architecture Overview](#architecture-overview)
-- [Project Structure](#project-structure)
 - [Configuration Guide](#configuration-guide)
 - [Development Workflow](#development-workflow)
   - [Local Development Setup](#local-development-setup)
   - [Building the Solution](#building-the-solution)
-  - [Running Tests](#running-tests)
   - [Debugging JIT Function with ngrok](#debugging-jit-function-with-ngrok)
-  - [VS Code Debugging Setup](#step-3b-set-up-vs-code-debugging)
 - [Attribute Mapping Configuration](#attribute-mapping-configuration)
-- [Import Audit Logs](#import-audit-logs)
-- [Testing Strategy](#testing-strategy)
+- [Migration Audit Table](#migration-audit-table)
 - [Deployment Guide](#deployment-guide)
 - [Operations & Monitoring](#operations--monitoring)
 - [Security Best Practices](#security-best-practices)
@@ -64,40 +60,6 @@ B2CMigrationKit.Function/  # Azure Function for JIT
 | `WorkerMigrateOrchestrator` | `worker-migrate` | Step 2a — dequeues ID batches, fetches users from B2C, creates in EEID, enqueues phone tasks |
 | `PhoneRegistrationWorker` | `phone-registration` | Step 2b — dequeues phone tasks, fetches MFA phone from B2C, registers in EEID at 0.5 RPS |
 | `JitMigrationService` | *(Azure Function)* | Validates B2C credentials and returns `MigratePassword` action |
-
-## Project Structure
-
-### Core Library (`B2CMigrationKit.Core`)
-
-**Abstractions Layer**
-- `IOrchestrator<T>` - Base interface for orchestration
-- `IGraphClient` - Microsoft Graph operations
-- `IBlobStorageClient` - Blob Storage operations
-- `ITelemetryService` - Telemetry operations
-- `ICredentialManager` - Multi-app credential rotation
-- `IAuthenticationService` - Credential validation
-
-**Models**
-- `UserProfile` - User identity model
-- `ExecutionResult` - Operation result
-- `BatchResult` - Batch operation result
-- `PagedResult<T>` - Paged API results
-- `MigrationStatus` - Migration state enum
-- `RunSummary` - Execution metrics
-
-**Services**
-
-*Infrastructure Services*
-- `GraphClient` - Implements IGraphClient with Polly v8 resilience pipeline
-- `BlobStorageClient` - Blob operations with Managed Identity
-- `CredentialManager` - Round-robin credential management
-- `AuthenticationService` - ROPC-based credential validation
-
-*Orchestrators*
-- `HarvestOrchestrator` - Step 1: B2C user ID harvest and queue enqueue
-- `WorkerMigrateOrchestrator` - Step 2a: B2C user fetch + EEID create + phone enqueue
-- `PhoneRegistrationWorker` - Step 2b: B2C MFA phone fetch + EEID registration (throttled)
-- `JitMigrationService` - JIT authentication and migration
 
 ## Configuration Guide
 
@@ -168,60 +130,20 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
   "QueueName": "user-ids-to-process",
   "IdsPerMessage": 20,
   "PageSize": 999,
-  "MessageVisibilityTimeout": "00:05:00",
-  "EnablePhoneHarvest": true,
-  "PhoneHarvestQueueName": "phone-ids-to-fetch"
+  "MessageVisibilityTimeout": "00:30:00"
 }
 ```
 
 **Options:**
-- `QueueName` — Storage Queue that worker-export instances consume
+- `QueueName` — Storage Queue that worker-migrate instances consume
 - `IdsPerMessage` — Number of user IDs packed into a single queue message (tune based on profile size)
 - `PageSize` — How many users to request per Graph API page (max 999)
-- `MessageVisibilityTimeout` — How long a dequeued message is hidden before becoming visible again if a worker crashes
-- `EnablePhoneHarvest` — When `true` (default), harvest enqueues each batch to **both** `QueueName` and `PhoneHarvestQueueName` simultaneously
-- `PhoneHarvestQueueName` — The second queue drained by `phone-harvest` workers
-
-### Phone Harvest Configuration
-
-```json
-"PhoneHarvest": {
-  "QueueName": "phone-ids-to-fetch",
-  "WorkerBlobPrefix": "phones_w1_",
-  "ThrottleDelayMs": 2000,
-  "MessageVisibilityTimeoutSeconds": 120,
-  "EmptyQueuePollDelayMs": 5000,
-  "MaxEmptyPolls": 3
-}
-```
-
-**Options:**
-- `QueueName` — Must match `Harvest.PhoneHarvestQueueName`
-- `WorkerBlobPrefix` — Prefix for output blobs (e.g., `phones_w1_`, `phones_w2_`). Auto-generated when omitted.
-- `ThrottleDelayMs` — Delay between each `GET /authentication/phoneMethods` call. Default **2000 ms = 0.5 RPS** (documented per-app-per-tenant limit). Do **not** lower this without running each worker under a separate app registration.
-- `MessageVisibilityTimeoutSeconds`, `EmptyQueuePollDelayMs`, `MaxEmptyPolls` — same semantics as worker-export.
-
-**Rate math:**
-- 1 worker = 0.5 RPS → 138 000 users ÷ 0.5 = **76.7 hours**
-- 3 workers (3 separate app registrations) = 1.5 RPS → 138 000 ÷ 1.5 = **~25.6 hours**
-
-Phone-harvest runs in **parallel** with worker-export (both drain from separate queues populated by the same harvest pass).
+- `MessageVisibilityTimeout` — How long a dequeued message is hidden before becoming visible again if a worker crashes. Default **30 minutes** — covers worst-case retry storms on large batches.
 
 ### Phone Registration Configuration
 
-Two config blocks control the async phone registration pipeline:
+`PhoneRegistration` controls the async phone worker. Worker-migrate automatically enqueues a `{ B2CUserId, EEIDUpn }` message for every user it processes (creates or finds as duplicate). The phone worker then fetches the MFA phone number from B2C at drain time and registers it in EEID.
 
-**Inside `Import`** — controls whether import enqueues phone-registration tasks:
-```json
-"Import": {
-  "PhoneRegistration": {
-    "EnqueuePhoneRegistration": false
-  }
-}
-```
-Set `EnqueuePhoneRegistration: true` to have `import` push `{ upn, phoneNumber }` messages to the phone-registration queue for users who have an `MfaPhoneNumber` value loaded from `phones_*.json` blobs (written by `phone-harvest` workers). Users without a recorded MFA phone are skipped.
-
-**Top-level `PhoneRegistration`** — controls the async worker:
 ```json
 "PhoneRegistration": {
   "QueueName": "phone-registration",
@@ -238,22 +160,22 @@ Set `EnqueuePhoneRegistration: true` to have `import` push `{ upn, phoneNumber }
 - `EmptyQueuePollDelayMs` — How long the worker sleeps between polls when the queue is empty.
 - `MaxEmptyPolls` — How many consecutive empty polls before the CLI process exits cleanly.
 
-> **Why async?** The `POST /users/{id}/authentication/phoneMethods` API has a documented per-tenant limit of **5 requests / 10 seconds (0.5 RPS)** — far lower than the ~60 ops/sec budget of the user-creation API. Running phone registration inline with import would stall the import pipeline. Decoupling via queue lets import proceed at full speed while phone registration runs independently at a safe rate.
+> **Why async?** The `POST /users/{id}/authentication/phoneMethods` API has a documented per-tenant limit of **5 requests / 10 seconds (0.5 RPS)** — far lower than the ~60 ops/sec budget of the user-creation API. Decoupling via queue lets worker-migrate proceed at full speed while phone registration runs independently at a safe rate.
 
 ### Storage Configuration
 
 ```json
 "Storage": {
   "ConnectionStringOrUri": "https://yourstorage.blob.core.windows.net",
-  "ExportContainerName": "user-exports",
+  "AuditTableName": "migrationAudit",
   "UseManagedIdentity": true
 }
 ```
 
 **Required Roles:**
 - Console/Function Managed Identity needs:
-  - `Storage Blob Data Contributor`
   - `Storage Queue Data Contributor`
+  - `Storage Table Data Contributor`
 
 ### Retry Configuration
 
@@ -293,38 +215,9 @@ The toolkit supports dual telemetry output: console logging (local development) 
 - `TrackDependencies` - Track HTTP calls, database queries
 - `TrackExceptions` - Track unhandled exceptions
 
-**Common Scenarios:**
-
-*Local Development (Console Only):*
-```json
-{
-  "UseConsoleLogging": true,
-  "UseApplicationInsights": false
-}
-```
-
-*Production Monitoring:*
-```json
-{
-  "UseConsoleLogging": false,
-  "UseApplicationInsights": true,
-  "ConnectionString": "InstrumentationKey=...;IngestionEndpoint=https://..."
-}
-```
-
-*Cost Optimization (10% sampling):*
-```json
-{
-  "UseApplicationInsights": true,
-  "SamplingPercentage": 10.0
-}
-```
-
 **Telemetry Metrics:**
-- Export: `export.storage.total.bytes`, `export.throughput.users.per.second`
 - Harvest: `harvest.users.enqueued`, `harvest.messages.sent`
-- Worker Export: `workerexport.users.processed`, `workerexport.failures`
-- Import: `import.graph.api.calls`, `import.blob.read.bytes`, `import.phone.enqueued`
+- Worker Migrate: `WorkerMigrate.UserCreated`, `WorkerMigrate.UserDuplicate`, `WorkerMigrate.UserFailed`
 - Phone Registration: `PhoneRegistration.Started`, `PhoneRegistration.Success`, `PhoneRegistration.Failed`, `PhoneRegistration.Completed`, `GraphClient.PhoneMethodRegistered`
 - JIT: `JITAuth.PasswordValidated`, `JITAuth.MigrationSuccess`
 
@@ -348,13 +241,13 @@ The toolkit supports dual telemetry output: console logging (local development) 
 
 2. **Configure Local Settings**
    
-   > **Important:** Each operation has its own config file. Copy the matching example and fill in your credentials. The example files use `ClientSecret` with direct secret values for local development (no Key Vault required).
+   > **Important:** Each operation uses its own config file. Copy the matching example and fill in your credentials. The example files use `ClientSecret` with direct secret values for local development (no Key Vault required).
    
    ```bash
    cd src/B2CMigrationKit.Console
    cp appsettings.master.example.json appsettings.master.json
    cp appsettings.worker1.example.json appsettings.worker1.json
-   cp appsettings.phone-registration.example.json appsettings.phone-registration.json
+   cp appsettings.phone-registration.example.json appsettings.phone-registration1.json
    # Edit each file with your tenant credentials
    ```
    
@@ -362,68 +255,38 @@ The toolkit supports dual telemetry output: console logging (local development) 
    - **Local development (no Key Vault):** Use `ClientSecret` with the actual secret value
    - **Production (with Key Vault):** Use `ClientSecretName` with the Key Vault secret name
 
-3. **Run Export Locally** *(single-process, small tenant)*
+3. **Run Harvest**
+
+   Harvest pages all B2C user IDs and enqueues them in batches to `user-ids-to-process`. Use `MaxUsers` in `appsettings.master.json` to cap results (e.g. `20` for a smoke test, `0` for unlimited).
+
    ```powershell
-   # From repository root - use the automation script
-   .\scripts\Start-LocalExport.ps1 -VerboseLogging
-   ```
-   
-   The script automatically:
-   - Checks and starts Azurite if needed
-   - Creates required storage containers
-   - Builds the console application
-   - Runs the export operation
-   
-   **Manual alternative** (requires Azurite running separately):
-   ```powershell
-   cd src\B2CMigrationKit.Console
-   dotnet run -- export --config appsettings.Development.json --verbose
+   .\scripts\Start-LocalHarvest.ps1
    ```
 
-4. **Run Harvest + Worker Export** *(master/worker, large tenant)*
+4. **Run Worker Migrate**
 
-   The harvest+worker flow splits the export into two phases to allow horizontal scaling. In local development you can run both in sequence:
+   Worker Migrate dequeues ID batches, fetches full user profiles from B2C, creates users in EEID, and enqueues `{ B2CUserId, EEIDUpn }` messages to `phone-registration`. Run one or more instances (different terminals) for parallelism — each with a dedicated app registration config.
 
    ```powershell
-   # Step 1 — Harvest: pages all B2C user IDs, enqueues batches of 20 into the queue
-   .\scripts\Start-LocalHarvest.ps1 -VerboseLogging
-
-   # Step 2 — Worker Export: dequeues batches, fetches full profiles, uploads blobs
-   # Run one or more instances (different terminals) for parallelism
-   .\scripts\Start-LocalWorkerExport.ps1 -VerboseLogging
+   .\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker1.json
    ```
 
-   **Manual alternative:**
-   ```powershell
-   cd src\B2CMigrationKit.Console
-   dotnet run -- harvest   --config appsettings.Development.json --verbose
-   dotnet run -- worker-export --config appsettings.Development.json --verbose
-   ```
+   Users that already exist in EEID are recorded as `Duplicate` (handled gracefully, phone task still enqueued).
 
-   > **Tip:** For local testing with a small tenant `export` is simpler. Use `harvest` + `worker-export` when you need to run multiple export workers in parallel (production scale-out).
+5. **Run Phone Registration Worker**
 
-5. **Run Import Locally**
-   ```powershell
-   .\scripts\Start-LocalImport.ps1 -VerboseLogging
-   ```
-
-   To also enqueue phone-registration tasks during import, set `Import.PhoneRegistration.EnqueuePhoneRegistration: true` in your local config before running.
-
-6. **Run Phone Registration Worker Locally**
-
-   After import has finished (or while import is running), start the phone-registration worker to process the queue:
+   After worker-migrate (or while it is still running), drain the `phone-registration` queue. The worker fetches each user's MFA phone number from B2C and registers it in EEID. Users with no MFA phone registered are recorded as `PhoneSkipped`.
 
    ```powershell
-   .\scripts\Start-LocalPhoneRegistration.ps1 -VerboseLogging
+   .\scripts\Start-LocalPhoneRegistration.ps1 -ConfigFile appsettings.phone-registration1.json
    ```
 
    The worker:
-   - Drains the `phone-registration` queue at `ThrottleDelayMs` per message (~50 calls/min by default)
+   - Drains the `phone-registration` queue at `ThrottleDelayMs` per message (~30 calls/min by default at 2000 ms)
    - Treats 409 Conflict as success (phone already registered — idempotent)
    - Exits automatically after `MaxEmptyPolls` consecutive empty polls
-   - Can be run concurrently with import (queue fills as import runs)
 
-   > **Prerequisite:** The EEID app registration must have `UserAuthenticationMethod.ReadWrite.All` (Application) granted and admin-consented.
+   > **Prerequisite:** The EEID app registration used for phone registration must have `UserAuthenticationMethod.ReadWrite.All` (Application) granted with admin consent. The B2C app registration must also have `UserAuthenticationMethod.ReadWrite.All` (Application) granted with admin consent on the B2C tenant, as the worker reads phone methods from B2C.
 
 ### Building the Solution
 
@@ -472,96 +335,19 @@ The JIT authentication function integrates with External ID Custom Authenticatio
 
 **Why This Matters:**
 
-During the bulk import phase, `ImportOrchestrator` generates **unique 16-character random passwords** for each user. These are **NOT** the user's real B2C passwords. This intentional mismatch ensures password validation fails on first login, triggering the JIT migration flow.
+During the bulk import phase, `WorkerMigrateOrchestrator` generates **unique 16-character random passwords** for each user. These are **NOT** the user's real B2C passwords. This intentional mismatch ensures password validation fails on first login, triggering the JIT migration flow.
 
 **User Login Flow:**
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Import Phase                                │
-├─────────────────────────────────────────────────────────────────┤
-│  B2C User Password: "MyRealPassword123!"                        │
-│                                                                 │
-│  ImportOrchestrator generates:                                  │
-│  Random Password: "xK9#mP2qL8@vN4tR" (16 chars, unique)         │
-│                                                                 │
-│  External ID User Created With:                                 │
-│  - Username: user@domain.com                                    │
-│  - Password: "xK9#mP2qL8@vN4tR" (NOT the real B2C password)     │
-│  - RequiresMigration: true                                      │
-└─────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────┐
-│                   First Login (JIT Triggered)                   │
-├─────────────────────────────────────────────────────────────────┤
-│  User enters: "MyRealPassword123!" (real B2C password)          │
-│                                                                 │
-│  External ID compares:                                          │
-│  "MyRealPassword123!" ≠ "xK9#mP2qL8@vN4tR" → MISMATCH           │
-│                                                                 │
-│  AND RequiresMigration == true → JIT TRIGGERS                    │
-│                                                                 │
-│  Custom Extension Called:                                       │
-│  1. Validates "MyRealPassword123!" against B2C ROPC ✓           │
-│  2. Updates External ID password to "MyRealPassword123!"        │
-│  3. Sets RequiresMigration = false (migration complete)         │
-│  4. User login succeeds                                         │
-└─────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────┐
-│                Second Login (Normal Flow)                       │
-├─────────────────────────────────────────────────────────────────┤
-│  User enters: "MyRealPassword123!"                              │
-│                                                                 │
-│  External ID compares:                                          │
-│  "MyRealPassword123!" == "MyRealPassword123!" → MATCH           │
-│                                                                 │
-│  Normal authentication → NO JIT CALL                            │
-│  Login succeeds immediately                                     │
-└─────────────────────────────────────────────────────────────────┘
-```
+| Phase | What happens |
+|---|---|
+| **Worker Migrate** | `WorkerMigrateOrchestrator` creates the EEID user with a random 16-char placeholder password and sets `RequiresMigration = true`. |
+| **First login** | User enters their real B2C password → mismatch triggers JIT → function validates against B2C, updates EEID password, sets `RequiresMigration = false`. |
+| **Subsequent logins** | EEID password matches → normal authentication, no JIT call. |
 
 **Password Generation Implementation:**
 
-Located in `ImportOrchestrator.cs` (Lines 598-638):
-
-```csharp
-private string GenerateRandomPassword()
-{
-    // 16-character password with guaranteed complexity
-    const int length = 16;
-    const string uppercase = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    const string lowercase = "abcdefghijklmnopqrstuvwxyz";
-    const string digits = "0123456789";
-    const string special = "!@#$%^&*()-_=+[]{}|;:,.<>?";
-    
-    var password = new StringBuilder();
-    
-    // Guarantee at least one of each character type
-    password.Append(uppercase[Random.Shared.Next(uppercase.Length)]);
-    password.Append(lowercase[Random.Shared.Next(lowercase.Length)]);
-    password.Append(digits[Random.Shared.Next(digits.Length)]);
-    password.Append(special[Random.Shared.Next(special.Length)]);
-    
-    // Fill remaining characters
-    string allChars = uppercase + lowercase + digits + special;
-    for (int i = 4; i < length; i++)
-    {
-        password.Append(allChars[Random.Shared.Next(allChars.Length)]);
-    }
-    
-    // Shuffle to prevent patterns
-    return new string(password.ToString().ToCharArray()
-        .OrderBy(x => Random.Shared.Next()).ToArray());
-}
-```
-
-**Key Characteristics:**
-- ✅ **Length:** 16 characters (exceeds most complexity requirements)
-- ✅ **Complexity:** Guaranteed 1 uppercase + 1 lowercase + 1 digit + 1 special
-- ✅ **Uniqueness:** Fresh generation for each user (not derived from B2C data)
-- ✅ **Randomness:** Shuffled to prevent predictable patterns
-- ✅ **Purpose:** Ensures password mismatch to trigger JIT on first login
+Located in `WorkerMigrateOrchestrator.cs` (line 530). 16-char password with guaranteed 1 uppercase + 1 lowercase + 1 digit + 1 special char, shuffled to prevent patterns. Purpose: ensure mismatch with the real B2C password to reliably trigger JIT on first login.
 
 ---
 
@@ -694,45 +480,7 @@ func start
 
 The repository includes pre-configured VS Code debug files in `.vscode/` that let you attach the debugger to the running Azure Function process. This is essential for setting breakpoints in the JIT authentication flow.
 
-**`.vscode/launch.json`** — Debugger attach configuration:
-```jsonc
-{
-  "version": "0.2.0",
-  "configurations": [
-    {
-      "name": "Attach to .NET Functions",
-      "type": "coreclr",
-      "request": "attach",
-      "processId": "${command:pickProcess}"
-    }
-  ]
-}
-```
-
-**`.vscode/tasks.json`** — Build task:
-```jsonc
-{
-  "version": "2.0.0",
-  "tasks": [
-    {
-      "label": "build-function",
-      "type": "process",
-      "command": "dotnet",
-      "args": [
-        "build",
-        "${workspaceFolder}/src/B2CMigrationKit.Function/B2CMigrationKit.Function.csproj",
-        "--configuration",
-        "Debug"
-      ],
-      "problemMatcher": "$msCompile",
-      "group": {
-        "kind": "build",
-        "isDefault": true
-      }
-    }
-  ]
-}
-```
+The repository includes pre-configured `.vscode/launch.json` ("Attach to .NET Functions") and `.vscode/tasks.json` ("build-function"). No manual setup required.
 
 **To debug:**
 1. Start the function with `start-local.ps1` (or manually with `func start`)
@@ -741,7 +489,13 @@ The repository includes pre-configured VS Code debug files in `.vscode/` that le
 4. Pick the **`dotnet`** process running the function (look for `B2CMigrationKit.Function.dll`)
 5. Set breakpoints in `JitAuthenticationFunction.cs` and trigger a login flow
 
-> **Tip:** The `start-local.ps1` script starts the function in the foreground so you can see logs in the terminal while the debugger is attached via VS Code.
+**Useful breakpoints:**
+- `JitAuthenticationFunction.cs:60` — Parse External ID payload
+- `JitAuthenticationFunction.cs:123` — Call JitMigrationService
+- `JitMigrationService.cs:73` — Get user and check migration status
+- `JitMigrationService.cs:125` — Validate credentials against B2C via ROPC
+- `JitMigrationService.cs:156` — Validate password complexity
+- `JitMigrationService.cs:193` — Update user extension attributes
 
 ---
 
@@ -914,10 +668,10 @@ Write-Host "✓ Authentication Event Listener created successfully!" -Foreground
 
 **Step 4: Import Test User**
 
-Run the import to create users with random passwords:
+Run worker-migrate to create users in EEID with random passwords:
 
 ```powershell
-.\scripts\Start-LocalImport.ps1 -Verbose
+.\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker1.json
 ```
 
 **Verify in External ID:**
@@ -969,46 +723,6 @@ Content-Type: application/json
 
 ---
 
-#### VS Code Debugging Setup
-
-1. **Create `.vscode/launch.json`:**
-
-```json
-{
-  "version": "0.2.0",
-  "configurations": [
-    {
-      "name": "Attach to .NET Functions",
-      "type": "coreclr",
-      "request": "attach",
-      "processId": "${command:pickProcess}"
-    }
-  ]
-}
-```
-
-2. **Start Function with Script:**
-```powershell
-cd src\\B2CMigrationKit.Function
-.\\start-local.ps1
-```
-
-3. **Attach Debugger:**
-   - Open `JitAuthenticationFunction.cs` or `JitMigrationService.cs`
-   - Set breakpoints (F9)
-   - Press F5 → Select "Attach to .NET Functions"
-   - Find and select the `func` or `dotnet` process
-
-4. **Recommended Breakpoints:**
-   - `JitAuthenticationFunction.cs:60` - Parse External ID payload
-   - `JitAuthenticationFunction.cs:123` - Call JitMigrationService
-   - `JitMigrationService.cs:73` - Get user and check migration status
-   - `JitMigrationService.cs:125` - Validate credentials against B2C via ROPC
-   - `JitMigrationService.cs:156` - Validate password complexity
-   - `JitMigrationService.cs:193` - Update user extension attributes
-
----
-
 #### ngrok Web Interface
 
 Access the ngrok web interface for request inspection:
@@ -1022,76 +736,6 @@ http://localhost:4040
 - Inspect request/response headers and body
 - **Replay requests** - Reproduce errors without redoing login flow
 - Filter by path (`/api/JitAuthentication`) or status code
-
----
-
-#### Understanding the Request Flow
-
-**External ID Custom Authentication Extension Flow:**
-
-```
-1. User logs into External ID
-   ↓
-2. External ID validates user exists
-   ↓
-3. External ID calls JIT Function with payload:
-   {
-     "data": {
-       "authenticationContext": {
-         "user": {
-           "id": "user-object-id",
-           "userPrincipalName": "user@tenant.com"
-         },
-         "correlationId": "correlation-id"
-       },
-       "passwordContext": {
-         "userPassword": "user-entered-password"
-       }
-     }
-   }
-   ↓
-4. JIT Function validates and returns action:
-   {
-     "data": {
-       "@odata.type": "microsoft.graph.onPasswordSubmitResponseData",
-       "actions": [{
-         "@odata.type": "microsoft.graph.passwordsubmit.MigratePassword"
-       }]
-     }
-   }
-   ↓
-5. External ID updates password and completes login
-```
-
----
-
-#### Log Patterns
-
-**Successful Migration:**
-```
-[JIT Function] HTTP POST received | RequestId: req-abc123
-[JIT Function] Parsed External ID payload | UserId: user-obj-id | UPN: testuser@...
-[JIT Migration] Starting | UserId: user-obj-id | CorrelationId: corr-xyz
-[JIT Migration] Step 1/3: Checking migration status
-[JIT Migration] ✓ User needs migration - Proceeding
-[JIT Migration] Step 2/3: Validating credentials against B2C via ROPC
-[JIT Migration] ✓ B2C credentials validated successfully
-[JIT Migration] Step 3/3: Validating password complexity
-[JIT Migration] ✓ Password complexity validated
-[JIT Migration] ✅ SUCCESS - Returning MigratePassword action | Duration: 1250ms
-```
-
-**Already Migrated (Fast Path):**
-```
-[JIT Migration] Step 1/3: Checking migration status
-[JIT Migration] ✓ User already migrated - Allowing login | Duration: 450ms
-```
-
-**Invalid Credentials:**
-```
-[JIT Migration] Step 2/3: Validating credentials against B2C via ROPC
-[JIT Migration] ❌ FAILED - B2C credential validation failed
-```
 
 ---
 
@@ -1138,11 +782,10 @@ Get-MgIdentityAuthenticationEventsFlow
 
 Quick update with automation:
 ```powershell
-.\scripts\Setup-JitCustomExtension.ps1 `
+.\scripts\Configure-ExternalIdJit.ps1 `
     -TenantId "your-tenant-id" `
-    -NgrokUrl "https://NEW-URL.ngrok.app" `
-    -PublicKeyPath ".\keys\public_key.pem" `
-    -ExtensionAppId "existing-app-id"
+    -FunctionUrl "https://NEW-URL.ngrok.app/api/JitAuthentication" `
+    -CertificatePath ".\keys\jit-certificate.txt"
 ```
 
 Or use ngrok paid plan for static domain:
@@ -1384,25 +1027,7 @@ Controls migration-specific attributes:
 
 ### Common Mapping Scenarios
 
-#### Scenario 1: Simple Migration (No Custom Attributes)
-
-Use default configuration - no mapping needed:
-
-```json
-{
-  "Export": {
-    "SelectFields": "id,userPrincipalName,displayName,givenName,surname,mail,mobilePhone,identities"
-  },
-  "Import": {
-    "AttributeMappings": {},
-    "ExcludeFields": [],
-    "MigrationAttributes": {
-      "StoreB2CObjectId": true,
-      "SetRequiresMigration": true
-    }
-  }
-}
-```
+**Scenario 1 (no custom attributes):** Leave `AttributeMappings` as `{}` — standard fields copy automatically.
 
 #### Scenario 2: Different Extension Attribute Names
 
@@ -1511,7 +1136,7 @@ The import orchestrator automatically applies these transformations:
 
 #### 1. UPN Domain Transformation
 
-**Code Location**: `ImportOrchestrator.cs:TransformUpnForExternalId()`
+**Code Location**: `WorkerMigrateOrchestrator.cs:TransformUpn()`
 
 **Purpose**: Changes the UPN domain from B2C to External ID while **preserving the local part identifier** to enable JIT authentication. This approach serves as a workaround to enable the use of the [sign-in alias](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-sign-in-alias) feature **during** JIT password migration in Entra External ID.
 
@@ -1563,107 +1188,21 @@ string b2cUpn = "user@b2cprod.onmicrosoft.com";
 
 #### 2. Authentication Method Handling (Email Identity)
 
-**Code Location**: `ImportOrchestrator.cs:EnsureEmailIdentity()`
+**Code Location**: `WorkerMigrateOrchestrator.cs:EnsureEmailIdentity()`
 
 **Important**: External ID requires all users to have an email identity for authentication. The import logic ensures every user gets an email identity for the Email+Password flow with JIT migration.
 
 ```csharp
-// Decision tree:
-// 1. Check if user already has emailAddress identity -> use it (no changes)
-// 2. If user has 'mail' field -> create email identity from mail
-// 3. If user has NO 'mail' -> fallback to userPrincipalName as email (for users with only userName + userPrincipalName)
-
-// Example results:
-
-// Scenario 1: User has mail field
-// B2C User:
-{
-  "mail": "john.doe@example.com",
-  "identities": [
-    { "signInType": "userName", "issuerAssignedId": "johndoe" },
-    { "signInType": "userPrincipalName", "issuerAssignedId": "guid@b2c.onmicrosoft.com" }
-  ]
-}
-// External ID Result (Email+Password with JIT):
-{
-  "mail": "john.doe@example.com",
-  "identities": [
-    { "signInType": "userName", "issuerAssignedId": "johndoe", "issuer": "eeid.onmicrosoft.com" },
-    { "signInType": "emailAddress", "issuerAssignedId": "john.doe@example.com", "issuer": "eeid.onmicrosoft.com" },
-    { "signInType": "userPrincipalName", "issuerAssignedId": "guid@eeid.onmicrosoft.com", "issuer": "eeid.onmicrosoft.com" }
-  ]
-}
-
-// Scenario 2: User has NO mail field (only userName + userPrincipalName)
-// B2C User:
-{
-  "mail": null,
-  "identities": [
-    { "signInType": "userName", "issuerAssignedId": "loadtest5017" },
-    { "signInType": "userPrincipalName", "issuerAssignedId": "a3f2d8e1@b2c.onmicrosoft.com" }
-  ]
-}
-// External ID Result (uses userPrincipalName as email fallback):
-{
-  "mail": null,
-  "identities": [
-    { "signInType": "userName", "issuerAssignedId": "loadtest5017", "issuer": "eeid.onmicrosoft.com" },
-    { "signInType": "emailAddress", "issuerAssignedId": "a3f2d8e1@eeid.onmicrosoft.com", "issuer": "eeid.onmicrosoft.com" },
-    { "signInType": "userPrincipalName", "issuerAssignedId": "a3f2d8e1@eeid.onmicrosoft.com", "issuer": "eeid.onmicrosoft.com" }
-  ]
-}
-// Warning logged: "User X has no email in 'mail' field. Using userPrincipalName as email fallback."
-
-// Scenario 3: User already has emailAddress identity from B2C (preserved)
-// B2C User:
-{
-  "mail": "jane@example.com",
-  "identities": [
-    { "signInType": "emailAddress", "issuerAssignedId": "jane@example.com" },
-    { "signInType": "userPrincipalName", "issuerAssignedId": "guid@b2c.onmicrosoft.com" }
-  ]
-}
-// External ID Result (emailAddress preserved, no duplicate created):
-{
-  "mail": "jane@example.com",
-  "identities": [
-    { "signInType": "emailAddress", "issuerAssignedId": "jane@example.com", "issuer": "eeid.onmicrosoft.com" },
-    { "signInType": "userPrincipalName", "issuerAssignedId": "guid@eeid.onmicrosoft.com", "issuer": "eeid.onmicrosoft.com" }
-  ]
-}
+// Decision tree (WorkerMigrateOrchestrator.cs:EnsureEmailIdentity):
+// 1. User already has emailAddress identity → keep it, no change
+// 2. User has 'mail' field → create emailAddress identity from mail
+// 3. User has NO 'mail' → use userPrincipalName as email fallback (logs a warning)
 ```
 
-**Identity Preservation Rules**:
-
-The import orchestrator preserves all B2C identity types:
-
-1. ✅ **userName** identities are PRESERVED (not converted)
-   - Original userName from B2C is maintained
-   - Only issuer domain is updated to External ID domain
-   - Users can login with their original userName
-
-2. ✅ **userPrincipalName** identities are PRESERVED (not converted)
-   - Original userPrincipalName structure is maintained
-   - Only domain is updated via `TransformUpnForExternalId()`
-   - GUID-based usernames stay as userPrincipalName (not converted to userName)
-
-3. ✅ **emailAddress** identities are ADDED if missing
-   - If user has 'mail' field → uses that email
-   - If user has NO 'mail' → uses userPrincipalName as email
-   - Existing emailAddress identities are preserved (no duplicates)
-
-
-#### 3. Identity Issuer Update
-
-All existing identity issuers are updated from B2C domain to External ID domain:
-
-```csharp
-// Before
-identity.Issuer = "b2cprod.onmicrosoft.com"
-
-// After
-identity.Issuer = "externalid.onmicrosoft.com"
-```
+**Identity rules applied to every user:**
+- All identity `issuer` fields are updated from the B2C domain to the EEID domain
+- `userName` and `userPrincipalName` identities are preserved as-is (only issuer changes)
+- A `emailAddress` identity is added if one is not already present (required by EEID)
 
 ### Impact on Attribute Mapping
 
@@ -1696,294 +1235,133 @@ Enable verbose logging to see transformation details:
 }
 ```
 
-## Import Audit Logs
+## Migration Audit Table
 
 ### Overview
 
-The import process automatically creates detailed audit logs in Azure Blob Storage. These logs provide evidence of each user migration, including success/failure status, timestamps, and user details.
+Every user processed by the worker-migrate and phone-registration steps is recorded as a row in the `migrationAudit` Azure Table Storage table. This provides a durable, queryable audit trail of each migration outcome without requiring blob containers.
 
 ### Benefits
 
-- **Compliance**: Permanent record of all migration activities
-- **Auditing**: Track exactly which users were migrated and when
-- **Troubleshooting**: Identify failed imports with error details
-- **Reporting**: Generate migration reports and statistics
+- **Compliance**: Permanent, tamper-evident record of all migration activities
+- **Auditing**: Query by user ID, status, or time range at any point
+- **Troubleshooting**: Error codes and messages are stored per-row for instant diagnosis
+- **No extra containers**: Uses Table Storage — no blob containers required
 
-### Audit Log Structure
+### Table Schema
 
-Each batch import creates a separate audit log file in JSON format:
+| Column | Type | Description |
+|---|---|---|
+| `PartitionKey` | string | B2C `objectId` of the source user |
+| `RowKey` | string | ISO-8601 timestamp of the operation (sortable) |
+| `Status` | string | `Created`, `Duplicate`, `Failed`, `PhoneRegistered`, `PhoneSkipped` |
+| `DurationMs` | double | How long the Graph API call took |
+| `ErrorCode` | string | OData error code when `Status = Failed` (otherwise empty) |
+| `ErrorMessage` | string | Human-readable error detail when `Status = Failed` (otherwise empty) |
 
-#### Filename Format
-```
-import-audit_{sourceFile}_batch{number}_{timestamp}.json
-```
+### Status Values
 
-Example:
-```
-import-audit_000042_batch000_20250111183045.json
-```
-
-#### JSON Structure
-
-```json
-{
-  "Timestamp": "2025-01-11T18:30:45.123Z",
-  "SourceBlobName": "users_000042.json",
-  "BatchNumber": 0,
-  "TotalUsers": 100,
-  "SuccessCount": 100,
-  "FailureCount": 0,
-  "DurationMs": 1234.56,
-  "SuccessfulUsers": [
-    {
-      "B2CObjectId": "12345678-1234-1234-1234-123456789012",
-      "ExternalIdObjectId": "87654321-4321-4321-4321-210987654321",
-      "UserPrincipalName": "user@externalid.onmicrosoft.com",
-      "DisplayName": "John Doe",
-      "ImportedAt": "2025-01-11T18:30:45.789Z"
-    },
-    ...
-  ],
-  "FailedUsers": [
-    {
-      "B2CObjectId": "99999999-9999-9999-9999-999999999999",
-      "UserPrincipalName": "failed.user@example.com",
-      "ErrorMessage": "User already exists",
-      "ErrorCode": "Request_ResourceExists",
-      "FailedAt": "2025-01-11T18:30:46.123Z"
-    },
-    ...
-  ]
-}
-```
+| Status | Meaning |
+|---|---|
+| `Created` | User was successfully created in EEID |
+| `Duplicate` | User already existed in EEID (idempotent re-run) |
+| `Failed` | User creation failed for a non-duplicate reason |
+| `PhoneRegistered` | MFA phone number registered in EEID successfully |
+| `PhoneSkipped` | User had no MFA phone in B2C — no phone registration needed |
 
 ### Configuration
 
-#### Storage Container
-
-Audit logs are stored in a dedicated blob container:
-
-**Default**: `import-audit`
-
-Configure in `appsettings.json`:
+The table name is set via `Migration.Storage.AuditTableName`:
 
 ```json
 {
   "Migration": {
     "Storage": {
-      "ImportAuditContainerName": "import-audit"
+      "AuditTableName": "migrationAudit"
     }
   }
 }
 ```
 
-#### Auto-Creation
+The table is created automatically if it does not exist.
 
-The import process automatically:
-1. Creates the `import-audit` container if it doesn't exist
-2. Generates one audit log per batch processed
-3. Continues import even if audit log save fails (logs warning)
-
-### Viewing Audit Logs
+### Viewing the Audit Table
 
 #### Azure Portal
 
-1. Go to your Storage Account
-2. Navigate to **Containers**
-3. Open the `import-audit` container
-4. Download any audit log file to view
+1. Navigate to your Storage Account
+2. Select **Tables** in the left menu
+3. Open the `migrationAudit` table
+4. Use the query editor to filter by `PartitionKey` (B2C objectId) or `Status`
 
 #### Azure Storage Explorer
 
-1. Connect to your storage account
-2. Expand **Blob Containers**
-3. Open `import-audit`
-4. Browse and download audit logs
+1. Connect to your storage account (or use `UseDevelopmentStorage=true` for Azurite)
+2. Expand **Tables**
+3. Open `migrationAudit`
+4. Right-click → **Query** to filter rows
 
-#### Command Line (Azure CLI)
+#### Azure CLI
 
-List all audit logs:
+List all rows for a specific user:
 ```bash
-az storage blob list \
+az storage entity query \
   --account-name <storage-account> \
-  --container-name import-audit \
+  --table-name migrationAudit \
+  --filter "PartitionKey eq '<b2c-object-id>'" \
   --output table
 ```
 
-Download a specific audit log:
+Count failed rows:
 ```bash
-az storage blob download \
+az storage entity query \
   --account-name <storage-account> \
-  --container-name import-audit \
-  --name import-audit_000042_batch000_20250111183045.json \
-  --file audit.json
+  --table-name migrationAudit \
+  --filter "Status eq 'Failed'" \
+  --output table
 ```
 
 #### Local Development (Azurite)
 
-Use Azure Storage Explorer or any blob storage tool to connect to:
-- **Connection String**: `UseDevelopmentStorage=true`
-- **Container**: `import-audit`
+Open Azure Storage Explorer, connect with `UseDevelopmentStorage=true`, then expand **Tables** → `migrationAudit`.
 
-### Audit Log Analysis
+### Generating a Migration Report
 
-#### Count Total Migrations
+PowerShell example using the Azure.Data.Tables SDK:
 
-```bash
-# Download all audit logs and count total successful imports
-jq -r '.SuccessCount' *.json | awk '{sum+=$1} END {print sum}'
+```powershell
+$storageAccountName = "<storage-account>"
+$ctx = New-AzStorageContext -StorageAccountName $storageAccountName -UseConnectedAccount
+
+# Query all audit rows
+$rows = Get-AzTableRow -TableName "migrationAudit" -Context $ctx
+
+# Summarise by status
+$rows | Group-Object Status | Select-Object Name, Count | Format-Table -AutoSize
+
+# Export failures for review
+$rows | Where-Object { $_.Status -eq "Failed" } |
+    Select-Object PartitionKey, RowKey, ErrorCode, ErrorMessage |
+    Export-Csv -Path "migration-failures.csv" -NoTypeInformation
 ```
 
-#### Find Failed Imports
-
-```bash
-# List all failed user imports
-jq -r '.FailedUsers[] | "\(.UserPrincipalName): \(.ErrorMessage)"' *.json
-```
-
-#### Calculate Success Rate
-
-```bash
-# Calculate overall success rate
-jq -r '[.TotalUsers, .SuccessCount, .FailureCount] | @csv' *.json
-```
-
-#### Extract All Migrated Users
-
-```bash
-# Get list of all successfully migrated B2C ObjectIds
-jq -r '.SuccessfulUsers[].B2CObjectId' *.json > migrated-users.txt
-```
-
-### Retention and Cleanup
-
-#### Recommended Practices
-
-1. **Keep logs for compliance period**: Typically 1-7 years depending on regulations
-2. **Archive old logs**: Move to Cool/Archive tier after 90 days
-3. **Backup critical logs**: Copy to separate storage for disaster recovery
-
-#### Storage Lifecycle Management
-
-Create a lifecycle policy to automatically archive old audit logs:
-
-```json
-{
-  "rules": [
-    {
-      "enabled": true,
-      "name": "ArchiveImportAudits",
-      "type": "Lifecycle",
-      "definition": {
-        "actions": {
-          "baseBlob": {
-            "tierToCool": {
-              "daysAfterModificationGreaterThan": 90
-            },
-            "tierToArchive": {
-              "daysAfterModificationGreaterThan": 365
-            }
-          }
-        },
-        "filters": {
-          "blobTypes": ["blockBlob"],
-          "prefixMatch": ["import-audit/"]
-        }
-      }
-    }
-  ]
-}
-```
-
-### Troubleshooting Audit Logs
-
-#### Audit Logs Not Created
-
-**Issue**: No files in `import-audit` container
-
-**Solutions**:
-1. Check container exists (auto-created but verify permissions)
-2. Enable verbose logging to see audit save operations
-3. Check logs for warnings about audit save failures
-4. Verify storage account has write permissions
-
-#### Large Audit Files
-
-**Issue**: Audit files are very large
-
-**Explanation**: Each batch can contain 100+ users. For large migrations:
-- 100 users/batch × 100 fields/user = large JSON files
-- This is expected and normal
-
-**Optimization**:
-- Consider compression (gzip) for long-term storage
-- Use blob storage tiering for cost efficiency
-
-#### Missing Failed User Details
-
-**Issue**: `FailedUsers` array is empty even with failures
-
-**Explanation**: Current implementation tracks batch-level failures. Individual user failures within a batch require enhancement to the Graph API batch client.
-
-**Workaround**: Check console logs for detailed error messages during import.
-
-### Security Considerations for Audit Logs
+### Security Considerations
 
 #### Sensitive Data
 
-Audit logs contain:
-- ✅ User Principal Names (UPNs)
-- ✅ Display Names
-- ✅ ObjectIds
+Audit rows contain:
+- ✅ Source B2C `objectId` (PartitionKey)
+- ✅ Operation timestamp (RowKey)
+- ✅ Migration status
 - ❌ Passwords (never logged)
-- ❌ Extension attribute values (not included)
+- ❌ PII beyond objectId (display names, UPNs are not stored)
 
 #### Access Control
 
-Restrict access to audit logs:
-1. **RBAC**: Assign `Storage Blob Data Reader` role only to authorized personnel
-2. **Private Endpoints**: Use private endpoints for storage account
-3. **SAS Tokens**: Generate time-limited SAS tokens for temporary access
-4. **Encryption**: Enable encryption at rest (default in Azure)
-
-
-### Example: Generate Migration Report
-
-PowerShell script to generate a summary report:
-
-```powershell
-# Download all audit logs
-$auditLogs = Get-AzStorageBlob -Container "import-audit" -Context $ctx |
-    Get-AzStorageBlobContent -Force
-
-# Parse and summarize
-$summary = $auditLogs | ForEach-Object {
-    $content = Get-Content $_.Name | ConvertFrom-Json
-    [PSCustomObject]@{
-        Timestamp = $content.Timestamp
-        SourceFile = $content.SourceBlobName
-        Success = $content.SuccessCount
-        Failed = $content.FailureCount
-        Duration = $content.DurationMs
-    }
-}
-
-# Display report
-$summary | Format-Table -AutoSize
-$summary | Export-Csv -Path "migration-report.csv" -NoTypeInformation
-
-# Calculate totals
-$totalSuccess = ($summary | Measure-Object -Property Success -Sum).Sum
-$totalFailed = ($summary | Measure-Object -Property Failed -Sum).Sum
-$avgDuration = ($summary | Measure-Object -Property Duration -Average).Average
-
-Write-Host "`nMigration Summary"
-Write-Host "================="
-Write-Host "Total Successful: $totalSuccess"
-Write-Host "Total Failed: $totalFailed"
-Write-Host "Success Rate: $([math]::Round($totalSuccess/($totalSuccess+$totalFailed)*100, 2))%"
-Write-Host "Avg Batch Duration: $([math]::Round($avgDuration, 2)) ms"
-```
+Restrict access to the audit table using RBAC:
+- **`Storage Table Data Reader`** — read-only audit review
+- **`Storage Table Data Contributor`** — required by the migration process itself
+- Use **Private Endpoints** and **encryption at rest** (Azure default) for production deployments
 
 ## Deployment Guide
 
@@ -2011,7 +1389,12 @@ Write-Host "Avg Batch Duration: $([math]::Round($avgDuration, 2)) ms"
    # Grant permissions
    az role assignment create \
      --assignee <managed-identity-id> \
-     --role "Storage Blob Data Contributor" \
+     --role "Storage Queue Data Contributor" \
+     --scope <storage-account-resource-id>
+
+   az role assignment create \
+     --assignee <managed-identity-id> \
+     --role "Storage Table Data Contributor" \
      --scope <storage-account-resource-id>
    ```
 
@@ -2122,58 +1505,7 @@ traces
 | render timechart
 ```
 
-### Sample Alert Queries
-
-> These query patterns can be used to set up alert rules in Application Insights if configured in your environment. No alert rules are deployed by this repository.
-
-**Suggested Alerts:**
-
-1. **High Failure Rate**
-   ```kql
-   traces
-   | where message contains "failed" or severityLevel >= 3
-   | summarize FailureCount = count() by bin(timestamp, 5m)
-   | where FailureCount > 10
-   ```
-
-2. **Excessive Throttling**
-   ```kql
-   traces
-   | where message contains "429"
-   | summarize ThrottleCount = count() by bin(timestamp, 5m)
-   | where ThrottleCount > 50
-   ```
-
-3. **JIT Authentication Failures**
-   ```kql
-   customMetrics
-   | where name == "JIT.CredentialValidationFailed"
-   | summarize Failures = sum(value) by bin(timestamp, 5m)
-   | where Failures > 20
-   ```
-
-### Performance Tuning
-
-**Throughput Optimization:**
-
-1. **Scale Horizontally with Multiple Instances**
-   - Deploy multiple containers/VMs with different IPs
-   - Each instance uses a dedicated app registration
-   - Avoids IP-based throttling limits (~60 ops/sec per IP)
-
-2. **Adjust Batch Size**
-   - Larger batches = fewer API calls
-   - Smaller batches = better error isolation
-   - Recommended: 50-100 users per batch
-
-3. **Add Delays**
-   - Use `BatchDelayMs` to space out operations
-   - Reduces burst throttling
-   - Increases overall runtime but improves reliability
-
-### Scaling Patterns
-
-Understanding how to scale the migration toolkit is critical for achieving maximum throughput while respecting Microsoft Graph API rate limits.
+### Performance Tuning & Scaling Patterns
 
 #### Graph API Throttling Fundamentals
 
@@ -2207,85 +1539,14 @@ The **per-tenant** limit is the binding constraint for our workload (single targ
 
 #### Console App Scaling
 
-**Single Instance (Default)**
+| Scale | Setup | Throughput |
+|---|---|---|
+| Single instance | 1 process, 1 app registration, 1 IP | ~60 ops/sec |
+| Multiple instances | N processes on N different IPs, each with a dedicated app registration | ~N × 60 ops/sec |
 
-```json
-{
-  "Migration": {
-    "B2C": {
-      "AppRegistration": {
-        "ClientId": "app-1",
-        "ClientSecretName": "Secret1",
-        "Enabled": true
-      }
-    },
-    "ExternalId": {
-      "AppRegistration": {
-        "ClientId": "app-1",
-        "ClientSecretName": "Secret1",
-        "Enabled": true
-      }
-    },
-    "BatchSize": 100
-  }
-}
-```
+Run each instance with its own config file (e.g. `appsettings.worker1.json`, `appsettings.worker2.json`), each pointing to a dedicated app registration. Use `Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.workerN.json` for local runs or deploy to separate VMs/containers for production scale.
 
-- **Throughput**: ~60 ops/sec
-- **Use case**: Small to medium migrations (<100K users)
-- **Advantages**: Simple setup, low complexity
-
-**Multiple Instances (Containers/VMs)**
-
-For large migrations, deploy multiple instances on different IPs:
-
-```bash
-# Container 1 - IP: 10.0.1.10
-docker run -e CONFIG_FILE=appsettings.app1.json migration-console
-
-# Container 2 - IP: 10.0.1.11
-docker run -e CONFIG_FILE=appsettings.app2.json migration-console
-
-# Container 3 - IP: 10.0.1.12
-docker run -e CONFIG_FILE=appsettings.app3.json migration-console
-```
-
-Each configuration file has a **single, dedicated app registration**:
-
-**appsettings.app1.json**:
-```json
-{
-  "Migration": {
-    "ExternalId": {
-      "AppRegistration": {
-        "ClientId": "app-1",
-        "ClientSecretName": "Secret1",
-        "Enabled": true
-      }
-    }
-  }
-}
-```
-
-**Benefits of Multiple Instances:**
-- True process and IP isolation
-- Independent failure domains
-- Each instance bypasses IP throttling
-- Can run on different machines/containers
-- **Throughput**: N instances × 60 ops/sec = N×60 ops/sec total
-
-**Recommended Usage:**
-- Single instance: operations up to 100K users
-- Multiple instances: operations over 100K users or time-sensitive cutovers
-
-
-**Best Practices:**
-1. Start with single instance approach
-2. Monitor Application Insights for throttling metrics
-3. Scale horizontally (more instances with different IPs) when needed
-4. For bulk operations, use multiple console instances in containers
-5. For JIT operations, let Azure Functions handle auto-scaling
-6. Only deploy multiple Function Apps for extreme scale scenarios (>10K concurrent logins)
+**Recommended thresholds:** single instance up to ~100K users; multiple instances for larger volumes or time-sensitive cutovers.
 
 ## Security Best Practices
 

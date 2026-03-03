@@ -497,12 +497,6 @@ WorkerMigrate ──► Queue: phone-registration ──► PhoneRegistrationWor
 
 Multiple `PhoneRegistrationWorker` instances can run in parallel with different app registrations to increase throughput: 3 instances = 1.5 RPS ≈ 138K phones registered in ~26 hours.
 
-#### User Experience Result
-
-| Scenario | First JIT login experience |
-|---|---|
-| Phone registered (this worker ran) | "Confirm your identity" → SMS to existing number |
-| Phone not registered (worker not run yet, or `mobilePhone` was null) | "Register an MFA method" → full re-registration |
 
 #### Required Permissions
 

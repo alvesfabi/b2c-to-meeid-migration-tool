@@ -29,30 +29,31 @@ This migration kit provides a sample solution for identity migration with:
 
 ```mermaid
 graph TB
-    subgraph "Phase 1: Harvest + Worker Export (Master/Worker)"
+    subgraph "Phase 1: Harvest"
         B2C[(Azure AD B2C<br/>Source Tenant)]
-        Harvest[1a. Harvest<br/>Enqueue user IDs]
+        Harvest[1. Harvest<br/>Enqueue user IDs]
         Queue1[(Azure Queue<br/>user-ids-to-process)]
-        Worker[1b. Worker Export × N<br/>Fetch profiles + upload]
-        Storage[(Azure Blob Storage<br/>JSON Files)]
 
         B2C -->|Page IDs only| Harvest
-        Harvest -->|Batches of 20 IDs| Queue1
-        Queue1 -->|Dequeue + full profile fetch| Worker
-        Worker -->|users_XXXXXX.json| Storage
+        Harvest -->|Batches of IDs| Queue1
     end
 
-    subgraph "Phase 2: Import + Phone Registration"
-        Import[2a. Import<br/>Console App]
+    subgraph "Phase 2: Worker Migrate + Phone Registration"
+        Worker[2a. Worker Migrate × N<br/>Fetch profiles + create users]
         ExtID[(Entra External ID<br/>Target Tenant)]
         Queue2[(Azure Queue<br/>phone-registration)]
-        PhoneWorker[2b. Phone Registration<br/>Worker — throttled]
+        PhoneWorker[2b. Phone Registration × N<br/>Register MFA phones — throttled]
+        AuditTable[(Azure Table<br/>migrationAudit)]
 
-        Storage -->|Load users| Import
-        Import -->|Create with placeholder passwords| ExtID
-        Import -->|Enqueue phone tasks| Queue2
-        Queue2 -->|POST /authentication/phoneMethods| PhoneWorker
-        PhoneWorker -->|Register MFA phone| ExtID
+        Queue1 -->|Dequeue ID batch| Worker
+        Worker -->|Fetch full profile| B2C
+        Worker -->|Create user| ExtID
+        Worker -->|Enqueue phone task| Queue2
+        Worker -->|Audit record| AuditTable
+        Queue2 -->|Dequeue phone task| PhoneWorker
+        PhoneWorker -->|GET /authentication/phoneMethods| B2C
+        PhoneWorker -->|POST /authentication/phoneMethods| ExtID
+        PhoneWorker -->|Audit record| AuditTable
     end
 
     subgraph "Phase 3: JIT Password Migration"
@@ -62,13 +63,12 @@ graph TB
 
         User -->|First login attempt| ExtIDLogin
         ExtIDLogin -->|Call with credentials| JIT
-        JIT -->|Validate credentials| B2C
-        JIT -->|Update real password| ExtID
+        JIT -->|Validate credentials via ROPC| B2C
+        JIT -->|Return MigratePassword action| ExtIDLogin
     end
 
     style Harvest fill:#0078d4,color:#fff
     style Worker fill:#0078d4,color:#fff
-    style Import fill:#0078d4,color:#fff
     style PhoneWorker fill:#0078d4,color:#fff
     style JIT fill:#107c10,color:#fff
 ```
@@ -79,10 +79,9 @@ graph TB
 
 ### ✅ Currently Available
 
-- **Master/Worker Export** - Harvest phase enqueues user IDs; N parallel workers fetch full profiles in parallel (validated with 181K users in local dev; throughput bounded by the B2C tenant's default 200 RPS Graph API limit)
-- **Bulk User Export** from Azure AD B2C with automatic pagination (single-instance mode)
-- **Bulk User Import** to External ID with extension attributes and audit logs
-- **Async Phone Registration** - After import, MFA phone numbers are enqueued and registered in EEID at a throttle-safe rate by the `phone-registration` worker
+- **Harvest + Worker Migrate** - Harvest phase enqueues user IDs; N parallel worker-migrate instances fetch full B2C profiles and create users directly in EEID (no intermediate blob storage; validated with 181K users in local dev; throughput bounded by the B2C tenant's default 200 RPS Graph API limit)
+- **Async Phone Registration** - After worker-migrate, MFA phone numbers are fetched from B2C and registered in EEID at a throttle-safe rate (0.5 RPS per app registration) by the `phone-registration` worker
+- **Audit Trail** - Every user operation (Created, Duplicate, Failed, PhoneRegistered, PhoneSkipped) is written to Azure Table Storage (`migrationAudit`)
 - **JIT Password Migration** via Custom Authentication Extension
 - **UPN Domain Transformation** preserving local-part identifiers as a workaround to enable [sign-in alias](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-sign-in-alias) functionality
 - **Built-in Retry Logic** with exponential backoff

@@ -476,7 +476,7 @@ public class JitAuthenticationFunction
 
     /// <summary>
     /// Transform External ID UPN to B2C UPN by replacing domain.
-    /// This is the inverse transformation of ImportOrchestrator.TransformUpnForExternalId.
+    /// This is the inverse transformation of WorkerMigrateOrchestrator.TransformUpn.
     /// Examples:
     ///   user@externalid.onmicrosoft.com → user@b2c.onmicrosoft.com
     ///   047102b7-221a-4fcf-9bf6-a179e37efd62@externalid.onmicrosoft.com → 047102b7-221a-4fcf-9bf6-a179e37efd62@b2c.onmicrosoft.com

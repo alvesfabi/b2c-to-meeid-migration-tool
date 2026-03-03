@@ -45,9 +45,9 @@ public class HarvestOptions
     /// Gets or sets the message visibility timeout for worker processing.
     /// If a worker does not delete the message within this time the message
     /// becomes visible again and another worker can retry it.
-    /// Default: 5 minutes.
+    /// Default: 30 minutes (covers worst-case retry storms on large batches).
     /// </summary>
-    public TimeSpan MessageVisibilityTimeout { get; set; } = TimeSpan.FromMinutes(5);
+    public TimeSpan MessageVisibilityTimeout { get; set; } = TimeSpan.FromMinutes(30);
 
     /// <summary>
     /// Gets or sets the maximum number of user IDs to harvest. 0 = unlimited (harvest all users).

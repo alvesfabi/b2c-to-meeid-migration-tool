@@ -135,7 +135,7 @@ public class WorkerMigrateOrchestrator : IOrchestrator<ExecutionResult>
                     if (userIds is null || userIds.Count == 0)
                     {
                         _logger.LogWarning("Received empty/invalid message {Id}, deleting.", messageId);
-                        await _queueClient.DeleteMessageAsync(harvestQueue, messageId, popReceipt, cancellationToken);
+                        await SafeDeleteAsync(harvestQueue, messageId, popReceipt, cancellationToken);
                         continue;
                     }
 
@@ -191,7 +191,10 @@ public class WorkerMigrateOrchestrator : IOrchestrator<ExecutionResult>
                             _telemetry.IncrementCounter("WorkerMigrate.UserCreated");
                         }
                         catch (Microsoft.Graph.Models.ODataErrors.ODataError odataErr)
-                            when (odataErr.ResponseStatusCode == 409)
+                            when (odataErr.ResponseStatusCode == 409
+                                || (odataErr.ResponseStatusCode == 400
+                                    && odataErr.Message != null
+                                    && odataErr.Message.Contains("conflicting object", StringComparison.OrdinalIgnoreCase)))
                         {
                             var durationMs = (long)(DateTimeOffset.UtcNow - opStart).TotalMilliseconds;
                             usersDuplicate++;
@@ -249,7 +252,7 @@ public class WorkerMigrateOrchestrator : IOrchestrator<ExecutionResult>
                     // --------------------------------------------------------
                     // 3. ACK — delete the harvest queue message
                     // --------------------------------------------------------
-                    await _queueClient.DeleteMessageAsync(harvestQueue, messageId, popReceipt, cancellationToken);
+                    await SafeDeleteAsync(harvestQueue, messageId, popReceipt, cancellationToken);
 
                     // Progress checkpoint every 50 messages
                     if (messagesProcessed % 50 == 0)
@@ -502,6 +505,26 @@ public class WorkerMigrateOrchestrator : IOrchestrator<ExecutionResult>
             Issuer = _options.ExternalId.TenantDomain,
             IssuerAssignedId = email
         });
+    }
+
+    private async Task SafeDeleteAsync(
+        string queueName,
+        string messageId,
+        string popReceipt,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _queueClient.DeleteMessageAsync(queueName, messageId, popReceipt, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            // Pop-receipt may have expired if processing exceeded the visibility timeout.
+            // The message will reappear and be re-processed (all operations are idempotent).
+            _logger.LogWarning(ex,
+                "[WorkerMigrate] Failed to delete message {Id} from queue {Queue} — it may be reprocessed (idempotent).",
+                messageId, queueName);
+        }
     }
 
     private static string GenerateRandomPassword()

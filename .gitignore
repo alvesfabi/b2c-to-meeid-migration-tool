@@ -66,7 +66,7 @@ artifacts/
 
 # Local Development Configuration Files
 **/appsettings.local.json
-**/appsettings.phone-registration.json
+**/appsettings.phone-registration*.json
 **/appsettings.master.json
 **/appsettings.worker*.json
 **/appsettings.import-w*.json

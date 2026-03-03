@@ -42,7 +42,7 @@ This directory contains PowerShell scripts for local development, testing, and J
    ```
    Or click the **Azurite Blob Service** / **Azurite Queue Service** icons in the status bar.
 
-3. **Configuration** - `appsettings.local.json` with tenant credentials
+3. **Configuration** - credentials file per operation (copy the relevant `.example.json`)
    - See [Developer Guide - Configuration](../docs/DEVELOPER_GUIDE.md#configuration-guide)
 
 ### For JIT Migration Testing
@@ -193,7 +193,7 @@ Run **after** (or concurrently with) `Start-LocalWorkerMigrate.ps1`.
 ```
 
 **Parameters:**
-- `-ConfigFile` - Configuration file (default: `appsettings.local.json`)
+- `-ConfigFile` - Configuration file (default: `appsettings.phone-registration.json`)
 - `-VerboseLogging` - Enable detailed logging
 - `-SkipAzurite` - Skip Azurite port check
 
@@ -398,7 +398,15 @@ Toggle Custom Authentication Extension between local (ngrok) and Azure Function 
 
 ### Local Development Configuration
 
-The scripts use `appsettings.local.json` by default, pre-configured for Azurite:
+Each operation uses its own config file. Copy the matching example and fill in your credentials:
+
+| Operation | Default config | Copy from |
+|-----------|---------------|-----------|
+| `harvest` | `appsettings.master.json` | `appsettings.master.example.json` |
+| `worker-migrate` | `appsettings.worker1.json` | `appsettings.worker1.example.json` |
+| `phone-registration` | `appsettings.phone-registration.json` | `appsettings.phone-registration.example.json` |
+
+All local configs share the same Azurite storage settings:
 
 ```json
 {
@@ -429,9 +437,8 @@ The scripts use `appsettings.local.json` by default, pre-configured for Azurite:
 **To run locally, you only need:**
 1. Install the **Azurite VS Code extension** (`ms-azuretools.vscode-azurite`)
 2. Start Azurite: `Ctrl+Shift+P` → `Azurite: Start Service`
-3. Copy `appsettings.json` to `appsettings.local.json`
-4. Add your B2C/External ID app registration credentials
-5. Run: `.\scripts\Start-LocalHarvest.ps1` then `.\scripts\Start-LocalWorkerMigrate.ps1`
+3. Copy each `.example.json` to its corresponding filename and fill in your credentials
+4. Run: `.\scripts\Start-LocalHarvest.ps1` then `.\scripts\Start-LocalWorkerMigrate.ps1`
 
 ### Production/Cloud Storage
 
@@ -458,13 +465,9 @@ The scripts will automatically detect this and skip Azurite.
 
 ### Security Warning
 
-**NEVER commit `appsettings.local.json` with real secrets to source control!**
+**NEVER commit config files with real secrets to source control!**
 
-The file is already in `.gitignore`. For production:
-- Use Azure Key Vault for secrets
-- Set `Migration.KeyVault.VaultUri`
-- Use `ClientSecretName` instead of `ClientSecret`
-- Enable Managed Identity authentication
+All `appsettings.*.json` files (without `.example`) are already in `.gitignore`.
 
 ### Azurite Storage Location
 

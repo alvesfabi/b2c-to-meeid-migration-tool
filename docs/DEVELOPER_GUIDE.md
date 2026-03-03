@@ -348,12 +348,14 @@ The toolkit supports dual telemetry output: console logging (local development) 
 
 2. **Configure Local Settings**
    
-   > **Important:** For local development without Key Vault, use `appsettings.local.example.json` as your template (not `appsettings.json`). The local example uses `ClientSecret` with direct secret values, while `appsettings.json` uses `ClientSecretName` which requires Key Vault.
+   > **Important:** Each operation has its own config file. Copy the matching example and fill in your credentials. The example files use `ClientSecret` with direct secret values for local development (no Key Vault required).
    
    ```bash
    cd src/B2CMigrationKit.Console
-   cp appsettings.local.example.json appsettings.Development.json
-   # Edit appsettings.Development.json with your settings
+   cp appsettings.master.example.json appsettings.master.json
+   cp appsettings.worker1.example.json appsettings.worker1.json
+   cp appsettings.phone-registration.example.json appsettings.phone-registration.json
+   # Edit each file with your tenant credentials
    ```
    
    **Configuration patterns:**

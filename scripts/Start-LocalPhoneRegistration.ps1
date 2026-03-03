@@ -33,7 +33,7 @@
 
 .PARAMETER ConfigFile
     Path to the configuration file relative to the console project directory.
-    Default: appsettings.local.json
+    Default: appsettings.phone-registration.json
 
 .PARAMETER VerboseLogging
     Enable verbose (Debug-level) logging in the console application.
@@ -53,7 +53,7 @@
 
 param(
     [Parameter(Mandatory = $false)]
-    [string]$ConfigFile = "appsettings.local.json",
+    [string]$ConfigFile = "appsettings.phone-registration.json",
 
     [Parameter(Mandatory = $false)]
     [switch]$VerboseLogging,

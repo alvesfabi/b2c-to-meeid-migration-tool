@@ -38,8 +38,10 @@ This project is currently a **preview/sample implementation** showcasing Just-In
 3. **Configure local settings**
    ```bash
    cd src/B2CMigrationKit.Console
-   cp appsettings.json appsettings.local.json
-   # Edit appsettings.local.json with your tenant credentials
+   cp appsettings.master.example.json appsettings.master.json
+   cp appsettings.worker1.example.json appsettings.worker1.json
+   cp appsettings.phone-registration.example.json appsettings.phone-registration.json
+   # Edit each file with your tenant credentials
    ```
 
 4. **Set up Azurite (local storage emulator)**

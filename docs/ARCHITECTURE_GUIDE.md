@@ -174,39 +174,48 @@ B2CMigrationKit.Core/
 │   ├── IGraphClient.cs               # Graph API operations (CRUD users)
 │   ├── IBlobStorageClient.cs         # Export/import file storage
 │   ├── IAuthenticationService.cs     # B2C ROPC validation
-│   ├── ISecretProvider.cs            # Key Vault integration
+│   ├── ICredentialManager.cs         # App registration credential access
+│   ├── IRsaKeyManager.cs             # RSA key export and validation utilities
+│   ├── ISecretProvider.cs            # Key Vault secret access
 │   └── ITelemetryService.cs          # Custom metrics/events
 ├── Configuration/
 │   ├── MigrationOptions.cs           # Root configuration binding
 │   ├── B2COptions.cs                 # B2C tenant configuration
 │   ├── ExternalIdOptions.cs          # External ID configuration
+│   ├── ExportOptions.cs              # Export field selection and filters
+│   ├── ImportOptions.cs              # Import attribute mappings
 │   ├── JitAuthenticationOptions.cs   # JIT function settings
+│   ├── KeyVaultOptions.cs            # Azure Key Vault configuration
 │   ├── StorageOptions.cs             # Blob storage configuration
+│   ├── TelemetryOptions.cs           # Application Insights settings
 │   └── RetryOptions.cs               # Throttling/backoff settings
 ├── Models/
 │   ├── UserProfile.cs                # Unified user model
-│   ├── ExportResult.cs               # Export operation outcome
-│   ├── ImportResult.cs               # Import operation outcome
-│   ├── JitAuthenticationRequest.cs   # JIT payload from External ID
-│   └── JitAuthenticationResponse.cs  # JIT response to External ID
+│   ├── ExecutionResult.cs            # Orchestration result
+│   ├── BatchResult.cs                # Batch operation result
+│   ├── RunSummary.cs                 # Execution metrics and counts
+│   ├── PagedResult.cs                # Paged API results
+│   ├── MigrationStatus.cs            # Migration state enum + attribute constants
+│   ├── AuthenticationResult.cs       # Credential validation result
+│   ├── ImportAuditLog.cs             # Import audit log records
+│   └── CustomAuthenticationExtensionModels.cs  # JIT request/response payloads
 ├── Services/
 │   ├── Orchestrators/
 │   │   ├── ExportOrchestrator.cs     # Bulk export workflow
 │   │   ├── ImportOrchestrator.cs     # Bulk import workflow
 │   │   └── JitMigrationService.cs    # JIT validation logic
-│   ├── Graph/
-│   │   ├── B2CGraphClient.cs         # B2C-specific operations
-│   │   └── ExternalIdGraphClient.cs  # External ID operations
-│   ├── Storage/
-│   │   └── BlobStorageClient.cs      # Azure Blob operations
-│   ├── Authentication/
-│   │   ├── AuthenticationService.cs  # B2C ROPC implementation
-│   │   └── RsaKeyProvider.cs         # JIT RSA key management
+│   ├── Infrastructure/
+│   │   ├── GraphClient.cs            # Graph API client with Polly v8 resilience pipeline
+│   │   ├── GraphClientFactory.cs     # Factory for creating Graph clients
+│   │   ├── BlobStorageClient.cs      # Azure Blob operations
+│   │   ├── AuthenticationService.cs  # Entra ID ROPC credential validation
+│   │   ├── CredentialManager.cs      # App registration credential management
+│   │   ├── RsaKeyManager.cs          # RSA key export and validation
+│   │   └── SecretProvider.cs         # Azure Key Vault secret retrieval with caching
 │   └── Observability/
 │       └── TelemetryService.cs       # Application Insights wrapper
 └── Extensions/
-    ├── ServiceCollectionExtensions.cs # DI registration
-    └── RetryPolicyExtensions.cs       # Polly retry policies
+    └── ServiceCollectionExtensions.cs # DI registration
 ```
 
 ### 4.2 Dependency Injection Pattern
@@ -364,7 +373,8 @@ To overcome per-app rate limits (~60 reads/sec), deploy **2-3 app registrations*
 │ 2. Parse JSON & Prepare Users                                   │
 │    - Read 50-100 users per batch                                │
 │    - Generate random password (16 chars, complex)               │
-│    - Set forceChangePasswordNextSignIn = true                   │
+│    - Set forceChangePasswordNextSignIn = false (required for    │
+│      JIT migration scenarios in External ID)                    │
 └────────────┬────────────────────────────────────────────────────┘
              │
              ▼

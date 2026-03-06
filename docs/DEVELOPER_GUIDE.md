@@ -65,24 +65,33 @@ B2CMigrationKit.Function/  # Azure Function for JIT & sync
 - `IGraphClient` - Microsoft Graph operations
 - `IBlobStorageClient` - Blob Storage operations
 - `ITelemetryService` - Telemetry operations
-- `ICredentialManager` - Multi-app credential rotation
+- `ICredentialManager` - App registration credential access
 - `IAuthenticationService` - Credential validation
+- `ISecretProvider` - Azure Key Vault secret access
+- `IRsaKeyManager` - RSA key export and validation utilities
 
 **Models**
 - `UserProfile` - User identity model
 - `ExecutionResult` - Operation result
 - `BatchResult` - Batch operation result
 - `PagedResult<T>` - Paged API results
-- `MigrationStatus` - Migration state enum
+- `MigrationStatus` - Migration state enum + `MigrationExtensionAttributes` constants
 - `RunSummary` - Execution metrics
+- `AuthenticationResult` - Credential validation result
+- `ImportAuditLog` - Import audit log with `ImportedUserRecord`, `SkippedUserRecord`, `FailedUserRecord`
+- `CustomAuthenticationExtensionRequest/Response` - JIT payload models
+- `JitMigrationResult` - JIT service return value
 
 **Services**
 
 *Infrastructure Services*
 - `GraphClient` - Implements IGraphClient with Polly v8 resilience pipeline
+- `GraphClientFactory` - Factory for creating Graph clients
 - `BlobStorageClient` - Blob operations with Managed Identity
-- `CredentialManager` - Round-robin credential management
-- `AuthenticationService` - ROPC-based credential validation
+- `CredentialManager` - App registration credential management
+- `AuthenticationService` - Entra ID ROPC-based credential validation
+- `RsaKeyManager` - RSA key export and validation
+- `SecretProvider` - Azure Key Vault secret retrieval with in-memory caching
 
 *Orchestrators*
 - `ExportOrchestrator` - B2C user export
@@ -101,9 +110,16 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
     "B2C": { ... },
     "ExternalId": { ... },
     "Storage": { ... },
+    "KeyVault": { ... },
     "Telemetry": { ... },
     "Retry": { ... },
-    "BatchSize": 100
+    "Export": { ... },
+    "Import": { ... },
+    "JitAuthentication": { ... },
+    "BatchSize": 100,
+    "PageSize": 100,
+    "VerboseLogging": false,
+    "BatchDelayMs": 0
   }
 }
 ```
@@ -117,6 +133,7 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
   "AppRegistration": {
     "ClientId": "app-id-1",
     "ClientSecretName": "B2CAppSecret1",
+    "ClientSecret": "direct-secret-for-local-dev",
     "Name": "B2C App 1",
     "Enabled": true
   },
@@ -127,7 +144,7 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
 **App Registration Requirements:**
 - **Permissions**: `Directory.Read.All` (for export)
 - **Authentication**: Client credentials flow
-- **Secrets**: Use client secrets directly in configuration for local development
+- **Secrets**: Use `ClientSecret` directly in configuration for local development; use `ClientSecretName` (Key Vault secret name) for production
 - **Scaling**: Deploy multiple instances with different app registrations on different IPs
 
 ### External ID Configuration
@@ -140,9 +157,10 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
   "AppRegistration": {
     "ClientId": "app-id-1",
     "ClientSecretName": "ExternalIdAppSecret1",
+    "ClientSecret": "direct-secret-for-local-dev",
     "Name": "External ID App 1",
     "Enabled": true
-  },
+  }
 }
 ```
 
@@ -157,6 +175,9 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
 "Storage": {
   "ConnectionStringOrUri": "https://yourstorage.blob.core.windows.net",
   "ExportContainerName": "user-exports",
+  "ErrorContainerName": "migration-errors",
+  "ImportAuditContainerName": "import-audit",
+  "ExportBlobPrefix": "users_",
   "UseManagedIdentity": true
 }
 ```
@@ -165,6 +186,19 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
 - Console/Function Managed Identity needs:
   - `Storage Blob Data Contributor`
   - `Storage Queue Data Contributor`
+
+### Key Vault Configuration
+
+```json
+"KeyVault": {
+  "Enabled": false,
+  "VaultUri": "https://myvault.vault.azure.net/",
+  "UseManagedIdentity": true,
+  "SecretCacheDurationMinutes": 60
+}
+```
+
+When `Enabled` is `false` (default), Key Vault services are not registered and `ClientSecret` values in app registrations are used directly. Set `Enabled` to `true` and configure `VaultUri` for production deployments using `ClientSecretName` references.
 
 ### Retry Configuration
 
@@ -175,7 +209,8 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
   "MaxDelayMs": 30000,
   "BackoffMultiplier": 2.0,
   "UseRetryAfterHeader": true,
-  "OperationTimeoutSeconds": 120
+  "OperationTimeoutSeconds": 120,
+  "RetryableStatusCodes": [429, 500, 502, 503, 504]
 }
 ```
 
@@ -384,36 +419,40 @@ During the bulk import phase, `ImportOrchestrator` generates **unique 16-charact
 
 **Password Generation Implementation:**
 
-Located in `ImportOrchestrator.cs` (Lines 598-638):
+Located in `ImportOrchestrator.cs` (approximately line 607):
 
 ```csharp
-private string GenerateRandomPassword()
+private static string GenerateRandomPassword()
 {
-    // 16-character password with guaranteed complexity
-    const int length = 16;
-    const string uppercase = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    const string lowercase = "abcdefghijklmnopqrstuvwxyz";
-    const string digits = "0123456789";
-    const string special = "!@#$%^&*()-_=+[]{}|;:,.<>?";
+    // 16-character password avoiding ambiguous characters (0, 1, O, I, l)
+    const string uppercase = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+    const string lowercase = "abcdefghijkmnpqrstuvwxyz";
+    const string digits = "23456789";
+    const string special = "!@#$%^&*";
+    const string allChars = uppercase + lowercase + digits + special;
     
-    var password = new StringBuilder();
+    var password = new List<char>();
     
-    // Guarantee at least one of each character type
-    password.Append(uppercase[Random.Shared.Next(uppercase.Length)]);
-    password.Append(lowercase[Random.Shared.Next(lowercase.Length)]);
-    password.Append(digits[Random.Shared.Next(digits.Length)]);
-    password.Append(special[Random.Shared.Next(special.Length)]);
+    // Guarantee at least one of each required type using cryptographically secure RNG
+    password.Add(uppercase[RandomNumberGenerator.GetInt32(uppercase.Length)]);
+    password.Add(lowercase[RandomNumberGenerator.GetInt32(lowercase.Length)]);
+    password.Add(digits[RandomNumberGenerator.GetInt32(digits.Length)]);
+    password.Add(special[RandomNumberGenerator.GetInt32(special.Length)]);
     
-    // Fill remaining characters
-    string allChars = uppercase + lowercase + digits + special;
-    for (int i = 4; i < length; i++)
+    // Fill remaining 12 characters randomly
+    for (int i = 4; i < 16; i++)
     {
-        password.Append(allChars[Random.Shared.Next(allChars.Length)]);
+        password.Add(allChars[RandomNumberGenerator.GetInt32(allChars.Length)]);
     }
     
-    // Shuffle to prevent patterns
-    return new string(password.ToString().ToCharArray()
-        .OrderBy(x => Random.Shared.Next()).ToArray());
+    // Shuffle using Fisher-Yates with cryptographically secure RNG
+    for (int i = password.Count - 1; i > 0; i--)
+    {
+        int j = RandomNumberGenerator.GetInt32(i + 1);
+        (password[i], password[j]) = (password[j], password[i]);
+    }
+    
+    return new string(password.ToArray());
 }
 ```
 
@@ -861,12 +900,11 @@ cd src\\B2CMigrationKit.Function
    - Find and select the `func` or `dotnet` process
 
 4. **Recommended Breakpoints:**
-   - `JitAuthenticationFunction.cs:60` - Parse External ID payload
-   - `JitAuthenticationFunction.cs:123` - Call JitMigrationService
-   - `JitMigrationService.cs:73` - Get user and check migration status
-   - `JitMigrationService.cs:125` - Validate credentials against B2C via ROPC
-   - `JitMigrationService.cs:156` - Validate password complexity
-   - `JitMigrationService.cs:193` - Update user extension attributes
+   - `JitAuthenticationFunction.cs:95` - Parse External ID payload
+   - `JitAuthenticationFunction.cs:187` - Transform UPN and call JitMigrationService
+   - `JitMigrationService.cs:79` - TestMode check (skip or perform B2C validation)
+   - `JitMigrationService.cs:88` - B2C ROPC credential validation call
+   - `JitMigrationService.cs:118` - Return MigratePassword action
 
 ---
 
@@ -932,26 +970,24 @@ http://localhost:4040
 ```
 [JIT Function] HTTP POST received | RequestId: req-abc123
 [JIT Function] Parsed External ID payload | UserId: user-obj-id | UPN: testuser@...
+[JIT Function] Transformed UPN for B2C validation | ExternalIdUPN: testuser@externalid.com | B2CUPN: testuser@b2c.com
 [JIT Migration] Starting | UserId: user-obj-id | CorrelationId: corr-xyz
-[JIT Migration] Step 1/3: Checking migration status
-[JIT Migration] ✓ User needs migration - Proceeding
-[JIT Migration] Step 2/3: Validating credentials against B2C via ROPC
-[JIT Migration] ✓ B2C credentials validated successfully
-[JIT Migration] Step 3/3: Validating password complexity
-[JIT Migration] ✓ Password complexity validated
-[JIT Migration] ✅ SUCCESS - Returning MigratePassword action | Duration: 1250ms
+[JIT Migration] Step 1/2: Validating credentials against B2C ROPC | UPN: testuser@b2c.com
+[JIT Migration] ✓ B2C credentials validated successfully | UPN: testuser@b2c.com
+[JIT Migration] ✅ SUCCESS - Returning MigratePassword action | UserId: user-obj-id | UPN: testuser@... | Total: 1250ms | CorrelationId: corr-xyz
+[JIT Migration] → External ID will update password and migration attribute automatically.
 ```
 
-**Already Migrated (Fast Path):**
+**Test Mode (B2C validation skipped):**
 ```
-[JIT Migration] Step 1/3: Checking migration status
-[JIT Migration] ✓ User already migrated - Allowing login | Duration: 450ms
+[JIT Migration] [TEST MODE] Step 1/2: SKIPPING B2C credential validation - ALL PASSWORDS ACCEPTED | UPN: testuser@...
+[JIT Migration] ✅ SUCCESS - Returning MigratePassword action | ...
 ```
 
 **Invalid Credentials:**
 ```
-[JIT Migration] Step 2/3: Validating credentials against B2C via ROPC
-[JIT Migration] ❌ FAILED - B2C credential validation failed
+[JIT Migration] Step 1/2: Validating credentials against B2C ROPC | UPN: testuser@b2c.com
+[JIT Migration] ❌ Authentication FAILED - Invalid B2C credentials | UPN: testuser@...
 ```
 
 ---
@@ -997,13 +1033,15 @@ Get-MgIdentityAuthenticationEventsFlow
 
 **Solutions:**
 
-Quick update with automation:
+Quick update with automation (switch the custom extension to new URL):
 ```powershell
-.\scripts\Setup-JitCustomExtension.ps1 `
+.\scripts\Switch-JitEnvironment.ps1 `
+    -Environment Local `
     -TenantId "your-tenant-id" `
-    -NgrokUrl "https://NEW-URL.ngrok.app" `
-    -PublicKeyPath ".\keys\public_key.pem" `
-    -ExtensionAppId "existing-app-id"
+    -ExtensionId "your-custom-extension-id" `
+    -LocalAppObjectId "your-extension-app-object-id" `
+    -LocalAppId "your-extension-app-client-id" `
+    -NgrokDomain "NEW-URL.ngrok.app"
 ```
 
 Or use ngrok paid plan for static domain:
@@ -1087,27 +1125,28 @@ az functionapp config appsettings set `
 - Check app registration permissions
 
 **Scenario: B2C Credential Validation Failed**
-- Verify ROPC policy exists: `B2C_1_ROPC`
-- Test B2C login directly:
+- The JIT function validates credentials directly against the **Entra ID OAuth2 token endpoint** (not a B2C custom policy)
+- Test credential validation directly:
   ```bash
-  curl -X POST https://b2cprod.b2clogin.com/b2cprod.onmicrosoft.com/B2C_1_ROPC/oauth2/v2.0/token \
+  curl -X POST https://login.microsoftonline.com/<B2C_TENANT_ID>/oauth2/v2.0/token \
     -d "grant_type=password" \
-    -d "username=test@b2cprod.onmicrosoft.com" \
+    -d "username=test@b2ctenant.onmicrosoft.com" \
     -d "password=Test123!@#" \
-    -d "client_id=<client-id>" \
-    -d "scope=openid"
+    -d "client_id=<B2C_APP_CLIENT_ID>" \
+    -d "client_secret=<B2C_APP_CLIENT_SECRET>" \
+    -d "scope=openid" \
+    -d "NCA=1"
   ```
 - Check UPN transformation between External ID and B2C
 
-**Scenario: Password Complexity Failed**
-- Check password policy in `local.settings.json`
-- Verify password has: 8+ chars, uppercase, lowercase, digit, special char
-- Set breakpoint at `JitMigrationService.cs:156`
-- User must reset password via SSPR
+**Scenario: Password Complexity Requirements Not Met**
+- Password complexity validation is handled by External ID after the JIT function returns `MigratePassword`
+- If the password doesn't meet External ID's tenant policy, the user will be prompted to set a new password
+- This is expected behavior and requires no changes to the JIT function
 
 **Scenario: Graph API Throttling (HTTP 429)**
 - Graph API limit: ~60 ops/sec per app registration
-- View retry logs: `[GraphClient] Request throttled (429/503) - Retrying in X ms...`
+- View retry logs in Application Insights for throttling events
 - For load testing, add delays between requests
 
 #### JIT Debugging Tips
@@ -1177,8 +1216,8 @@ Controls how attributes are imported into External ID:
       "MigrationAttributes": {
         "StoreB2CObjectId": true,
         "B2CObjectIdTarget": "extension_xyz789_OriginalB2CId",
-        "SetRequiresMigration": true,
-        "RequiresMigrationTarget": "extension_xyz789_RequiresMigration"
+        "SetRequireMigration": true,
+        "RequireMigrationTarget": "extension_xyz789_RequiresMigration"
       }
     }
   }
@@ -1231,16 +1270,21 @@ Controls migration-specific attributes:
 - Default: `extension_{ExtensionAppId}_B2CObjectId`
 - Only used if `StoreB2CObjectId` is `true`
 
-**SetRequiresMigration** (bool, default: `true`)
+**SetRequireMigration** (bool, default: `true`)
 - Whether to set the RequiresMigration flag
 - Used by JIT authentication to know if password needs migration
 - The value is set to `true` by default (password NOT yet migrated)
 - Set to `false` if using a different migration tracking mechanism
 
-**RequiresMigrationTarget** (string, optional)
+**RequireMigrationTarget** (string, optional)
 - Target attribute name for the RequiresMigration flag
 - Default: `extension_{ExtensionAppId}_RequiresMigration`
-- Only used if `SetRequiresMigration` is `true`
+- Only used if `SetRequireMigration` is `true`
+
+**OverwriteExtensionAttributes** (bool, default: `false`)
+- Whether to overwrite extension attributes if user already exists
+- When `true`, updates `B2CObjectId` and migration flag even if user was previously imported
+- Useful for re-running imports or updating attributes after initial import
 
 ### Common Mapping Scenarios
 
@@ -1258,7 +1302,7 @@ Use default configuration - no mapping needed:
     "ExcludeFields": [],
     "MigrationAttributes": {
       "StoreB2CObjectId": true,
-      "SetRequiresMigration": true
+      "SetRequireMigration": true
     }
   }
 }
@@ -1302,8 +1346,8 @@ The `extension_b2c_CustomerId` will be renamed to `extension_extid_LegacyUserId`
     "MigrationAttributes": {
       "StoreB2CObjectId": true,
       "B2CObjectIdTarget": "extension_xyz_B2COriginalId",
-      "SetRequiresMigration": true,
-      "RequiresMigrationTarget": "extension_xyz_RequiresMigration"
+      "SetRequireMigration": true,
+      "RequireMigrationTarget": "extension_xyz_RequiresMigration"
     }
   }
 }
@@ -1314,7 +1358,7 @@ This configuration:
 - Maps 3 of them to different names
 - Excludes `CostCenter` from import
 - Stores B2C ObjectId as `extension_xyz_B2COriginalId`
-- Sets migration flag as `extension_xyz_Migrated`
+- Sets migration flag as `extension_xyz_RequiresMigration`
 
 ### Important Notes for Attribute Mapping
 
@@ -1591,8 +1635,9 @@ import-audit_000042_batch000_20250111183045.json
   "SourceBlobName": "users_000042.json",
   "BatchNumber": 0,
   "TotalUsers": 100,
-  "SuccessCount": 100,
+  "SuccessCount": 98,
   "FailureCount": 0,
+  "SkippedCount": 2,
   "DurationMs": 1234.56,
   "SuccessfulUsers": [
     {
@@ -1601,6 +1646,16 @@ import-audit_000042_batch000_20250111183045.json
       "UserPrincipalName": "user@externalid.onmicrosoft.com",
       "DisplayName": "John Doe",
       "ImportedAt": "2025-01-11T18:30:45.789Z"
+    },
+    ...
+  ],
+  "SkippedUsers": [
+    {
+      "B2CObjectId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      "UserPrincipalName": "existing.user@externalid.onmicrosoft.com",
+      "DisplayName": "Existing User",
+      "Reason": "Duplicate - User already exists",
+      "SkippedAt": "2025-01-11T18:30:45.900Z"
     },
     ...
   ],
@@ -2147,4 +2202,4 @@ Each configuration file has a **single, dedicated app registration**:
 
 ---
 
-For additional support, consult your Microsoft representative or review the [operations runbook](OPERATIONS.md).
+For additional support, consult your Microsoft representative.

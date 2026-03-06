@@ -434,7 +434,22 @@ Write-Header "Step 3: Configure Encryption Certificate"
 Write-Info "Loading certificate from: $CertificatePath"
 
 try {
-    $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($CertificatePath)
+    # Attempt to load as binary .cer file first; fall back to base64 text format
+    # (jit-certificate.txt from New-LocalJitRsaKeyPair.ps1 is base64-encoded DER)
+    $certBytes = $null
+    $rawContent = Get-Content $CertificatePath -Raw -Encoding ASCII
+    
+    if ($rawContent -match "^[A-Za-z0-9+/=\r\n\s]+$") {
+        # File contains only base64 characters — treat as base64-encoded DER
+        # Strip all whitespace (CR, LF, spaces) before decoding
+        $cleanBase64 = $rawContent -replace "[\r\n\s]", ""
+        $certBytes = [Convert]::FromBase64String($cleanBase64)
+        $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certBytes)
+    } else {
+        # Try loading directly (binary .cer or PEM format)
+        $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($CertificatePath)
+    }
+    
     $certBase64 = [Convert]::ToBase64String($cert.RawData)
     Write-Success "Certificate loaded successfully"
     Write-Step "Subject: $($cert.Subject)"

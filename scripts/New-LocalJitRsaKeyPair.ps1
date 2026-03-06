@@ -168,16 +168,16 @@ Write-Host "   - Copy the ENTIRE content (including BEGIN/END lines)"
 Write-Host "   - Paste into: Migration__JitAuthentication__InlineRsaPrivateKey"
 Write-Host "   - Replace newlines with literal \n in JSON"
 Write-Host ""
-Write-Host "2. Use Manage-CustomAuthExtension.ps1 to configure Custom Extension:" -ForegroundColor Yellow
-Write-Host "   - Script will automatically read jit-public-key-x509.txt"
-Write-Host "   - Public key will be uploaded to Graph API"
+Write-Host "2. Run Configure-ExternalIdJit.ps1 to configure External ID:" -ForegroundColor Yellow
+Write-Host "   - The script accepts jit-certificate.txt as the -CertificatePath argument"
+Write-Host "   - It will upload the certificate to the Custom Extension App Registration"
 Write-Host ""
 Write-Host "   Example:" -ForegroundColor Gray
-Write-Host "   .\Manage-CustomAuthExtension.ps1 -Operation Create ``" -ForegroundColor Cyan
-Write-Host "       -NgrokUrl 'https://YOUR_NGROK_URL.ngrok.app' ``" -ForegroundColor Cyan
-Write-Host "       -ApplyToAllApps" -ForegroundColor Cyan
-Write-Host "   - Use Graph API to upload to app registration"
-Write-Host "   - See: TESTING_PLAN.md Phase 4.2"
+Write-Host "   .\Configure-ExternalIdJit.ps1 ``" -ForegroundColor Cyan
+Write-Host "       -TenantId 'your-tenant-id' ``" -ForegroundColor Cyan
+Write-Host "       -CertificatePath '$certPath' ``" -ForegroundColor Cyan
+Write-Host "       -FunctionUrl 'https://YOUR_NGROK_URL.ngrok-free.app/api/JitAuthentication' ``" -ForegroundColor Cyan
+Write-Host "       -MigrationPropertyId 'extension_{ExtensionAppId}_RequiresMigration'" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Key ID (kid): $kid" -ForegroundColor Magenta
 Write-Host ""

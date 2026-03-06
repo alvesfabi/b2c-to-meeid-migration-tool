@@ -147,8 +147,8 @@ Generates RSA-2048 key pair for local testing (files stored in `scripts/` direct
 
 **Files Generated** (automatically git-ignored):
 - `jit-private-key.pem` - RSA private key (keep secret!)
-- `jit-certificate.txt` - X.509 certificate (upload to Azure)
-- `jit-public-key-x509.txt` - Public key in X.509 format
+- `jit-certificate.txt` - X.509 DER certificate in base64 format (for Graph API)
+- `jit-public-key-x509.txt` - Public key in X.509 SubjectPublicKeyInfo base64 format
 - `jit-public-key.jwk.json` - Public key in JWK format
 
 **What each file is used for:**
@@ -159,14 +159,17 @@ Generates RSA-2048 key pair for local testing (files stored in `scripts/` direct
    - Never commit or share this file
 
 2. **jit-certificate.txt**
-   - X.509 certificate in base64 format
-   - Upload to Custom Extension App Registration in Azure Portal
+   - X.509 DER certificate encoded as base64 (no PEM headers)
+   - Used by `Configure-ExternalIdJit.ps1` to upload the encryption certificate
    - Used by External ID to encrypt payloads sent to your function
+   - This is NOT a binary `.cer` file — it is a base64-encoded DER certificate
 
 3. **jit-public-key.jwk.json**
-   - Public key in JSON Web Key format
-   - Used by `Configure-ExternalIdJit.ps1` script
+   - Public key in JSON Web Key format (for reference only)
    - Safe to share (it's a public key)
+
+4. **jit-public-key-x509.txt**
+   - SubjectPublicKeyInfo public key bytes in base64 format (for reference only)
 
 **🔐 Security Notes:**
 - These keys are for **LOCAL TESTING ONLY**
@@ -225,7 +228,7 @@ Automates complete External ID configuration for JIT migration using device code
 | Parameter | Required | Description |
 |-----------|----------|-------------|
 | `TenantId` | Yes | External ID tenant ID |
-| `CertificatePath` | Yes | Path to `jit-certificate.txt` file |
+| `CertificatePath` | Yes | Path to certificate file. Accepts `jit-certificate.txt` (base64 DER format from `New-LocalJitRsaKeyPair.ps1`) or a binary `.cer` file |
 | `FunctionUrl` | Yes | Azure Function endpoint URL |
 | `MigrationPropertyId` | No | Extension attribute ID (format: `extension_{AppId}_RequiresMigration`). Prompted if not provided. |
 | `ExtensionAppName` | No | Name for custom auth extension app (default: "EEID Auth Extension - JIT Migration") |
@@ -233,11 +236,17 @@ Automates complete External ID configuration for JIT migration using device code
 | `SkipClientApp` | No | Skip creating the test client application |
 
 **How to find Migration Property ID:**
-1. Azure Portal → Your B2C Tenant → App registrations
-2. Find your `b2c-extensions-app` and copy the **Application (client) ID**
-3. Remove dashes from the ID (e.g., `a1b2c3d4-...` → `a1b2c3d4...`)
-4. Format: `extension_{AppIdWithoutDashes}_RequiresMigration`
-5. Example: `extension_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6_RequiresMigration`
+
+The `MigrationPropertyId` is the full extension attribute name for the `RequiresMigration` flag that was created in your External ID tenant. After running `Configure-ExternalIdJit.ps1`, the **Configuration Summary** output shows the correct value. You can also construct it manually:
+
+1. Azure Portal → Your **External ID** Tenant → App registrations (All applications)
+2. Find the app created for custom extension attributes — it's typically named `b2c-extensions-app` and is automatically created by External ID for extension attribute storage
+3. Copy its **Application (client) ID**
+4. Remove dashes from the ID (e.g., `a1b2c3d4-...` → `a1b2c3d4...`)
+5. Format: `extension_{AppIdWithoutDashes}_RequiresMigration`
+6. Example: `extension_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6_RequiresMigration`
+
+> **Tip:** After `Configure-ExternalIdJit.ps1` completes, the Configuration Summary shows the exact `MigrationPropertyId` to use.
 
 **Authentication Flow:**
 1. Script opens device code login (`https://microsoft.com/devicelogin`)
@@ -288,20 +297,49 @@ Toggle Custom Authentication Extension between local (ngrok) and Azure Function 
 **Usage:**
 ```powershell
 # Switch to local ngrok for development
-.\Switch-JitEnvironment.ps1 -Environment Local
+.\Switch-JitEnvironment.ps1 `
+    -Environment Local `
+    -TenantId "your-external-id-tenant-id" `
+    -ExtensionId "your-custom-extension-id" `
+    -LocalAppObjectId "your-extension-app-object-id" `
+    -LocalAppId "your-extension-app-client-id" `
+    -NgrokDomain "abc123.ngrok-free.app"
 
 # Switch to Azure Function for production
-.\Switch-JitEnvironment.ps1 -Environment Azure
+.\Switch-JitEnvironment.ps1 `
+    -Environment Azure `
+    -TenantId "your-external-id-tenant-id" `
+    -ExtensionId "your-custom-extension-id" `
+    -AzureAppObjectId "your-azure-extension-app-object-id" `
+    -AzureAppId "your-azure-extension-app-client-id" `
+    -AzureFunctionUrl "https://your-function.azurewebsites.net/api/JitAuthentication"
 ```
 
-**Parameters:**
-- `-Environment` - Target environment (`Local` or `Azure`)
+**Required Parameters:**
+| Parameter | Description |
+|-----------|-------------|
+| `-Environment` | Target environment (`Local` or `Azure`) |
+| `-TenantId` | External ID tenant ID |
+| `-ExtensionId` | Custom Authentication Extension ID |
+
+**Parameters for Local environment:**
+| Parameter | Description |
+|-----------|-------------|
+| `-LocalAppObjectId` | Object ID of the extension app registration |
+| `-LocalAppId` | Client ID of the extension app registration |
+| `-NgrokDomain` | ngrok domain without protocol (e.g., `abc123.ngrok-free.app`) |
+
+**Parameters for Azure environment:**
+| Parameter | Description |
+|-----------|-------------|
+| `-AzureAppObjectId` | Object ID of the Azure extension app registration |
+| `-AzureAppId` | Client ID of the Azure extension app registration |
+| `-AzureFunctionUrl` | Full Azure Function URL |
 
 **What it does:**
 - Updates Custom Authentication Extension target URL
-- For Local: Uses ngrok URL from configuration
-- For Azure: Uses Azure Function URL
-- Validates endpoint is reachable before switching
+- For Local: Configures extension to point to your ngrok tunnel
+- For Azure: Configures extension to point to Azure Function URL
 
 ---
 

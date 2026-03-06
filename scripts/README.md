@@ -16,6 +16,9 @@ This directory contains PowerShell scripts for local development, testing, and J
   - [Generate RSA Keys](#1-generate-rsa-keys)
   - [Configure External ID](#2-configure-external-id)
   - [Switch Environments](#3-switch-environments)
+- [Testing & Utility Scripts](#testing--utility-scripts)
+  - [New-TestUser.ps1](#new-testuserps1--create-test-users)
+  - [Manage-MigrationFlag.ps1](#manage-migrationflagps1--manage-migration-flag)
 - [Configuration](#configuration)
 - [Troubleshooting](#troubleshooting)
 
@@ -391,6 +394,129 @@ Toggle Custom Authentication Extension between local (ngrok) and Azure Function 
 - Validates endpoint is reachable before switching
 
 ---
+
+## Testing & Utility Scripts
+
+Utility scripts for creating test users and managing migration state.
+
+### New-TestUser.ps1  *(Create test users)*
+
+Creates one or more test users in Entra External ID with `emailAddress` identity.
+Optionally sets the `RequiresMigration` flag for JIT migration testing.
+
+**Usage:**
+```powershell
+# Create a single user with migration flag set to true
+.\New-TestUser.ps1 -Email "testuser@domain.com"
+
+# Create a single user with a specific display name
+.\New-TestUser.ps1 -Email "testuser@domain.com" -DisplayName "Test User"
+
+# Create 10 bulk test users (testjit1@slider-inc.com … testjit10@slider-inc.com)
+.\New-TestUser.ps1 -Prefix "testjit" -Count 10
+
+# Create users starting at a specific index
+.\New-TestUser.ps1 -Prefix "testjit" -Count 5 -StartIndex 20
+
+# Create users without setting the migration flag
+.\New-TestUser.ps1 -Prefix "testjit" -Count 3 -SetMigrationFlag none
+
+# Preview users that would be created (dry run)
+.\New-TestUser.ps1 -Prefix "testjit" -Count 5 -WhatIf
+```
+
+**Parameters:**
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `ConfigFile` | No | `appsettings.worker1.json` | Configuration file path |
+| `Email` | No* | — | Single user email address |
+| `DisplayName` | No | From email | Display name for single user |
+| `Prefix` | No* | `testjit` | Prefix for bulk user creation |
+| `Domain` | No | `slider-inc.com` | Email domain for bulk users |
+| `Count` | No | `1` | Number of users to create |
+| `StartIndex` | No | `1` | First index for bulk naming |
+| `Password` | No | `TempP@ssw0rd!2026` | Password for created users |
+| `SetMigrationFlag` | No | `true` | Set migration flag: `true`, `false`, or `none` |
+| `AttributeName` | No | From config | Override extension attribute name |
+| `WhatIf` | No | — | Preview without creating users |
+
+\*Either `-Email` (single mode) or `-Prefix` (bulk mode) should be used.
+
+**What it does:**
+1. Reads tenant and credential configuration from the specified config file
+2. Acquires access token using client credentials
+3. Creates user(s) with `emailAddress` sign-in identity
+4. Sets `RequiresMigration` extension attribute (if not `none`)
+5. Handles conflicts (user already exists) gracefully
+
+**UPN convention:**
+External ID UPN is derived from email: `user_domain.com#EXT#@<tenantDomain>`
+
+---
+
+### Manage-MigrationFlag.ps1  *(Manage migration flag)*
+
+Queries and updates the `RequiresMigration` flag for users in Entra External ID.
+Useful for monitoring migration progress and resetting users for re-testing.
+
+**Usage:**
+```powershell
+# List users that still need JIT migration (flag = true)
+.\Manage-MigrationFlag.ps1
+
+# List users already migrated (flag = false)
+.\Manage-MigrationFlag.ps1 -Filter false
+
+# List users without the flag set
+.\Manage-MigrationFlag.ps1 -Filter notset
+
+# List all users regardless of flag
+.\Manage-MigrationFlag.ps1 -Filter all
+
+# Clear migration flag for all pending users (preview)
+.\Manage-MigrationFlag.ps1 -Filter true -SetFlag false -WhatIf
+
+# Clear migration flag for all pending users
+.\Manage-MigrationFlag.ps1 -Filter true -SetFlag false
+
+# Set flag for a specific user by Object ID
+.\Manage-MigrationFlag.ps1 -UserId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" -SetFlag true
+
+# Set flag for a specific user by UPN
+.\Manage-MigrationFlag.ps1 -UserUpn "user_domain.com#EXT#@tenant.onmicrosoft.com" -SetFlag true
+
+# Discover available extension attributes in tenant
+.\Manage-MigrationFlag.ps1 -Discover
+```
+
+**Parameters:**
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `ConfigFile` | No | `appsettings.worker1.json` | Configuration file path |
+| `Filter` | No | `true` | Filter by flag value: `true`, `false`, `notset`, `all` |
+| `SetFlag` | No | — | Update flag to `true` or `false` |
+| `UserId` | No | — | Target single user by Object ID |
+| `UserUpn` | No | — | Target single user by UPN |
+| `AttributeName` | No | From config | Override extension attribute name |
+| `MaxUsers` | No | `100` | Maximum users to retrieve/update |
+| `Discover` | No | — | List all extension properties in tenant |
+| `WhatIf` | No | — | Preview without making changes |
+
+**What it does:**
+1. Reads configuration from the specified config file
+2. Acquires access token using client credentials
+3. Queries users via Microsoft Graph with OData filter
+4. Displays user list with current flag values
+5. Updates flag for matched users (if `-SetFlag` specified)
+
+**Common use cases:**
+- **Monitor progress:** List users still pending migration (`-Filter true`)
+- **Verify completion:** List already migrated users (`-Filter false`)
+- **Reset for testing:** Set flag back to `true` for re-testing JIT
+- **Troubleshoot:** Find users missing the attribute (`-Filter notset`)
+- **Debug:** Discover exact attribute names (`-Discover`)
 
 ---
 

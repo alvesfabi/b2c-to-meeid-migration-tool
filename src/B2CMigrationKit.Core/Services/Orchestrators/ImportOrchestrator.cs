@@ -612,6 +612,7 @@ public class ImportOrchestrator : IOrchestrator<ExecutionResult>
         // - At least one lowercase letter
         // - At least one digit
         // - At least one special character
+        // Note: Ambiguous characters (0, 1, O, I, l) are excluded for readability.
         
         const string uppercase = "ABCDEFGHJKLMNPQRSTUVWXYZ";
         const string lowercase = "abcdefghijkmnpqrstuvwxyz";
@@ -619,25 +620,24 @@ public class ImportOrchestrator : IOrchestrator<ExecutionResult>
         const string special = "!@#$%^&*";
         const string allChars = uppercase + lowercase + digits + special;
         
-        var random = new Random();
         var password = new List<char>();
         
-        // Guarantee at least one of each required type
-        password.Add(uppercase[random.Next(uppercase.Length)]);
-        password.Add(lowercase[random.Next(lowercase.Length)]);
-        password.Add(digits[random.Next(digits.Length)]);
-        password.Add(special[random.Next(special.Length)]);
+        // Guarantee at least one of each required type using cryptographically secure RNG
+        password.Add(uppercase[System.Security.Cryptography.RandomNumberGenerator.GetInt32(uppercase.Length)]);
+        password.Add(lowercase[System.Security.Cryptography.RandomNumberGenerator.GetInt32(lowercase.Length)]);
+        password.Add(digits[System.Security.Cryptography.RandomNumberGenerator.GetInt32(digits.Length)]);
+        password.Add(special[System.Security.Cryptography.RandomNumberGenerator.GetInt32(special.Length)]);
         
         // Fill remaining 12 characters randomly
         for (int i = 4; i < 16; i++)
         {
-            password.Add(allChars[random.Next(allChars.Length)]);
+            password.Add(allChars[System.Security.Cryptography.RandomNumberGenerator.GetInt32(allChars.Length)]);
         }
         
-        // Shuffle to avoid predictable pattern (first chars always have one of each type)
+        // Shuffle using Fisher-Yates with cryptographically secure RNG
         for (int i = password.Count - 1; i > 0; i--)
         {
-            int j = random.Next(i + 1);
+            int j = System.Security.Cryptography.RandomNumberGenerator.GetInt32(i + 1);
             (password[i], password[j]) = (password[j], password[i]);
         }
         

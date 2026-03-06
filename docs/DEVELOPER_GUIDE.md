@@ -431,25 +431,24 @@ private static string GenerateRandomPassword()
     const string special = "!@#$%^&*";
     const string allChars = uppercase + lowercase + digits + special;
     
-    var random = new Random();
     var password = new List<char>();
     
-    // Guarantee at least one of each required type
-    password.Add(uppercase[random.Next(uppercase.Length)]);
-    password.Add(lowercase[random.Next(lowercase.Length)]);
-    password.Add(digits[random.Next(digits.Length)]);
-    password.Add(special[random.Next(special.Length)]);
+    // Guarantee at least one of each required type using cryptographically secure RNG
+    password.Add(uppercase[RandomNumberGenerator.GetInt32(uppercase.Length)]);
+    password.Add(lowercase[RandomNumberGenerator.GetInt32(lowercase.Length)]);
+    password.Add(digits[RandomNumberGenerator.GetInt32(digits.Length)]);
+    password.Add(special[RandomNumberGenerator.GetInt32(special.Length)]);
     
     // Fill remaining 12 characters randomly
     for (int i = 4; i < 16; i++)
     {
-        password.Add(allChars[random.Next(allChars.Length)]);
+        password.Add(allChars[RandomNumberGenerator.GetInt32(allChars.Length)]);
     }
     
-    // Shuffle using Fisher-Yates to avoid predictable patterns
+    // Shuffle using Fisher-Yates with cryptographically secure RNG
     for (int i = password.Count - 1; i > 0; i--)
     {
-        int j = random.Next(i + 1);
+        int j = RandomNumberGenerator.GetInt32(i + 1);
         (password[i], password[j]) = (password[j], password[i]);
     }
     

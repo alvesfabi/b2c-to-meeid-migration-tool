@@ -236,11 +236,17 @@ Automates complete External ID configuration for JIT migration using device code
 | `SkipClientApp` | No | Skip creating the test client application |
 
 **How to find Migration Property ID:**
-1. Azure Portal → Your **External ID** Tenant → App registrations
-2. Find the `b2c-extensions-app` (the extension attributes app) and copy its **Application (client) ID**
-3. Remove dashes from the ID (e.g., `a1b2c3d4-...` → `a1b2c3d4...`)
-4. Format: `extension_{AppIdWithoutDashes}_RequiresMigration`
-5. Example: `extension_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6_RequiresMigration`
+
+The `MigrationPropertyId` is the full extension attribute name for the `RequiresMigration` flag that was created in your External ID tenant. After running `Configure-ExternalIdJit.ps1`, the **Configuration Summary** output shows the correct value. You can also construct it manually:
+
+1. Azure Portal → Your **External ID** Tenant → App registrations (All applications)
+2. Find the app created for custom extension attributes — it's typically named `b2c-extensions-app` and is automatically created by External ID for extension attribute storage
+3. Copy its **Application (client) ID**
+4. Remove dashes from the ID (e.g., `a1b2c3d4-...` → `a1b2c3d4...`)
+5. Format: `extension_{AppIdWithoutDashes}_RequiresMigration`
+6. Example: `extension_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6_RequiresMigration`
+
+> **Tip:** After `Configure-ExternalIdJit.ps1` completes, the Configuration Summary shows the exact `MigrationPropertyId` to use.
 
 **Authentication Flow:**
 1. Script opens device code login (`https://microsoft.com/devicelogin`)

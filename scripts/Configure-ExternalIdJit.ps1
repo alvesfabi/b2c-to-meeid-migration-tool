@@ -439,9 +439,11 @@ try {
     $certBytes = $null
     $rawContent = Get-Content $CertificatePath -Raw -Encoding ASCII
     
-    if ($rawContent -match "^[A-Za-z0-9+/=\r\n]+$") {
+    if ($rawContent -match "^[A-Za-z0-9+/=\r\n\s]+$") {
         # File contains only base64 characters — treat as base64-encoded DER
-        $certBytes = [Convert]::FromBase64String($rawContent.Trim())
+        # Strip all whitespace (CR, LF, spaces) before decoding
+        $cleanBase64 = $rawContent -replace "[\r\n\s]", ""
+        $certBytes = [Convert]::FromBase64String($cleanBase64)
         $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certBytes)
     } else {
         # Try loading directly (binary .cer or PEM format)

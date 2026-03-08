@@ -186,7 +186,7 @@ worker (or a re-run) will process it.
 ### Start-LocalPhoneRegistration.ps1  *(Phone registration phase)*
 
 Drains the `phone-registration` queue populated by the worker-migrate phase and registers
-MFA phone numbers in Entra External ID at a throttle-safe rate (0.5 RPS / 2000 ms gap).
+MFA phone numbers in Entra External ID at a throttle-safe rate (~2.5 RPS / 400 ms gap).
 
 Run **after** (or concurrently with) `Start-LocalWorkerMigrate.ps1`.
 

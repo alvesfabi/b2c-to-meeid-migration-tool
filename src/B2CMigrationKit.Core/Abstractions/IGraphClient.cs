@@ -127,9 +127,9 @@ public interface IGraphClient
     /// Fetches the registered mobile MFA phone number for a single user from B2C.
     /// Calls <c>GET /users/{userId}/authentication/phoneMethods/3179e48a-750b-4051-897c-87b9720928f7</c>.
     ///
-    /// This endpoint belongs to the <c>authenticationMethod</c> Graph resource family with a
-    /// documented per-app-per-tenant limit of 5 requests / 10 seconds (0.5 RPS).
-    /// Callers must enforce a minimum 2 000 ms delay between consecutive calls.
+    /// This endpoint belongs to the <c>authenticationMethod</c> Graph resource family,
+    /// which has a significantly lower throttle budget than the main Users API.
+    /// Call throttling is managed by the caller via <see cref="PhoneRegistrationOptions.ThrottleDelayMs"/>.
     ///
     /// Requires <c>UserAuthenticationMethod.Read.All</c> on the B2C tenant.
     /// </summary>

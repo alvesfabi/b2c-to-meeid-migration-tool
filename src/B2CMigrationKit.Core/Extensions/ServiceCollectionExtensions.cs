@@ -63,7 +63,21 @@ public static class ServiceCollectionExtensions
         // Register Azure Storage clients
         services.AddSingleton<IBlobStorageClient, BlobStorageClient>();
         services.AddSingleton<IQueueClient, QueueStorageClient>();
-        services.AddSingleton<ITableStorageClient, TableStorageClient>();
+
+        // Register audit client based on AuditMode (Table | File | None)
+        var auditMode = configuration.GetValue<string>($"{MigrationOptions.SectionName}:Storage:AuditMode") ?? "Table";
+        switch (auditMode.Trim().ToLowerInvariant())
+        {
+            case "file":
+                services.AddSingleton<ITableStorageClient, FileAuditClient>();
+                break;
+            case "none":
+                services.AddSingleton<ITableStorageClient, NullAuditClient>();
+                break;
+            default: // "table"
+                services.AddSingleton<ITableStorageClient, TableStorageClient>();
+                break;
+        }
 
         // Register B2C Credential Manager
         services.AddSingleton<ICredentialManager>(sp =>

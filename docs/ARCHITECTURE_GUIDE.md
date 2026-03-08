@@ -132,7 +132,7 @@ Each worker instance uses an **independent app registration** and (ideally) a se
 ```
 Queue: phone-registration
 └─ PhoneRegistrationWorker (one per instance, independent App Registrations for B2C and EEID)
-   ├─ GET /users/{B2CUserId}/authentication/phoneMethods → B2C  (0.5 RPS per worker)
+   ├─ GET /users/{B2CUserId}/authentication/phoneMethods → B2C  (≤3 RPS per worker / app reg)
    ├─ If phone found: POST /users/{EEIDUpn}/authentication/phoneMethods → EEID
    │   ├─ 201 Created  → audit(PhoneRegistered)
    │   └─ 409 Conflict → audit(PhoneRegistered, idempotent)
@@ -142,7 +142,7 @@ Queue: phone-registration
 
 Phone numbers are fetched from B2C **at drain time** — they are never stored in the queue. This keeps PII out of the message store and in memory only for the duration of a single API call pair.
 
-> **Throttle limit**: The `authenticationMethod` Graph API family is limited to **5 req / 10 s (0.5 RPS) per app per tenant**. The default `ThrottleDelayMs` of **2 000 ms** matches this limit. Run additional `phone-registration` instances each with their own EEID app registration to increase throughput — 3 instances ≈ 1.5 RPS ≈ 138 K phones in ~26 hours.
+> **Throttle note**: The `phoneMethods` API has a significantly lower throttle budget than the main Users API, and GET and POST/PATCH calls count together against the same per-app budget. Each worker uses two independent app registrations (one B2C, one EEID) with independent quotas. `ThrottleDelayMs` (default **400 ms**) is the user-side rate control knob — increase it if you see sustained 429s. Run additional workers with dedicated app registration pairs to scale throughput.
 
 #### Step 3 — JIT Migration (first login — Azure Function, always running)
 
@@ -490,12 +490,12 @@ WorkerMigrate ──► Queue: phone-registration ──► PhoneRegistrationWor
 
 | Setting | Default | Notes |
 |---|---|---|
-| `ThrottleDelayMs` | 2000 ms | 0.5 RPS — matches documented `phoneMethods` tenant limit |
+| `ThrottleDelayMs` | 400 ms | User-side rate control — increase if you observe sustained 429s |
 | `MessageVisibilityTimeoutSeconds` | 120 s | If processing fails, message re-appears after this delay |
 | `MaxEmptyPolls` | 3 | Worker exits after 3 consecutive empty polls (for CLI use) |
 | `EmptyQueuePollDelayMs` | 5000 ms | Wait before re-polling when queue is empty |
 
-Multiple `PhoneRegistrationWorker` instances can run in parallel with different app registrations to increase throughput: 3 instances = 1.5 RPS ≈ 138K phones registered in ~26 hours.
+Multiple `PhoneRegistrationWorker` instances can run in parallel, each with dedicated B2C and EEID app registration pairs, to increase throughput proportionally.
 
 
 #### Required Permissions
@@ -878,17 +878,23 @@ traces
 
 ### 8.1 Graph API Throttling Model
 
-**CRITICAL**: Microsoft Graph API throttling works on **two dimensions**:
+**CRITICAL**: Microsoft Graph API throttling works on **two dimensions** for the main Users API:
 
 1. **Per App Registration (Client ID)** - ~60 operations/second per app
 2. **Per IP Address** - Cumulative limit across all apps from that IP
 3. **Per Tenant** - 200 RPS for all apps in tenant
-4. **Write operations** (create users) have a lower throttling limit 
+4. **Write operations** (create users) have a lower throttling limit
 
-**Implications**:
+**Implications for user creation**:
 - ✅ Single instance with 1 app = ~60 ops/sec
 - ❌ Single instance with 3 apps ≠ 180 ops/sec (still limited by IP)
 - ✅ 3 instances (different IPs) with 1 app each = ~180 ops/sec
+
+#### Phone Methods API — Throttle Behaviour
+
+The `GET` and `POST/PATCH /users/{id}/authentication/phoneMethods` endpoints have a **significantly lower throttle budget** than the general Users API, and GET and POST/PATCH calls count together against the same per-app budget.
+
+Use `ThrottleDelayMs` (see [§5.3](#53-phone-registration-worker)) as the user-side rate control knob. Scale throughput by running multiple workers with dedicated app registration pairs.
 
 ### 8.2 Multi-Instance Scaling Architecture
 

@@ -49,4 +49,23 @@ public class StorageOptions
     /// Default: "migrationAudit"
     /// </summary>
     public string AuditTableName { get; set; } = "migrationAudit";
+
+    /// <summary>
+    /// Audit output mode. Controls where migration audit records are written.
+    /// <list type="bullet">
+    ///   <item><term>Table</term><description>Azure Table Storage (default, recommended for production)</description></item>
+    ///   <item><term>File</term><description>Local JSONL file — no Azure Storage required, useful for local testing</description></item>
+    ///   <item><term>None</term><description>Audit disabled — no records are written</description></item>
+    /// </list>
+    /// Default: "Table"
+    /// </summary>
+    public string AuditMode { get; set; } = "Table";
+
+    /// <summary>
+    /// Path to the local JSONL audit file. Only used when <see cref="AuditMode"/> is "File".
+    /// Records are appended so multiple runs accumulate in the same file.
+    /// Relative paths are resolved against the working directory of the process.
+    /// Default: "migration-audit.jsonl"
+    /// </summary>
+    public string AuditFilePath { get; set; } = "migration-audit.jsonl";
 }

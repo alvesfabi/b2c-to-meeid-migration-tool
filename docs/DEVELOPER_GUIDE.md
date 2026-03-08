@@ -155,12 +155,12 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
 ```
 
 **Options:**
-- `ThrottleDelayMs` — Delay between each `POST /authentication/phoneMethods` call. Default **2000 ms = 0.5 RPS**, which matches the documented Microsoft Graph per-tenant limit for the `authenticationMethod` resource family (5 req / 10 s per app per tenant). Do **not** lower this below 2000 ms for a single worker per app registration, or you risk sustained HTTP 429 responses. To increase throughput, run multiple workers each using a **separate app registration** (see [Scaling Patterns](#scaling-patterns)).
+- `ThrottleDelayMs` — Delay (ms) between processing consecutive queue messages (1 GET on B2C + 1 POST on EEID). The phoneMethods API has a significantly lower throttle budget than the user-creation API. Increase this value if you see sustained HTTP 429 responses. To increase throughput, run multiple workers each using **separate B2C and EEID app registrations** (see [Scaling Patterns](#scaling-patterns)). Default: **400 ms**.
 - `MessageVisibilityTimeoutSeconds` — How long a message is invisible while being processed. If the worker crashes, the message reappears after this timeout.
 - `EmptyQueuePollDelayMs` — How long the worker sleeps between polls when the queue is empty.
 - `MaxEmptyPolls` — How many consecutive empty polls before the CLI process exits cleanly.
 
-> **Why async?** The `POST /users/{id}/authentication/phoneMethods` API has a documented per-tenant limit of **5 requests / 10 seconds (0.5 RPS)** — far lower than the ~60 ops/sec budget of the user-creation API. Decoupling via queue lets worker-migrate proceed at full speed while phone registration runs independently at a safe rate.
+> **Why async?** The phoneMethods API has a significantly lower throttle budget than the user-creation API. Decoupling via queue lets worker-migrate proceed at full speed while phone registration runs independently at a safe rate.
 
 ### Storage Configuration
 
@@ -1521,21 +1521,17 @@ This means:
 
 **Key Principle**: Each instance (Console App or Azure Function) uses **1 app registration**. To scale, deploy **multiple instances** on **different IP addresses**.
 
-#### Authentication Methods API — Documented Service Limits
+#### Authentication Methods API — Throttle Behaviour
 
-The `POST /users/{id}/authentication/phoneMethods` endpoint belongs to the `authenticationMethod` resource family, which has **stricter documented limits** than the general Users API ([source: Microsoft Graph service-specific limits](https://learn.microsoft.com/en-us/graph/throttling-limits#identity-and-access-reports-service-limits)):
+The `GET` and `POST/PATCH /users/{id}/authentication/phoneMethods` endpoints have a **significantly lower throttle budget** than the main Users API, and GET and POST/PATCH calls count together against the same per-app budget.
 
-| Limit scope | Limit |
-|---|---|
-| Per app, across all tenants | 122 requests / 10 seconds (~12.2 RPS) |
-| **Per app, per tenant** | **5 requests / 10 seconds (0.5 RPS)** ← binding |
+**Key implications for our architecture**:
+- Each worker calls two different tenants: B2C (GET) and EEID (POST). Because they are different tenants, each call is counted against a different tenant's quota independently — they do not share a budget. Client-side throughput is governed by `ThrottleDelayMs`.
+- If you observe sustained HTTP 429 responses, increase `ThrottleDelayMs`.
 
-The **per-tenant** limit is the binding constraint for our workload (single target tenant — External ID). At 0.5 RPS, a single worker requires at minimum **2 000 ms** between calls.
-
-**Scaling phone registration** (if 0.5 RPS is too slow):
-- Run multiple `phone-registration` workers, each with a **dedicated EEID app registration**
-- Each additional app registration adds another 0.5 RPS budget for that tenant
-- e.g., 4 workers × 4 app registrations = ~2 RPS = ~7 200 phone registrations/hour
+**Scaling phone registration**:
+- Run multiple `phone-registration` workers, each with a **dedicated pair of app registrations** (1 B2C app + 1 EEID app)
+- Each additional worker pair increases throughput proportionally (limited by the tenant-level budget shared across all app registrations)
 
 #### Console App Scaling
 

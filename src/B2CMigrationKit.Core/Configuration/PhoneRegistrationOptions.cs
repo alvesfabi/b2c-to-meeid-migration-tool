@@ -16,18 +16,14 @@ public class PhoneRegistrationOptions
     public string QueueName { get; set; } = "phone-registration";
 
     /// <summary>
-    /// Minimum delay (ms) between consecutive POST /authentication/phoneMethods calls.
-    /// The phoneMethods API has a much lower throttle budget than the main Users API.
-    ///
-    /// Microsoft Graph documents the following limits for the authenticationMethod resource
-    /// family (source: "Identity and access reports service limits"):
-    ///   - Per app, all tenants : 122 requests / 10 seconds (~12.2 RPS)
-    ///   - Per app, per tenant  :   5 requests / 10 seconds ( 0.5 RPS)  ← binding constraint
-    ///
-    /// The per-tenant limit of 0.5 RPS requires at least 2 000 ms between calls.
-    /// Default: 2000 ms = exactly 0.5 RPS (safe for a single worker per app registration)
+    /// Minimum delay (ms) between processing consecutive queue messages.
+    /// Each message makes one API call to B2C (GET phoneMethods) and one to EEID (POST phoneMethods).
+    /// The phoneMethods API has a significantly lower throttle budget than the main Users API.
+    /// Increase this value if you observe sustained HTTP 429 responses.
+    /// To increase throughput, run additional workers each with dedicated B2C and EEID app registrations.
+    /// Default: 400 ms
     /// </summary>
-    public int ThrottleDelayMs { get; set; } = 2000;
+    public int ThrottleDelayMs { get; set; } = 400;
 
     /// <summary>
     /// How long (seconds) a dequeued message is invisible to other workers while being processed.

@@ -23,9 +23,17 @@ namespace B2CMigrationKit.Core.Services.Orchestrators;
 ///
 /// Throttle strategy
 /// -----------------
+/// The phoneMethods API has a significantly lower throttle budget than the main Users API.
+/// GET and POST/PATCH calls count together against the same per-app budget.
+///
+/// Each message = 1 GET (B2C tenant) + 1 POST (EEID tenant). Because B2C and EEID are
+/// different tenants, each call is counted against a different tenant's quota — they do not
+/// share a budget. ThrottleDelayMs controls throughput on the client side; increase it if
+/// you observe sustained HTTP 429 responses on either tenant.
+///
 /// - A fixed <see cref="PhoneRegistrationOptions.ThrottleDelayMs"/> delay is applied after
-///   every API call (success or failure).  This hard-limits throughput to
-///   ~(1000 / ThrottleDelayMs) calls/second regardless of concurrency.
+///   every processed message (success or failure). This hard-limits throughput to
+///   ~(1000 / ThrottleDelayMs) pairs/second regardless of concurrency.
 /// - Transient errors (including 429) are retried by the GraphClient's Polly pipeline with
 ///   exponential back-off.  If all retries are exhausted the message is NOT deleted; it
 ///   becomes visible again after the visibility timeout for another attempt.

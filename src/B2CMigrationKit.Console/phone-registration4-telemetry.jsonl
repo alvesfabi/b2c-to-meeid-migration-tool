@@ -1,0 +1,12 @@
+{"ts":"2026-03-08T22:09:08.0201446\u002B00:00","type":"event","name":"PhoneRegistration.Started"}
+{"ts":"2026-03-08T22:12:17.6437134\u002B00:00","type":"event","name":"PhoneRegistration.Success","EEIDUpn":"bulkuser0760709_SliderInc.onmicrosoft.com@lagomarciamdemo2.onmicrosoft.com","B2CUserId":"0027d102-54a1-4032-8bed-607b5f4081f5"}
+{"ts":"2026-03-08T22:14:56.9359574\u002B00:00","type":"event","name":"PhoneRegistration.Success","EEIDUpn":"bulkuser0505345_SliderInc.onmicrosoft.com@lagomarciamdemo2.onmicrosoft.com","B2CUserId":"0042dea3-03c1-4ffc-9e13-8694a89d4b38"}
+{"ts":"2026-03-08T22:16:22.7455604\u002B00:00","type":"event","name":"PhoneRegistration.Success","EEIDUpn":"bulkuser0505754_SliderInc.onmicrosoft.com@lagomarciamdemo2.onmicrosoft.com","B2CUserId":"004f8a99-b9d0-491b-942a-444f2342374d"}
+{"ts":"2026-03-08T22:32:42.9651841\u002B00:00","type":"event","name":"PhoneRegistration.Success","EEIDUpn":"bulkuser0015711_SliderInc.onmicrosoft.com@lagomarciamdemo2.onmicrosoft.com","B2CUserId":"00a366a8-56d6-40b2-a31d-646857fd75f2"}
+{"ts":"2026-03-08T22:41:26.6258504\u002B00:00","type":"event","name":"PhoneRegistration.Success","EEIDUpn":"bulkuser0015541_SliderInc.onmicrosoft.com@lagomarciamdemo2.onmicrosoft.com","B2CUserId":"00d65164-69e3-450d-baad-f133d99d8dfe"}
+{"ts":"2026-03-08T22:44:27.0473727\u002B00:00","type":"event","name":"PhoneRegistration.Success","EEIDUpn":"bulkuser0760789_SliderInc.onmicrosoft.com@lagomarciamdemo2.onmicrosoft.com","B2CUserId":"00ed950f-39df-43fd-9c8c-5a0f67ca32de"}
+{"ts":"2026-03-08T22:58:53.4122322\u002B00:00","type":"event","name":"PhoneRegistration.Success","EEIDUpn":"bulkuser0016124_SliderInc.onmicrosoft.com@lagomarciamdemo2.onmicrosoft.com","B2CUserId":"0162ea28-c20f-4d2b-896f-f74b1e56761d"}
+{"ts":"2026-03-08T23:08:39.8343729\u002B00:00","type":"event","name":"PhoneRegistration.Failed","EEIDUpn":"bulkuser0760476_SliderInc.onmicrosoft.com@lagomarciamdemo2.onmicrosoft.com","B2CUserId":"000e1e1d-d110-4ca0-ae94-13922af127e6","RetryCount":"0","Error":"The specified user could not be found."}
+{"ts":"2026-03-09T00:34:58.8814148\u002B00:00","type":"event","name":"PhoneRegistration.Started"}
+{"ts":"2026-03-09T00:40:20.8210943\u002B00:00","type":"event","name":"PhoneRegistration.Started"}
+{"ts":"2026-03-09T00:47:22.2960483\u002B00:00","type":"event","name":"PhoneRegistration.Started"}

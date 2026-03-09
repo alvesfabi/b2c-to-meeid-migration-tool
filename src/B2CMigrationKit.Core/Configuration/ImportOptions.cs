@@ -27,6 +27,13 @@ public class ImportOptions
     /// </summary>
     public MigrationAttributesOptions MigrationAttributes { get; set; } = new();
 
+    /// <summary>
+    /// When true, the worker-migrate phase will not enqueue phone-registration messages.
+    /// Use this to run a dry-run or test migration without populating the phone queue.
+    /// Default: false.
+    /// </summary>
+    public bool SkipPhoneRegistration { get; set; } = false;
+
 }
 
 /// <summary>

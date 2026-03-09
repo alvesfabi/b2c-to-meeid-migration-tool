@@ -456,8 +456,8 @@ Every user outcome is written to Azure Table Storage (`migration-audit` table) i
 
 #### Security Measures
 
-- **B2C Service Principal**: `Directory.Read.All` (application permission)
-- **EEID Service Principal**: `User.ReadWrite.All` (application permission)
+- **B2C Service Principal**: `User.Read.All` (Application permission) — read user profiles via `$batch`
+- **EEID Service Principal**: `User.ReadWrite.All` (Application permission) — create users and set extension attributes
 - **Audit Storage**: Managed Identity or storage key (Key Vault recommended for production)
 
 ---
@@ -642,7 +642,8 @@ JIT Phase:     External ID UPN (user@externalid.com) → Reverse Transform → B
 - Token audience must match Custom Extension app ID URI
 
 **Function → B2C**:
-- Service Principal with `Directory.Read.All` (application permission)
+- B2C app registration configured for **ROPC flow** (Resource Owner Password Credentials)
+- No Graph API permission required — the function calls the B2C OAuth `/oauth2/v2.0/token` endpoint directly to validate credentials, not the Graph API
 - Client credentials flow (ClientId + ClientSecret from Key Vault)
 
 **Function → External ID**:
@@ -810,14 +811,32 @@ All Azure services use **System-Assigned Managed Identity** (no service principa
 
 #### Service Principal Permissions
 
-**B2C App Registration** (for bulk migration reading and JIT ROPC):
-- `User.Read.All` (application permission) — sufficient for harvest and $batch profile reads
+Permissions vary by process. Each process uses **dedicated app registrations** (one per worker instance) to get independent throttle quotas.
+
+| Process | Tenant | Permission | Type |
+|---|---|---|---|
+| `harvest` | B2C | `User.Read.All` | Application |
+| `worker-migrate` | B2C | `User.Read.All` | Application |
+| `worker-migrate` | Entra External ID | `User.ReadWrite.All` | Application |
+| `phone-registration` | B2C | `UserAuthenticationMethod.Read.All` | Application |
+| `phone-registration` | Entra External ID | `UserAuthenticationMethod.ReadWrite.All` | Application |
+| JIT Function | Entra External ID | `User.ReadWrite.All` | Application |
+
+> **Admin consent** must be explicitly granted for every Application permission in the Azure Portal. `Directory.ReadWrite.All` and `Directory.Read.All` are **not required** by any process — using `User.Read.All` / `User.ReadWrite.All` follows least-privilege.
+
+**B2C App Registration** (harvest + worker-migrate reading):
+- `User.Read.All` (application permission) — sufficient for full-profile `$batch` reads
 - NO write permissions to B2C
 
-**External ID App Registration** (for bulk user creation, phone registration, and JIT updates):
-- `User.ReadWrite.All` (application permission) — user creation and attribute updates
-- `UserAuthenticationMethod.ReadWrite.All` (application permission) — phone registration
-- Restricted to listed permissions (no Global Administrator role required)
+**B2C App Registration** (phone-registration reading):
+- `UserAuthenticationMethod.Read.All` (application permission) — read MFA phone methods only
+
+**External ID App Registration** (worker-migrate creation):
+- `User.ReadWrite.All` (application permission) — user creation and extension attribute writes
+
+**External ID App Registration** (phone-registration + JIT):
+- `UserAuthenticationMethod.ReadWrite.All` (application permission) — register phone methods
+- `User.ReadWrite.All` (application permission) — update `RequiresMigration` attribute (JIT only)
 
 ### 7.3 Data Protection
 

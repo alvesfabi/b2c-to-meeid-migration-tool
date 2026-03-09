@@ -1,0 +1,14 @@
+{"ts":"2026-03-08T22:08:58.0513928\u002B00:00","type":"event","name":"PhoneRegistration.Started"}
+{"ts":"2026-03-08T22:15:02.3619784\u002B00:00","type":"event","name":"PhoneRegistration.Success","EEIDUpn":"bulkuser0015741_SliderInc.onmicrosoft.com@lagomarciamdemo2.onmicrosoft.com","B2CUserId":"00436a63-0026-4b15-8bd2-1be758a1654a"}
+{"ts":"2026-03-08T22:15:27.3905923\u002B00:00","type":"event","name":"PhoneRegistration.Success","EEIDUpn":"bulkuser0760279_SliderInc.onmicrosoft.com@lagomarciamdemo2.onmicrosoft.com","B2CUserId":"00487888-8a90-4fcc-b77c-e31534221505"}
+{"ts":"2026-03-08T22:51:11.9377920\u002B00:00","type":"event","name":"PhoneRegistration.Failed","EEIDUpn":"bulkuser0760476_SliderInc.onmicrosoft.com@lagomarciamdemo2.onmicrosoft.com","B2CUserId":"000e1e1d-d110-4ca0-ae94-13922af127e6","RetryCount":"0","Error":"The specified user could not be found."}
+{"ts":"2026-03-08T22:57:39.5895359\u002B00:00","type":"event","name":"PhoneRegistration.Success","EEIDUpn":"bulkuser0505258_SliderInc.onmicrosoft.com@lagomarciamdemo2.onmicrosoft.com","B2CUserId":"0158b470-eb11-4e4e-8cf3-54661ba643bc"}
+{"ts":"2026-03-08T23:20:10.8470277\u002B00:00","type":"event","name":"PhoneRegistration.Success","EEIDUpn":"bulkuser0505456_SliderInc.onmicrosoft.com@lagomarciamdemo2.onmicrosoft.com","B2CUserId":"0212ab34-ee8b-41b6-94e8-4a11d48e3a05"}
+{"ts":"2026-03-08T23:21:58.7409528\u002B00:00","type":"event","name":"PhoneRegistration.Success","EEIDUpn":"bulkuser0015445_SliderInc.onmicrosoft.com@lagomarciamdemo2.onmicrosoft.com","B2CUserId":"021e2cbc-d934-43bb-99de-06c634dedd5e"}
+{"ts":"2026-03-08T23:30:47.1217769\u002B00:00","type":"event","name":"PhoneRegistration.Success","EEIDUpn":"bulkuser0760306_SliderInc.onmicrosoft.com@lagomarciamdemo2.onmicrosoft.com","B2CUserId":"026891ed-2fa7-4f84-bc27-c977abf6dbbd"}
+{"ts":"2026-03-09T00:34:50.3038376\u002B00:00","type":"event","name":"PhoneRegistration.Started"}
+{"ts":"2026-03-09T00:35:22.5313370\u002B00:00","type":"event","name":"PhoneRegistration.Failed","EEIDUpn":"bulkuser0760476_SliderInc.onmicrosoft.com@lagomarciamdemo2.onmicrosoft.com","B2CUserId":"000e1e1d-d110-4ca0-ae94-13922af127e6","RetryCount":"0","Error":"The specified user could not be found."}
+{"ts":"2026-03-09T00:40:14.2434745\u002B00:00","type":"event","name":"PhoneRegistration.Started"}
+{"ts":"2026-03-09T00:41:13.8798734\u002B00:00","type":"event","name":"PhoneRegistration.Success","EEIDUpn":"bulkuser0760407_SliderInc.onmicrosoft.com@lagomarciamdemo2.onmicrosoft.com","B2CUserId":"0317f619-7701-476f-94e2-7bf6d9258ddd"}
+{"ts":"2026-03-09T00:47:11.8088756\u002B00:00","type":"event","name":"PhoneRegistration.Started"}
+{"ts":"2026-03-09T00:50:22.3660396\u002B00:00","type":"event","name":"PhoneRegistration.Success","EEIDUpn":"bulkuser0505873_SliderInc.onmicrosoft.com@lagomarciamdemo2.onmicrosoft.com","B2CUserId":"0367d3ec-516d-49ad-99e2-7d57f196c148"}

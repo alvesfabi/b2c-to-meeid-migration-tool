@@ -144,7 +144,7 @@ public static class ServiceCollectionExtensions
 
             var factory = new GraphClientFactory(credManagers.First(), factoryLogger, telemetry);
             var graphServiceClient = factory.CreateClient(options.B2C.Scopes);
-            var graphClient = new GraphClient(graphServiceClient, retryOptions, clientLogger, telemetry);
+            var graphClient = new GraphClient(graphServiceClient, retryOptions, clientLogger, telemetry, "B2C");
 
             return new HarvestOrchestrator(graphClient, queueClient, telemetry,
                 Options.Create(options), orchestratorLogger);
@@ -166,12 +166,12 @@ public static class ServiceCollectionExtensions
             // B2C Graph client (first credential manager)
             var b2cFactory = new GraphClientFactory(credManagers.First(), factoryLogger, telemetry);
             var b2cServiceClient = b2cFactory.CreateClient(options.B2C.Scopes);
-            var b2cClient = new GraphClient(b2cServiceClient, retryOptions, clientLogger, telemetry);
+            var b2cClient = new GraphClient(b2cServiceClient, retryOptions, clientLogger, telemetry, "B2C");
 
             // EEID Graph client (second credential manager)
             var eeidFactory = new GraphClientFactory(credManagers.Last(), factoryLogger, telemetry);
             var eeidServiceClient = eeidFactory.CreateClient(options.ExternalId.Scopes);
-            var eeidClient = new GraphClient(eeidServiceClient, retryOptions, clientLogger, telemetry);
+            var eeidClient = new GraphClient(eeidServiceClient, retryOptions, clientLogger, telemetry, "EEID");
 
             return new WorkerMigrateOrchestrator(b2cClient, eeidClient, queueClient, tableClient,
                 telemetry, Options.Create(options), orchestratorLogger);
@@ -193,12 +193,12 @@ public static class ServiceCollectionExtensions
             // B2C Graph client — for GetMfaPhoneNumberAsync
             var b2cFactory = new GraphClientFactory(credManagers.First(), factoryLogger, telemetry);
             var b2cServiceClient = b2cFactory.CreateClient(options.B2C.Scopes);
-            var b2cClient = new GraphClient(b2cServiceClient, retryOptions, clientLogger, telemetry);
+            var b2cClient = new GraphClient(b2cServiceClient, retryOptions, clientLogger, telemetry, "B2C");
 
             // EEID Graph client — for RegisterPhoneAuthMethodAsync
             var eeidFactory = new GraphClientFactory(credManagers.Last(), factoryLogger, telemetry);
             var eeidServiceClient = eeidFactory.CreateClient(options.ExternalId.Scopes);
-            var eeidClient = new GraphClient(eeidServiceClient, retryOptions, clientLogger, telemetry);
+            var eeidClient = new GraphClient(eeidServiceClient, retryOptions, clientLogger, telemetry, "EEID");
 
             return new PhoneRegistrationWorker(b2cClient, eeidClient, queueClient, tableClient,
                 telemetry, Options.Create(options), workerLogger);
@@ -228,7 +228,7 @@ public static class ServiceCollectionExtensions
 
             var factory = new GraphClientFactory(externalIdCredManager, factoryLogger, telemetry);
             var graphServiceClient = factory.CreateClient(options.ExternalId.Scopes);
-            var externalIdGraphClient = new GraphClient(graphServiceClient, retryOptions, clientLogger, telemetry);
+            var externalIdGraphClient = new GraphClient(graphServiceClient, retryOptions, clientLogger, telemetry, "EEID");
 
             return new JitMigrationService(authService, externalIdGraphClient, telemetry, Options.Create(options), logger);
         });

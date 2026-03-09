@@ -84,8 +84,8 @@ public class PhoneRegistrationWorker : IOrchestrator<ExecutionResult>
         var auditTable = _options.Storage.AuditTableName;
 
         _logger.LogInformation(
-            "[PhoneReg] Starting worker | Queue: {Queue} | ThrottleDelay: {Delay}ms | VisibilityTimeout: {Timeout}s | AuditTable: {Table}",
-            queueName, opts.ThrottleDelayMs, opts.MessageVisibilityTimeoutSeconds, auditTable);
+            "[PhoneReg] Starting worker | Queue: {Queue} | ThrottleDelay: {Delay}ms | Concurrency: {Concurrency} | VisibilityTimeout: {Timeout}s | AuditTable: {Table}",
+            queueName, opts.ThrottleDelayMs, opts.MaxConcurrency, opts.MessageVisibilityTimeoutSeconds, auditTable);
 
         _telemetry.TrackEvent("PhoneRegistration.Started");
 
@@ -98,6 +98,8 @@ public class PhoneRegistrationWorker : IOrchestrator<ExecutionResult>
             int processed = 0;
             int succeeded = 0;
             int failed = 0;
+            using var semaphore = new SemaphoreSlim(opts.MaxConcurrency);
+            var activeTasks = new List<Task>();
 
             while (!cancellationToken.IsCancellationRequested)
             {
@@ -126,14 +128,14 @@ public class PhoneRegistrationWorker : IOrchestrator<ExecutionResult>
 
                 // Reset empty-poll counter on any message received
                 emptyPolls = 0;
-                processed++;
+                Interlocked.Increment(ref processed);
 
                 var (messageId, popReceipt, messageText) = message.Value;
 
-                PhoneRegistrationMessage? task = null;
+                PhoneRegistrationMessage? phoneTask = null;
                 try
                 {
-                    task = JsonSerializer.Deserialize<PhoneRegistrationMessage>(
+                    phoneTask = JsonSerializer.Deserialize<PhoneRegistrationMessage>(
                         messageText,
                         new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
                 }
@@ -142,116 +144,133 @@ public class PhoneRegistrationWorker : IOrchestrator<ExecutionResult>
                     _logger.LogError(ex,
                         "[PhoneReg] ❌ Failed to deserialize message {Id} — skipping and deleting.", messageId);
                     await SafeDeleteAsync(queueName, messageId, popReceipt, cancellationToken);
-                    failed++;
+                    Interlocked.Increment(ref failed);
                     continue;
                 }
 
-                if (task is null || string.IsNullOrWhiteSpace(task.B2CUserId) || string.IsNullOrWhiteSpace(task.EEIDUpn))
+                if (phoneTask is null || string.IsNullOrWhiteSpace(phoneTask.B2CUserId) || string.IsNullOrWhiteSpace(phoneTask.EEIDUpn))
                 {
                     _logger.LogWarning(
                         "[PhoneReg] Message {Id} is missing B2CUserId or EEIDUpn — deleting.", messageId);
                     await SafeDeleteAsync(queueName, messageId, popReceipt, cancellationToken);
-                    failed++;
+                    Interlocked.Increment(ref failed);
                     continue;
                 }
 
                 _logger.LogDebug(
                     "[PhoneReg] Processing B2CUserId: {B2CId} | EEIDUpn: {Upn} | RetryCount: {Retry}",
-                    task.B2CUserId, task.EEIDUpn, task.RetryCount);
+                    phoneTask.B2CUserId, phoneTask.EEIDUpn, phoneTask.RetryCount);
 
-                var opStart = DateTimeOffset.UtcNow;
+                await semaphore.WaitAsync(cancellationToken);
 
-                try
+                // Capture loop variables for the closure
+                var capturedMessageId  = messageId;
+                var capturedPopReceipt = popReceipt;
+                var capturedTask       = phoneTask;
+
+                var slotTask = Task.Run(async () =>
                 {
-                    // 1. Fetch MFA phone number from B2C (not stored in the queue message)
-                    var phoneNumber = await _b2cGraphClient.GetMfaPhoneNumberAsync(
-                        task.B2CUserId, cancellationToken);
-
-                    if (string.IsNullOrWhiteSpace(phoneNumber))
+                    try
                     {
-                        // User has no MFA phone registered in B2C — nothing to migrate
-                        var skipMs = (long)(DateTimeOffset.UtcNow - opStart).TotalMilliseconds;
-                        _logger.LogInformation(
-                            "[PhoneReg] No phone found for B2CUserId {B2CId} ({Upn}) — skipping.",
-                            task.B2CUserId, task.EEIDUpn);
+                        var opStart = DateTimeOffset.UtcNow;
+                        try
+                        {
+                            // 1. Fetch MFA phone number from B2C (not stored in the queue message)
+                            var phoneNumber = await _b2cGraphClient.GetMfaPhoneNumberAsync(
+                                capturedTask.B2CUserId, cancellationToken);
 
-                        await _tableClient.UpsertAuditRecordAsync(
-                            MigrationAuditRecord.CreatePhone(
-                                task.B2CUserId, task.EEIDUpn, "PhoneSkipped", skipMs),
-                            auditTable, cancellationToken);
+                            if (string.IsNullOrWhiteSpace(phoneNumber))
+                            {
+                                var skipMs = (long)(DateTimeOffset.UtcNow - opStart).TotalMilliseconds;
+                                _logger.LogInformation(
+                                    "[PhoneReg] No phone found for B2CUserId {B2CId} ({Upn}) — skipping.",
+                                    capturedTask.B2CUserId, capturedTask.EEIDUpn);
 
-                        await SafeDeleteAsync(queueName, messageId, popReceipt, cancellationToken);
-                        succeeded++;
-                        _telemetry.IncrementCounter("PhoneRegistration.Skipped");
-                        continue;
+                                await _tableClient.UpsertAuditRecordAsync(
+                                    MigrationAuditRecord.CreatePhone(
+                                        capturedTask.B2CUserId, capturedTask.EEIDUpn, "PhoneSkipped", skipMs),
+                                    auditTable, cancellationToken);
+
+                                await SafeDeleteAsync(queueName, capturedMessageId, capturedPopReceipt, cancellationToken);
+                                Interlocked.Increment(ref succeeded);
+                                _telemetry.IncrementCounter("PhoneRegistration.Skipped");
+                                return;
+                            }
+
+                            // 2. Register the phone in EEID
+                            await _eeidGraphClient.RegisterPhoneAuthMethodAsync(
+                                capturedTask.EEIDUpn, phoneNumber, cancellationToken);
+
+                            var regMs = (long)(DateTimeOffset.UtcNow - opStart).TotalMilliseconds;
+
+                            await _tableClient.UpsertAuditRecordAsync(
+                                MigrationAuditRecord.CreatePhone(
+                                    capturedTask.B2CUserId, capturedTask.EEIDUpn, "PhoneRegistered", regMs),
+                                auditTable, cancellationToken);
+
+                            await SafeDeleteAsync(queueName, capturedMessageId, capturedPopReceipt, cancellationToken);
+                            Interlocked.Increment(ref succeeded);
+
+                            _logger.LogInformation(
+                                "[PhoneReg] Registered phone for {Upn} (B2C: {B2CId}) in {Ms}ms",
+                                capturedTask.EEIDUpn, capturedTask.B2CUserId, regMs);
+
+                            _telemetry.TrackEvent("PhoneRegistration.Success", new Dictionary<string, string>
+                            {
+                                { "EEIDUpn", capturedTask.EEIDUpn },
+                                { "B2CUserId", capturedTask.B2CUserId }
+                            });
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            _logger.LogWarning("[PhoneReg] Operation cancelled — leaving message {Id} visible for retry.", capturedMessageId);
+                        }
+                        catch (Exception ex)
+                        {
+                            var failMs = (long)(DateTimeOffset.UtcNow - opStart).TotalMilliseconds;
+                            Interlocked.Increment(ref failed);
+
+                            var errCode = ex is Microsoft.Graph.Models.ODataErrors.ODataError oErr
+                                ? oErr.ResponseStatusCode.ToString()
+                                : ex.GetType().Name;
+
+                            await _tableClient.UpsertAuditRecordAsync(
+                                MigrationAuditRecord.CreatePhone(
+                                    capturedTask.B2CUserId, capturedTask.EEIDUpn, "PhoneFailed", failMs,
+                                    errCode, ex.Message),
+                                auditTable, cancellationToken);
+
+                            _logger.LogWarning(ex,
+                                "[PhoneReg] Failed to register phone for {Upn} / B2C {B2CId} (attempt {Attempt}) — will retry after visibility timeout.",
+                                capturedTask.EEIDUpn, capturedTask.B2CUserId, capturedTask.RetryCount + 1);
+
+                            _telemetry.TrackEvent("PhoneRegistration.Failed", new Dictionary<string, string>
+                            {
+                                { "EEIDUpn", capturedTask.EEIDUpn },
+                                { "B2CUserId", capturedTask.B2CUserId },
+                                { "RetryCount", capturedTask.RetryCount.ToString() },
+                                { "Error", ex.Message }
+                            });
+                        }
+
+                        // Per-slot throttle delay
+                        if (!cancellationToken.IsCancellationRequested && opts.ThrottleDelayMs > 0)
+                            await Task.Delay(opts.ThrottleDelayMs, cancellationToken);
                     }
-
-                    // 2. Register the phone in EEID
-                    await _eeidGraphClient.RegisterPhoneAuthMethodAsync(
-                        task.EEIDUpn, phoneNumber, cancellationToken);
-
-                    var regMs = (long)(DateTimeOffset.UtcNow - opStart).TotalMilliseconds;
-
-                    await _tableClient.UpsertAuditRecordAsync(
-                        MigrationAuditRecord.CreatePhone(
-                            task.B2CUserId, task.EEIDUpn, "PhoneRegistered", regMs),
-                        auditTable, cancellationToken);
-
-                    // Delete message only after confirmed success
-                    await SafeDeleteAsync(queueName, messageId, popReceipt, cancellationToken);
-                    succeeded++;
-
-                    _logger.LogInformation(
-                        "[PhoneReg] Registered phone for {Upn} (B2C: {B2CId}) in {Ms}ms",
-                        task.EEIDUpn, task.B2CUserId, regMs);
-
-                    _telemetry.TrackEvent("PhoneRegistration.Success", new Dictionary<string, string>
+                    finally
                     {
-                        { "EEIDUpn", task.EEIDUpn },
-                        { "B2CUserId", task.B2CUserId }
-                    });
-                }
-                catch (OperationCanceledException)
-                {
-                    _logger.LogWarning("[PhoneReg] Operation cancelled — leaving message {Id} visible for retry.", messageId);
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    // Do NOT delete the message — it will become visible again after visibilityTimeout
-                    // and be retried (by this worker or another instance).
-                    var failMs = (long)(DateTimeOffset.UtcNow - opStart).TotalMilliseconds;
-                    failed++;
+                        semaphore.Release();
+                    }
+                }, cancellationToken);
 
-                    var errCode = ex is Microsoft.Graph.Models.ODataErrors.ODataError oErr
-                        ? oErr.ResponseStatusCode.ToString()
-                        : ex.GetType().Name;
+                activeTasks.Add(slotTask);
 
-                    await _tableClient.UpsertAuditRecordAsync(
-                        MigrationAuditRecord.CreatePhone(
-                            task.B2CUserId, task.EEIDUpn, "PhoneFailed", failMs,
-                            errCode, ex.Message),
-                        auditTable, cancellationToken);
-
-                    _logger.LogWarning(ex,
-                        "[PhoneReg] Failed to register phone for {Upn} / B2C {B2CId} (attempt {Attempt}) — will retry after visibility timeout.",
-                        task.EEIDUpn, task.B2CUserId, task.RetryCount + 1);
-
-                    _telemetry.TrackEvent("PhoneRegistration.Failed", new Dictionary<string, string>
-                    {
-                        { "EEIDUpn", task.EEIDUpn },
-                        { "B2CUserId", task.B2CUserId },
-                        { "RetryCount", task.RetryCount.ToString() },
-                        { "Error", ex.Message }
-                    });
-                }
-
-                // Throttle: always wait between calls regardless of outcome
-                if (!cancellationToken.IsCancellationRequested && opts.ThrottleDelayMs > 0)
-                {
-                    await Task.Delay(opts.ThrottleDelayMs, cancellationToken);
-                }
+                // Prune completed tasks to keep the list bounded
+                activeTasks.RemoveAll(t => t.IsCompleted);
             }
+
+            // Wait for any in-flight slots before reporting summary
+            await Task.WhenAll(activeTasks);
 
             summary.TotalItems = processed;
             summary.SuccessCount = succeeded;

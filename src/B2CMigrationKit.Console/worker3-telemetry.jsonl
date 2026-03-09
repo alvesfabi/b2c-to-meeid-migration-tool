@@ -1,0 +1,10 @@
+{"ts":"2026-03-08T21:15:52.6722552\u002B00:00","type":"event","name":"WorkerMigrate.Started"}
+{"ts":"2026-03-08T21:15:55.9245822\u002B00:00","type":"event","name":"WorkerMigrate.Started"}
+{"ts":"2026-03-08T21:16:23.0708527\u002B00:00","type":"exception","name":"AuthenticationFailedException","exceptionType":"AuthenticationFailedException","message":"ClientSecretCredential authentication failed: "}
+{"ts":"2026-03-08T21:16:37.6503675\u002B00:00","type":"exception","name":"AuthenticationFailedException","exceptionType":"AuthenticationFailedException","message":"ClientSecretCredential authentication failed: "}
+{"ts":"2026-03-08T22:03:36.8653251\u002B00:00","type":"event","name":"WorkerMigrate.Started"}
+{"ts":"2026-03-08T22:05:20.1646465\u002B00:00","type":"event","name":"WorkerMigrate.Started"}
+{"ts":"2026-03-08T22:06:35.8935219\u002B00:00","type":"event","name":"WorkerMigrate.Started"}
+{"ts":"2026-03-09T00:34:39.0756076\u002B00:00","type":"event","name":"WorkerMigrate.Started"}
+{"ts":"2026-03-09T00:40:03.0398291\u002B00:00","type":"event","name":"WorkerMigrate.Started"}
+{"ts":"2026-03-09T00:47:02.8882125\u002B00:00","type":"event","name":"WorkerMigrate.Started"}

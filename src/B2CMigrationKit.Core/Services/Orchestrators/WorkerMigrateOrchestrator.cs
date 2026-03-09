@@ -86,6 +86,8 @@ public class WorkerMigrateOrchestrator : IOrchestrator<ExecutionResult>
             _logger.LogInformation("Audit table     : {Table}", auditTable);
             _logger.LogInformation("Select fields   : {Fields}", selectFields);
             _logger.LogInformation("Visibility TTL  : {Timeout}", visibilityTimeout);
+            _logger.LogInformation("Max concurrency : {Concurrency}", _options.MaxConcurrency);
+            _logger.LogInformation("Skip phone queue : {Skip}", _options.Import.SkipPhoneRegistration);
             _telemetry.TrackEvent("WorkerMigrate.Started");
 
             // Validate EEID extension-attribute config before entering the loop
@@ -152,100 +154,121 @@ public class WorkerMigrateOrchestrator : IOrchestrator<ExecutionResult>
                         messageId, profiles.Count, userIds.Count, fetchMs);
 
                     // --------------------------------------------------------
-                    // 2. Transform + create each user in EEID
+                    // 2. Transform + create each user in EEID (concurrent)
                     // --------------------------------------------------------
-                    foreach (var user in profiles)
+                    int batchCreated = 0, batchDuplicate = 0, batchFailed = 0, batchPhones = 0;
+                    using var semaphore = new SemaphoreSlim(_options.MaxConcurrency);
+
+                    var userTasks = profiles.Select(async user =>
                     {
-                        if (cancellationToken.IsCancellationRequested) break;
-
-                        var b2cObjectId = user.Id ?? "unknown";
-                        string? eeidUpn = null;
-                        var opStart = DateTimeOffset.UtcNow;
-
+                        await semaphore.WaitAsync(cancellationToken);
                         try
                         {
-                            // Apply all attribute transformations
-                            PrepareUserForEeid(user);
-                            eeidUpn = user.UserPrincipalName;
+                            if (cancellationToken.IsCancellationRequested) return;
 
-                            var created = await _eeidGraphClient.CreateUserAsync(user, cancellationToken);
-                            var durationMs = (long)(DateTimeOffset.UtcNow - opStart).TotalMilliseconds;
+                            var b2cObjectId = user.Id ?? "unknown";
+                            string? eeidUpn = null;
+                            var opStart = DateTimeOffset.UtcNow;
 
-                            usersCreated++;
-                            summary.SuccessCount++;
-
-                            _logger.LogDebug(
-                                "Created user {UPN} (B2C: {B2CId}) → EEID: {EEIDId} in {Ms}ms",
-                                eeidUpn, b2cObjectId, created.Id, durationMs);
-
-                            // Audit: Created
-                            await _tableClient.UpsertAuditRecordAsync(
-                                MigrationAuditRecord.CreateMigrate(
-                                    b2cObjectId, created.Id, eeidUpn, "Created", durationMs),
-                                auditTable, cancellationToken);
-
-                            // Enqueue for phone registration
-                            await EnqueuePhoneMessageAsync(b2cObjectId, eeidUpn, phoneQueue, cancellationToken);
-                            phonesEnqueued++;
-
-                            _telemetry.IncrementCounter("WorkerMigrate.UserCreated");
-                        }
-                        catch (Microsoft.Graph.Models.ODataErrors.ODataError odataErr)
-                            when (odataErr.ResponseStatusCode == 409
-                                || (odataErr.ResponseStatusCode == 400
-                                    && odataErr.Message != null
-                                    && odataErr.Message.Contains("conflicting object", StringComparison.OrdinalIgnoreCase)))
-                        {
-                            var durationMs = (long)(DateTimeOffset.UtcNow - opStart).TotalMilliseconds;
-                            usersDuplicate++;
-                            summary.SkippedCount++;
-
-                            _logger.LogInformation(
-                                "User {UPN} (B2C: {B2CId}) already exists in EEID — Duplicate",
-                                eeidUpn ?? b2cObjectId, b2cObjectId);
-
-                            // Audit: Duplicate
-                            await _tableClient.UpsertAuditRecordAsync(
-                                MigrationAuditRecord.CreateMigrate(
-                                    b2cObjectId, null, eeidUpn, "Duplicate", durationMs,
-                                    "409", "User already exists (ObjectConflict)"),
-                                auditTable, cancellationToken);
-
-                            // Still enqueue for phone — user exists and may not have phone registered
-                            if (!string.IsNullOrWhiteSpace(eeidUpn))
+                            try
                             {
-                                await EnqueuePhoneMessageAsync(b2cObjectId, eeidUpn, phoneQueue, cancellationToken);
-                                phonesEnqueued++;
+                                // Apply all attribute transformations
+                                PrepareUserForEeid(user);
+                                eeidUpn = user.UserPrincipalName;
+
+                                var created = await _eeidGraphClient.CreateUserAsync(user, cancellationToken);
+                                var durationMs = (long)(DateTimeOffset.UtcNow - opStart).TotalMilliseconds;
+
+                                Interlocked.Increment(ref batchCreated);
+
+                                _logger.LogDebug(
+                                    "Created user {UPN} (B2C: {B2CId}) → EEID: {EEIDId} in {Ms}ms",
+                                    eeidUpn, b2cObjectId, created.Id, durationMs);
+
+                                // Audit: Created
+                                await _tableClient.UpsertAuditRecordAsync(
+                                    MigrationAuditRecord.CreateMigrate(
+                                        b2cObjectId, created.Id, eeidUpn, "Created", durationMs),
+                                    auditTable, cancellationToken);
+
+                                // Enqueue for phone registration (unless disabled)
+                                if (!_options.Import.SkipPhoneRegistration)
+                                {
+                                    await EnqueuePhoneMessageAsync(b2cObjectId, eeidUpn, phoneQueue, cancellationToken);
+                                    Interlocked.Increment(ref batchPhones);
+                                }
+
+                                _telemetry.IncrementCounter("WorkerMigrate.UserCreated");
                             }
+                            catch (Microsoft.Graph.Models.ODataErrors.ODataError odataErr)
+                                when (odataErr.ResponseStatusCode == 409
+                                    || (odataErr.ResponseStatusCode == 400
+                                        && odataErr.Message != null
+                                        && odataErr.Message.Contains("conflicting object", StringComparison.OrdinalIgnoreCase)))
+                            {
+                                var durationMs = (long)(DateTimeOffset.UtcNow - opStart).TotalMilliseconds;
+                                Interlocked.Increment(ref batchDuplicate);
 
-                            _telemetry.IncrementCounter("WorkerMigrate.UserDuplicate");
+                                _logger.LogInformation(
+                                    "User {UPN} (B2C: {B2CId}) already exists in EEID — Duplicate",
+                                    eeidUpn ?? b2cObjectId, b2cObjectId);
+
+                                // Audit: Duplicate
+                                await _tableClient.UpsertAuditRecordAsync(
+                                    MigrationAuditRecord.CreateMigrate(
+                                        b2cObjectId, null, eeidUpn, "Duplicate", durationMs,
+                                        "409", "User already exists (ObjectConflict)"),
+                                    auditTable, cancellationToken);
+
+                                // Still enqueue for phone — user exists and may not have phone registered
+                                if (!string.IsNullOrWhiteSpace(eeidUpn) && !_options.Import.SkipPhoneRegistration)
+                                {
+                                    await EnqueuePhoneMessageAsync(b2cObjectId, eeidUpn, phoneQueue, cancellationToken);
+                                    Interlocked.Increment(ref batchPhones);
+                                }
+
+                                _telemetry.IncrementCounter("WorkerMigrate.UserDuplicate");
+                            }
+                            catch (Exception ex)
+                            {
+                                var durationMs = (long)(DateTimeOffset.UtcNow - opStart).TotalMilliseconds;
+                                Interlocked.Increment(ref batchFailed);
+
+                                var errorCode = ex is Microsoft.Graph.Models.ODataErrors.ODataError oErr
+                                    ? oErr.ResponseStatusCode.ToString()
+                                    : ex.GetType().Name;
+
+                                _logger.LogWarning(ex,
+                                    "Failed to create user {UPN} (B2C: {B2CId}) — {Error}",
+                                    eeidUpn ?? b2cObjectId, b2cObjectId, ex.Message);
+
+                                // Audit: Failed
+                                await _tableClient.UpsertAuditRecordAsync(
+                                    MigrationAuditRecord.CreateMigrate(
+                                        b2cObjectId, null, eeidUpn, "Failed", durationMs,
+                                        errorCode, ex.Message),
+                                    auditTable, cancellationToken);
+
+                                _telemetry.IncrementCounter("WorkerMigrate.UserFailed");
+                            }
                         }
-                        catch (Exception ex)
+                        finally
                         {
-                            var durationMs = (long)(DateTimeOffset.UtcNow - opStart).TotalMilliseconds;
-                            usersFailed++;
-                            summary.FailureCount++;
-
-                            var errorCode = ex is Microsoft.Graph.Models.ODataErrors.ODataError oErr
-                                ? oErr.ResponseStatusCode.ToString()
-                                : ex.GetType().Name;
-
-                            _logger.LogWarning(ex,
-                                "Failed to create user {UPN} (B2C: {B2CId}) — {Error}",
-                                eeidUpn ?? b2cObjectId, b2cObjectId, ex.Message);
-
-                            // Audit: Failed
-                            await _tableClient.UpsertAuditRecordAsync(
-                                MigrationAuditRecord.CreateMigrate(
-                                    b2cObjectId, null, eeidUpn, "Failed", durationMs,
-                                    errorCode, ex.Message),
-                                auditTable, cancellationToken);
-
-                            _telemetry.IncrementCounter("WorkerMigrate.UserFailed");
+                            semaphore.Release();
                         }
+                    });
 
-                        summary.TotalItems++;
-                    }
+                    await Task.WhenAll(userTasks);
+
+                    // Aggregate batch results into outer counters (single-threaded after WhenAll)
+                    usersCreated   += batchCreated;
+                    usersDuplicate += batchDuplicate;
+                    usersFailed    += batchFailed;
+                    phonesEnqueued += batchPhones;
+                    summary.SuccessCount += batchCreated;
+                    summary.SkippedCount += batchDuplicate;
+                    summary.FailureCount += batchFailed;
+                    summary.TotalItems   += profiles.Count;
 
                     messagesProcessed++;
 

@@ -98,4 +98,12 @@ public class MigrationOptions
     /// </summary>
     [Range(0, 10000)]
     public int BatchDelayMs { get; set; } = 0;
+
+    /// <summary>
+    /// Gets or sets the maximum number of users processed concurrently within each
+    /// batch message (default: 1 = sequential). Increase to improve throughput;
+    /// higher values increase Graph API throttle risk per app registration.
+    /// </summary>
+    [Range(1, 20)]
+    public int MaxConcurrency { get; set; } = 1;
 }

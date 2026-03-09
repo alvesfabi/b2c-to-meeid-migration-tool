@@ -49,6 +49,12 @@ public class FileAuditClient : ITableStorageClient
         CancellationToken cancellationToken = default)
     {
         // Project to a plain anonymous object to avoid serialising Azure SDK types (ETag, etc.)
+        bool? mfaMigrated = record.Stage == "phone"
+            ? record.Status == "PhoneRegistered" ? (bool?)true
+              : record.Status == "PhoneSkipped"  ? (bool?)false
+              : (bool?)null
+            : (bool?)null;
+
         var entry = new
         {
             record.PartitionKey,
@@ -58,6 +64,7 @@ public class FileAuditClient : ITableStorageClient
             record.EEIDUpn,
             record.Stage,
             record.Status,
+            MfaMigrated = mfaMigrated,
             record.ErrorCode,
             record.ErrorMessage,
             record.DurationMs,

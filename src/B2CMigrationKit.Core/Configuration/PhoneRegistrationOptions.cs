@@ -44,4 +44,13 @@ public class PhoneRegistrationOptions
     /// Default: 3
     /// </summary>
     public int MaxEmptyPolls { get; set; } = 3;
+
+    /// <summary>
+    /// Maximum number of phone-registration messages processed concurrently (default: 1 = serial).
+    /// Each concurrent slot makes one GET (B2C) + one POST (EEID); the ThrottleDelayMs delay
+    /// applies after every individual slot completes. Increase only if the phoneMethods
+    /// budget allows it — lower throttle budget than the main Users API.
+    /// </summary>
+    [System.ComponentModel.DataAnnotations.Range(1, 10)]
+    public int MaxConcurrency { get; set; } = 1;
 }

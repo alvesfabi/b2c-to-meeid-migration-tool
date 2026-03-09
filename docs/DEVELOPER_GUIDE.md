@@ -97,10 +97,11 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
 ```
 
 **App Registration Requirements:**
-- **Permissions**: `Directory.Read.All` (for export)
-- **Authentication**: Client credentials flow
+- **Permissions (harvest + worker-migrate)**: `User.Read.All` (Application) — read user IDs and full profiles
+- **Permissions (phone-registration)**: `UserAuthenticationMethod.Read.All` (Application) — read MFA phone numbers
+- **Authentication**: Client credentials flow (app + secret)
 - **Secrets**: Use client secrets directly in configuration for local development
-- **Scaling**: Deploy multiple instances with different app registrations on different IPs
+- **Scaling**: Each worker instance needs a **dedicated** B2C app registration on a **dedicated IP** to get independent throttle quotas
 
 ### External ID Configuration
 
@@ -119,9 +120,16 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
 ```
 
 **App Registration Requirements:**
-- **Permissions**: `User.ReadWrite.All`, `Directory.ReadWrite.All` (for import), `UserAuthenticationMethod.ReadWrite.All` (for phone registration)
-- **Extension App ID**: Application ID (without hyphens) for extension attributes
-- **Scaling**: Deploy multiple instances with different app registrations on different IPs
+
+| Process | Required Permission | Type |
+|---|---|---|
+| `worker-migrate` | `User.ReadWrite.All` | Application |
+| `phone-registration` | `UserAuthenticationMethod.ReadWrite.All` | Application |
+
+- **Admin consent** must be granted for each permission in the Azure Portal
+- **`Directory.ReadWrite.All` is NOT required** — `User.ReadWrite.All` is sufficient
+- **Extension App ID**: the Application ID (without hyphens) used to define custom extension attributes (`RequiresMigration`, `B2CObjectId`)
+- **Scaling**: Each worker instance needs a **dedicated** EEID app registration on a **dedicated IP** to get independent throttle quotas
 
 ### Harvest Configuration
 
@@ -265,28 +273,67 @@ The toolkit supports dual telemetry output: console logging (local development) 
 
 4. **Run Worker Migrate**
 
-   Worker Migrate dequeues ID batches, fetches full user profiles from B2C, creates users in EEID, and enqueues `{ B2CUserId, EEIDUpn }` messages to `phone-registration`. Run one or more instances (different terminals) for parallelism — each with a dedicated app registration config.
+   Worker Migrate dequeues ID batches, fetches full user profiles from B2C, creates users in EEID, and enqueues `{ B2CUserId, EEIDUpn }` messages to `phone-registration`.
 
+   **Single instance (smoke test):**
    ```powershell
-   .\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker1.json
+   .\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker1.json -VerboseLogging
    ```
 
-   Users that already exist in EEID are recorded as `Duplicate` (handled gracefully, phone task still enqueued).
+   **Multiple parallel instances (production scale — open a separate terminal for each):**
+   ```powershell
+   # Terminal 1
+   .\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker1.json
+   # Terminal 2
+   .\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker2.json
+   # Terminal 3
+   .\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker3.json
+   # Terminal 4
+   .\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker4.json
+   ```
+
+   Each config file must reference a **different B2C and EEID app registration**. Workers pull from the same queue with no coordination needed — queue visibility timeouts guarantee at-most-once delivery per message. Workers exit automatically when the queue is empty.
+
+   Users that already exist in EEID are recorded as `Duplicate` (handled gracefully; phone task is still enqueued).
+
+   **Required app registration permissions (grant with Admin Consent):**
+
+   | Tenant | Permission | Type |
+   |---|---|---|
+   | B2C | `User.Read.All` | Application |
+   | Entra External ID | `User.ReadWrite.All` | Application |
 
 5. **Run Phone Registration Worker**
 
-   After worker-migrate (or while it is still running), drain the `phone-registration` queue. The worker fetches each user's MFA phone number from B2C and registers it in EEID. Users with no MFA phone registered are recorded as `PhoneSkipped`.
+   After worker-migrate (or while it is still running), drain the `phone-registration` queue. The worker fetches each user's MFA phone number from B2C and registers it in EEID. Users with no MFA phone are recorded as `PhoneSkipped`.
 
+   **Single instance:**
    ```powershell
-   .\scripts\Start-LocalPhoneRegistration.ps1 -ConfigFile appsettings.phone-registration1.json
+   .\scripts\Start-LocalPhoneRegistration.ps1 -ConfigFile appsettings.phone-registration1.json -VerboseLogging
    ```
 
-   The worker:
-   - Drains the `phone-registration` queue at `ThrottleDelayMs` per message (~30 calls/min by default at 2000 ms)
-   - Treats 409 Conflict as success (phone already registered — idempotent)
-   - Exits automatically after `MaxEmptyPolls` consecutive empty polls
+   **Multiple parallel instances (open a separate terminal for each):**
+   ```powershell
+   # Terminal 1
+   .\scripts\Start-LocalPhoneRegistration.ps1 -ConfigFile appsettings.phone-registration1.json
+   # Terminal 2
+   .\scripts\Start-LocalPhoneRegistration.ps1 -ConfigFile appsettings.phone-registration2.json
+   # Terminal 3
+   .\scripts\Start-LocalPhoneRegistration.ps1 -ConfigFile appsettings.phone-registration3.json
+   # Terminal 4
+   .\scripts\Start-LocalPhoneRegistration.ps1 -ConfigFile appsettings.phone-registration4.json
+   ```
 
-   > **Prerequisite:** The EEID app registration used for phone registration must have `UserAuthenticationMethod.ReadWrite.All` (Application) granted with admin consent. The B2C app registration must also have `UserAuthenticationMethod.ReadWrite.All` (Application) granted with admin consent on the B2C tenant, as the worker reads phone methods from B2C.
+   Each config file must reference a **different B2C and EEID app registration**. Workers process independently — each drains the phone queue at its own `ThrottleDelayMs` rate and exits after `MaxEmptyPolls` consecutive empty polls.
+
+   The worker treats 409 Conflict as success (phone already registered — idempotent).
+
+   **Required app registration permissions (grant with Admin Consent):**
+
+   | Tenant | Permission | Type | Notes |
+   |---|---|---|---|
+   | B2C | `UserAuthenticationMethod.Read.All` | Application | Read MFA phone numbers |
+   | Entra External ID | `UserAuthenticationMethod.ReadWrite.All` | Application | Register phone methods |
 
 ### Building the Solution
 

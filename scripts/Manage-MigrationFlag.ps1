@@ -102,6 +102,29 @@
 .EXAMPLE
     # Use a custom configuration file
     .\Manage-MigrationFlag.ps1 -ConfigFile "appsettings.worker2.json" -Filter false
+
+.PARAMETER DeleteByPrefix
+    Deletes ALL External ID users whose UPN starts with the given prefix.
+    Intended for test environment cleanup (e.g. remove all "bulkuser" test accounts).
+    Supports -WhatIf (preview), -CountOnly (count without deleting), and -MaxUsers (safety cap, default 100).
+    WARNING: Irreversible. Always run with -WhatIf or -CountOnly first.
+
+.PARAMETER CountOnly
+    When used with -DeleteByPrefix, queries the total number of matching users and exits without
+    modifying or listing them. Uses the OData $count annotation — returns the real total instantly,
+    regardless of -MaxUsers.
+
+.EXAMPLE
+    # Count how many bulkuser accounts exist (no changes)
+    .\.Manage-MigrationFlag.ps1 -DeleteByPrefix "bulkuser" -CountOnly
+
+.EXAMPLE
+    # Preview which accounts would be deleted (no changes applied)
+    .\Manage-MigrationFlag.ps1 -DeleteByPrefix "bulkuser" -WhatIf
+
+.EXAMPLE
+    # Delete all bulkuser accounts in External ID (up to 10 000)
+    .\Manage-MigrationFlag.ps1 -DeleteByPrefix "bulkuser" -MaxUsers 10000
 #>
 
 param(
@@ -132,7 +155,13 @@ param(
     [switch]$Discover,
 
     [Parameter(Mandatory = $false)]
-    [switch]$WhatIf
+    [switch]$WhatIf,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$CountOnly,
+
+    [Parameter(Mandatory = $false)]
+    [string]$DeleteByPrefix
 )
 
 $ErrorActionPreference = "Stop"
@@ -311,6 +340,18 @@ function Invoke-GraphPatch {
     }
 }
 
+function Invoke-GraphDelete {
+    param([string]$Uri)
+    try {
+        Invoke-RestMethod -Method Delete -Uri $Uri -Headers $headers | Out-Null
+    }
+    catch {
+        $statusCode = $_.Exception.Response.StatusCode.value__
+        Write-Err "Graph DELETE failed ($statusCode): $_"
+        throw
+    }
+}
+
 # ─── Build Graph query ────────────────────────────────────────────────────────
 $selectFields = "id,userPrincipalName,displayName,mail,$requireMigrationAttr"
 $graphBase    = "https://graph.microsoft.com/v1.0"
@@ -341,6 +382,89 @@ function Get-Users {
     } while ($uri -and $users.Count -lt $Max)
 
     return $users
+}
+
+# ─── Mode: delete users by UPN prefix (External ID only) ─────────────────────
+if ($DeleteByPrefix) {
+    # startsWith requires ConsistencyLevel: eventual + $count=true
+    $deleteHeaders = $headers.Clone()
+    $deleteHeaders["ConsistencyLevel"] = "eventual"
+
+    # ── CountOnly: read @odata.count from the first page and exit ──────────
+    if ($CountOnly) {
+        $countUri      = "$graphBase/users?`$filter=startsWith(userPrincipalName,'$DeleteByPrefix')&`$select=id&`$top=1&`$count=true"
+        $countResponse = Invoke-RestMethod -Method Get -Uri $countUri -Headers $deleteHeaders
+        $total         = $countResponse.'@odata.count'
+        Write-Success "Users with prefix '$DeleteByPrefix': $total"
+        exit 0
+    }
+
+    Write-Warn "⚠  DELETE MODE — External ID users with UPN prefix: '$DeleteByPrefix'"
+    if ($WhatIf) { Write-Warn "   [WhatIf] No users will be deleted." }
+    Write-Host ""
+
+    $toDelete = [System.Collections.Generic.List[object]]::new()
+    $uri      = "$graphBase/users?`$filter=startsWith(userPrincipalName,'$DeleteByPrefix')&`$select=id,userPrincipalName&`$top=999&`$count=true"
+
+    Write-Info "Querying External ID for users with prefix '$DeleteByPrefix' (max $MaxUsers)..."
+
+    do {
+        $response = Invoke-RestMethod -Method Get -Uri $uri -Headers $deleteHeaders
+        foreach ($u in $response.value) {
+            $toDelete.Add($u)
+            if ($toDelete.Count -ge $MaxUsers) { break }
+        }
+        $uri = $response.'@odata.nextLink'
+    } while ($uri -and $toDelete.Count -lt $MaxUsers)
+
+    if ($toDelete.Count -eq 0) {
+        Write-Warn "No users found with prefix '$DeleteByPrefix'."
+        exit 0
+    }
+
+    Write-Success "Found $($toDelete.Count) user(s) to delete."
+    Write-Host ""
+
+    if ($WhatIf) {
+        $toDelete | ForEach-Object { Write-Warn "  [WhatIf] Would delete: $($_.id)  ($($_.userPrincipalName))" }
+        Write-Host ""
+        Write-Warn "═══════════════════════════════════════════════════════"
+        Write-Warn "  [WhatIf] No changes were made."
+        Write-Warn "  Remove -WhatIf to delete $($toDelete.Count) user(s)."
+        Write-Warn "═══════════════════════════════════════════════════════"
+        exit 0
+    }
+
+    $successCount = 0
+    $failCount    = 0
+    $total        = $toDelete.Count
+
+    foreach ($u in $toDelete) {
+        try {
+            Invoke-GraphDelete -Uri "$graphBase/users/$($u.id)"
+            $successCount++
+            Write-Success "  ✓ [$successCount/$total] $($u.userPrincipalName)"
+        }
+        catch {
+            Write-Err "  ✗ $($u.id)  ($($u.userPrincipalName))  – $_"
+            $failCount++
+        }
+    }
+
+    Write-Host ""
+    if ($failCount -eq 0) {
+        Write-Success "═══════════════════════════════════════════════════════"
+        Write-Success "  Deleted : $successCount user(s)  |  Failed: $failCount"
+        Write-Success "═══════════════════════════════════════════════════════"
+    }
+    else {
+        Write-Warn "═══════════════════════════════════════════════════════"
+        Write-Warn "  Deleted : $successCount user(s)  |  Failed: $failCount"
+        Write-Warn "  Review errors above and re-run for failed users."
+        Write-Warn "═══════════════════════════════════════════════════════"
+    }
+
+    exit 0
 }
 
 # ─── Mode: single user ────────────────────────────────────────────────────────

@@ -23,17 +23,21 @@ public class GraphClient : IGraphClient
     private readonly ITelemetryService _telemetry;
     private readonly RetryOptions _retryOptions;
     private readonly ResiliencePipeline _retryPipeline;
+    // Identifies which tenant this client targets; included in every throttle log/event.
+    private readonly string _tenantRole;
 
     public GraphClient(
         GraphServiceClient client,
         IOptions<RetryOptions> retryOptions,
         ILogger<GraphClient> logger,
-        ITelemetryService telemetry)
+        ITelemetryService telemetry,
+        string tenantRole = "unknown")
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _telemetry = telemetry ?? throw new ArgumentNullException(nameof(telemetry));
         _retryOptions = retryOptions?.Value ?? throw new ArgumentNullException(nameof(retryOptions));
+        _tenantRole = tenantRole;
 
         _retryPipeline = CreateRetryPipeline();
     }
@@ -70,10 +74,62 @@ public class GraphClient : IGraphClient
 
                     return ValueTask.FromResult(args.Outcome.Exception is not null);
                 },
+                // Honor the Retry-After header when the server sends one (typically on 429).
+                DelayGenerator = args =>
+                {
+                    if (_retryOptions.UseRetryAfterHeader
+                        && args.Outcome.Exception is Microsoft.Graph.Models.ODataErrors.ODataError throttleError
+                        && throttleError.ResponseStatusCode == 429
+                        && throttleError.ResponseHeaders.TryGetValue("Retry-After", out var values))
+                    {
+                        var raw = values.FirstOrDefault();
+                        if (int.TryParse(raw, out var seconds))
+                        {
+                            return new ValueTask<TimeSpan?>(TimeSpan.FromSeconds(seconds));
+                        }
+                    }
+                    // Return null → Polly falls back to exponential backoff + jitter.
+                    return new ValueTask<TimeSpan?>((TimeSpan?)null);
+                },
                 OnRetry = args =>
                 {
-                    _logger.LogWarning("Retry attempt {Attempt} after {Delay}ms due to: {Exception}",
-                        args.AttemptNumber, args.RetryDelay.TotalMilliseconds, args.Outcome.Exception?.Message);
+                    var isThrottle = args.Outcome.Exception is Microsoft.Graph.Models.ODataErrors.ODataError odataErr
+                        && odataErr.ResponseStatusCode == 429;
+
+                    // Read Retry-After header value for logging (may be absent).
+                    string? retryAfterRaw = null;
+                    if (args.Outcome.Exception is Microsoft.Graph.Models.ODataErrors.ODataError hdrErr
+                        && hdrErr.ResponseHeaders.TryGetValue("Retry-After", out var hdrValues))
+                    {
+                        retryAfterRaw = hdrValues.FirstOrDefault();
+                    }
+
+                    if (isThrottle)
+                    {
+                        _logger.LogWarning(
+                            "[THROTTLE] tenant={TenantRole} attempt={Attempt} delayMs={DelayMs} retryAfterHeader={RetryAfter}",
+                            _tenantRole, args.AttemptNumber + 1,
+                            (int)args.RetryDelay.TotalMilliseconds, retryAfterRaw ?? "none");
+
+                        _telemetry.TrackEvent("Graph.Throttled", new Dictionary<string, string>
+                        {
+                            ["tenantRole"]     = _tenantRole,
+                            ["attempt"]        = (args.AttemptNumber + 1).ToString(),
+                            ["delayMs"]        = ((int)args.RetryDelay.TotalMilliseconds).ToString(),
+                            ["retryAfterMs"]   = retryAfterRaw != null && int.TryParse(retryAfterRaw, out var s)
+                                                    ? (s * 1000).ToString() : "none",
+                            ["ts"]             = DateTimeOffset.UtcNow.ToString("o")
+                        });
+                        _telemetry.IncrementCounter("GraphClient.Throttled");
+                    }
+                    else
+                    {
+                        _logger.LogWarning(
+                            "[RETRY] tenant={TenantRole} attempt={Attempt} delayMs={DelayMs} error={Error}",
+                            _tenantRole, args.AttemptNumber + 1,
+                            (int)args.RetryDelay.TotalMilliseconds, args.Outcome.Exception?.Message);
+                    }
+
                     _telemetry.IncrementCounter("GraphClient.Retries");
                     return ValueTask.CompletedTask;
                 }

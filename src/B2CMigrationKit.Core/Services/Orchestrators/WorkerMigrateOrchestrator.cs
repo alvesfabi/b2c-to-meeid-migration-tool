@@ -149,14 +149,24 @@ public class WorkerMigrateOrchestrator : IOrchestrator<ExecutionResult>
                         userIds, selectFields, cancellationToken);
                     var fetchMs = (long)(DateTimeOffset.UtcNow - fetchStart).TotalMilliseconds;
 
-                    _logger.LogDebug(
-                        "Message {Id}: fetched {Count}/{Total} profiles from B2C in {FetchMs}ms",
+                    _logger.LogInformation(
+                        "[B2C-FETCH] msg={Id} fetched={Count}/{Total} in {FetchMs}ms",
                         messageId, profiles.Count, userIds.Count, fetchMs);
+                    _telemetry.TrackEvent("WorkerMigrate.B2CFetch", new Dictionary<string, string>
+                    {
+                        ["messageId"]        = messageId,
+                        ["fetched"]          = profiles.Count.ToString(),
+                        ["requested"]        = userIds.Count.ToString(),
+                        ["fetchMs"]          = fetchMs.ToString(),
+                        ["avgB2cPerUserMs"]  = (profiles.Count > 0 ? fetchMs / profiles.Count : 0).ToString()
+                    });
 
                     // --------------------------------------------------------
                     // 2. Transform + create each user in EEID (concurrent)
                     // --------------------------------------------------------
                     int batchCreated = 0, batchDuplicate = 0, batchFailed = 0, batchPhones = 0;
+                    long batchEeidDurationSum = 0;
+                    long batchEeidDurationMax = 0;
                     using var semaphore = new SemaphoreSlim(_options.MaxConcurrency);
 
                     var userTasks = profiles.Select(async user =>
@@ -180,6 +190,15 @@ public class WorkerMigrateOrchestrator : IOrchestrator<ExecutionResult>
                                 var durationMs = (long)(DateTimeOffset.UtcNow - opStart).TotalMilliseconds;
 
                                 Interlocked.Increment(ref batchCreated);
+                                Interlocked.Add(ref batchEeidDurationSum, durationMs);
+                                // Track max without lock
+                                long prev = Interlocked.Read(ref batchEeidDurationMax);
+                                while (durationMs > prev)
+                                {
+                                    long updated = Interlocked.CompareExchange(ref batchEeidDurationMax, durationMs, prev);
+                                    if (updated == prev) break;
+                                    prev = updated;
+                                }
 
                                 _logger.LogDebug(
                                     "Created user {UPN} (B2C: {B2CId}) → EEID: {EEIDId} in {Ms}ms",
@@ -198,7 +217,13 @@ public class WorkerMigrateOrchestrator : IOrchestrator<ExecutionResult>
                                     Interlocked.Increment(ref batchPhones);
                                 }
 
-                                _telemetry.IncrementCounter("WorkerMigrate.UserCreated");
+                                _telemetry.TrackEvent("WorkerMigrate.UserCreated", new Dictionary<string, string>
+                                {
+                                    ["b2cObjectId"]  = b2cObjectId,
+                                    ["eeidUpn"]      = eeidUpn ?? "unknown",
+                                    ["eeidUserId"]   = created.Id ?? "unknown",
+                                    ["eeidCreateMs"] = durationMs.ToString()
+                                });
                             }
                             catch (Microsoft.Graph.Models.ODataErrors.ODataError odataErr)
                                 when (odataErr.ResponseStatusCode == 409
@@ -208,6 +233,7 @@ public class WorkerMigrateOrchestrator : IOrchestrator<ExecutionResult>
                             {
                                 var durationMs = (long)(DateTimeOffset.UtcNow - opStart).TotalMilliseconds;
                                 Interlocked.Increment(ref batchDuplicate);
+                                Interlocked.Add(ref batchEeidDurationSum, durationMs);
 
                                 _logger.LogInformation(
                                     "User {UPN} (B2C: {B2CId}) already exists in EEID — Duplicate",
@@ -227,12 +253,18 @@ public class WorkerMigrateOrchestrator : IOrchestrator<ExecutionResult>
                                     Interlocked.Increment(ref batchPhones);
                                 }
 
-                                _telemetry.IncrementCounter("WorkerMigrate.UserDuplicate");
+                                _telemetry.TrackEvent("WorkerMigrate.UserDuplicate", new Dictionary<string, string>
+                                {
+                                    ["b2cObjectId"]  = b2cObjectId,
+                                    ["eeidUpn"]      = eeidUpn ?? "unknown",
+                                    ["eeidCreateMs"] = durationMs.ToString()
+                                });
                             }
                             catch (Exception ex)
                             {
                                 var durationMs = (long)(DateTimeOffset.UtcNow - opStart).TotalMilliseconds;
                                 Interlocked.Increment(ref batchFailed);
+                                Interlocked.Add(ref batchEeidDurationSum, durationMs);
 
                                 var errorCode = ex is Microsoft.Graph.Models.ODataErrors.ODataError oErr
                                     ? oErr.ResponseStatusCode.ToString()
@@ -249,7 +281,14 @@ public class WorkerMigrateOrchestrator : IOrchestrator<ExecutionResult>
                                         errorCode, ex.Message),
                                     auditTable, cancellationToken);
 
-                                _telemetry.IncrementCounter("WorkerMigrate.UserFailed");
+                                _telemetry.TrackEvent("WorkerMigrate.UserFailed", new Dictionary<string, string>
+                                {
+                                    ["b2cObjectId"]  = b2cObjectId,
+                                    ["eeidUpn"]      = eeidUpn ?? "unknown",
+                                    ["eeidCreateMs"] = durationMs.ToString(),
+                                    ["errorCode"]    = errorCode,
+                                    ["error"]        = ex.Message
+                                });
                             }
                         }
                         finally
@@ -259,6 +298,25 @@ public class WorkerMigrateOrchestrator : IOrchestrator<ExecutionResult>
                     });
 
                     await Task.WhenAll(userTasks);
+
+                    // Log per-batch timing summary
+                    var batchTotal = batchCreated + batchDuplicate + batchFailed;
+                    var avgEeidMs  = batchTotal > 0 ? batchEeidDurationSum / batchTotal : 0;
+                    _logger.LogInformation(
+                        "[BATCH] msg={Id} users={Total} created={C} dup={D} failed={F} | eeid avg={AvgMs}ms max={MaxMs}ms | b2c={FetchMs}ms",
+                        messageId, profiles.Count, batchCreated, batchDuplicate, batchFailed,
+                        avgEeidMs, batchEeidDurationMax, fetchMs);
+                    _telemetry.TrackEvent("WorkerMigrate.BatchDone", new Dictionary<string, string>
+                    {
+                        ["messageId"]   = messageId,
+                        ["users"]       = profiles.Count.ToString(),
+                        ["created"]     = batchCreated.ToString(),
+                        ["duplicate"]   = batchDuplicate.ToString(),
+                        ["failed"]      = batchFailed.ToString(),
+                        ["eeidAvgMs"]   = avgEeidMs.ToString(),
+                        ["eeidMaxMs"]   = batchEeidDurationMax.ToString(),
+                        ["b2cFetchMs"]  = fetchMs.ToString()
+                    });
 
                     // Aggregate batch results into outer counters (single-threaded after WhenAll)
                     usersCreated   += batchCreated;

@@ -395,7 +395,8 @@ if ($DeleteByPrefix) {
         $countUri      = "$graphBase/users?`$filter=startsWith(userPrincipalName,'$DeleteByPrefix')&`$select=id&`$top=1&`$count=true"
         $countResponse = Invoke-RestMethod -Method Get -Uri $countUri -Headers $deleteHeaders
         $total         = $countResponse.'@odata.count'
-        Write-Success "Users with prefix '$DeleteByPrefix': $total"
+        $timestamp     = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        Write-Success "[$timestamp] Users with prefix '$DeleteByPrefix': $total"
         exit 0
     }
 

@@ -1,41 +1,106 @@
 <#
 .SYNOPSIS
-    Analyzes a worker telemetry JSONL file and prints per-component latency stats and throughput.
+    Analyzes worker + phone-registration telemetry JSONL files.
+
+.PARAMETER WorkerCount
+    Number of migrate workers to aggregate (default: 4).
+    Loads worker1..N-telemetry.jsonl + phone-registration1..N-telemetry.jsonl.
+
+.PARAMETER ConsoleDir
+    Directory containing the telemetry files.
+    Default: ../src/B2CMigrationKit.Console relative to this script.
 
 .PARAMETER TelemetryFile
-    Path to the JSONL telemetry file to analyze (default: ../src/B2CMigrationKit.Console/worker1-telemetry.jsonl).
+    Analyze a single JSONL file instead of aggregating all workers.
+    When set, phone registration section is skipped.
 
 .EXAMPLE
+    # Aggregate all 4 workers + 4 phone workers (default)
     .\Analyze-Telemetry.ps1
+
+    # Aggregate 8 workers
+    .\Analyze-Telemetry.ps1 -WorkerCount 8
+
+    # Single file (backward compat)
     .\Analyze-Telemetry.ps1 -TelemetryFile ..\src\B2CMigrationKit.Console\worker2-telemetry.jsonl
 #>
 param(
-    [string]$TelemetryFile = "$PSScriptRoot\..\src\B2CMigrationKit.Console\worker1-telemetry.jsonl"
+    [int]$WorkerCount = 4,
+    [string]$ConsoleDir = "$PSScriptRoot\..\src\B2CMigrationKit.Console",
+    [string]$TelemetryFile = ""
 )
 
-$resolved = Resolve-Path $TelemetryFile -ErrorAction Stop
-$lines = [System.IO.File]::ReadAllLines($resolved)
+# ── Helper: load one or more JSONL files into a flat string array ──────────────
+function Read-TelemetryFiles {
+    param([string[]]$Paths)
+    $all = [System.Collections.Generic.List[string]]::new()
+    foreach ($p in $Paths) {
+        if (Test-Path $p) {
+            [System.IO.File]::ReadAllLines((Resolve-Path $p)) | ForEach-Object { $all.Add($_) }
+        }
+    }
+    return $all.ToArray()
+}
 
+# ── Determine mode ─────────────────────────────────────────────────────────────
+$singleFileMode = $TelemetryFile -ne ""
+
+if ($singleFileMode) {
+    $resolved = Resolve-Path $TelemetryFile -ErrorAction Stop
+    $migrateLines = [System.IO.File]::ReadAllLines($resolved)
+    $phoneLines   = @()
+    Write-Host "Mode   : single file"
+    Write-Host "File   : $resolved"
+} else {
+    $consoleResolved = Resolve-Path $ConsoleDir -ErrorAction Stop
+    $migratePaths = 1..$WorkerCount | ForEach-Object { Join-Path $consoleResolved "worker$_-telemetry.jsonl" }
+    $phonePaths   = 1..$WorkerCount | ForEach-Object { Join-Path $consoleResolved "phone-registration$_-telemetry.jsonl" }
+
+    $migrateLines = Read-TelemetryFiles -Paths $migratePaths
+    $phoneLines   = Read-TelemetryFiles -Paths $phonePaths
+
+    $migrateFound = ($migratePaths | Where-Object { Test-Path $_ }).Count
+    $phoneFound   = ($phonePaths   | Where-Object { Test-Path $_ }).Count
+    Write-Host "Mode        : multi-worker ($WorkerCount workers)"
+    Write-Host "Migrate files loaded : $migrateFound / $WorkerCount  ($($migrateLines.Count) lines)"
+    Write-Host "Phone files loaded   : $phoneFound / $WorkerCount  ($($phoneLines.Count) lines)"
+}
+
+# ── Stats helper ───────────────────────────────────────────────────────────────
+function Stats($label, [int[]]$a) {
+    if ($a.Count -eq 0) { Write-Host "  $label — no data"; return }
+    $s   = $a | Sort-Object
+    $n   = $s.Count
+    $avg = [Math]::Round(($a | Measure-Object -Average).Average)
+    $min = $s[0]; $max = $s[-1]
+    $p50 = $s[[int]($n * .50)]
+    $p90 = $s[[int]($n * .90)]
+    $p95 = $s[[int]($n * .95)]
+    $p99 = $s[[int]($n * .99)]
+    Write-Host ("  {0,-26} n={1,4}  avg={2,6}ms  min={3,5}  p50={4,5}  p90={5,6}  p95={6,6}  p99={7,6}  max={8,6}" `
+        -f $label, $n, $avg, $min, $p50, $p90, $p95, $p99, $max)
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MIGRATE WORKERS
+# ═══════════════════════════════════════════════════════════════════════════════
 $fetches  = [System.Collections.Generic.List[int]]::new()
 $userMs   = [System.Collections.Generic.List[int]]::new()
 $bB2c     = [System.Collections.Generic.List[int]]::new()
 $bEeidAvg = [System.Collections.Generic.List[int]]::new()
 $bEeidMax = [System.Collections.Generic.List[int]]::new()
-$timestamps = [System.Collections.Generic.List[datetime]]::new()
-$lastStartedTs = $null
+$migrateTs      = [System.Collections.Generic.List[datetime]]::new()
+$lastStartedTs  = $null
 
-foreach ($l in $lines) {
+foreach ($l in $migrateLines) {
     if ($l -match '"ts":"([^"]+)"') {
-        # \u002B is the JSON unicode escape for '+' — replace before parsing
         $tsRaw = $Matches[1] -replace '\\u002B', '+'
         try {
             $ts = [datetime]$tsRaw
-            $timestamps.Add($ts)
-            # Track the last WorkerMigrate.Started to scope throughput to current run
+            $migrateTs.Add($ts)
             if ($l -match '"name":"WorkerMigrate\.Started"') { $lastStartedTs = $ts }
         } catch {}
     }
-
     if ($l -match '"name":"WorkerMigrate\.B2CFetch"') {
         if ($l -match '"fetchMs":"(\d+)"') { $fetches.Add([int]$Matches[1]) }
     } elseif ($l -match '"name":"WorkerMigrate\.UserCreated"') {
@@ -47,39 +112,27 @@ foreach ($l in $lines) {
     }
 }
 
-Write-Host "File   : $resolved"
-Write-Host "Parsed : fetches=$($fetches.Count)  users=$($userMs.Count)  batches=$($bB2c.Count)"
-
-function Stats($label, [int[]]$a) {
-    if ($a.Count -eq 0) { Write-Host "  $label — no data"; return }
-    $s   = $a | Sort-Object
-    $n   = $s.Count
-    $avg = [Math]::Round(($a | Measure-Object -Average).Average)
-    $min = $s[0]; $max = $s[-1]
-    $p50 = $s[[int]($n * .50)]
-    $p90 = $s[[int]($n * .90)]
-    $p95 = $s[[int]($n * .95)]
-    $p99 = $s[[int]($n * .99)]
-    Write-Host ("  {0,-24} n={1,4}  avg={2,5}ms  min={3,5}  p50={4,5}  p90={5,5}  p95={6,5}  p99={7,5}  max={8,5}" `
-        -f $label, $n, $avg, $min, $p50, $p90, $p95, $p99, $max)
-}
-
 $wall = [int[]]@(for ($i = 0; $i -lt $bB2c.Count; $i++) { $bB2c[$i] + $bEeidMax[$i] })
 
 Write-Host ""
+Write-Host "════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host " MIGRATE WORKERS" -ForegroundColor Cyan
+Write-Host "════════════════════════════════════════════" -ForegroundColor Cyan
+
+Write-Host ""
 Write-Host "=== LATENCY BY COMPONENT (ms) ==="
-Stats "B2C fetch  (per batch)"   ([int[]]$bB2c)
-Stats "EEID create (per user)"   ([int[]]$userMs)
-Stats "EEID max   (per batch)"   ([int[]]$bEeidMax)
-Stats "EEID avg   (per batch)"   ([int[]]$bEeidAvg)
+Stats "B2C fetch  (per batch)"    ([int[]]$bB2c)
+Stats "EEID create (per user)"    ([int[]]$userMs)
+Stats "EEID max   (per batch)"    ([int[]]$bEeidMax)
+Stats "EEID avg   (per batch)"    ([int[]]$bEeidAvg)
 Stats "Wall time  (b2c+eeid_max)" $wall
 
 Write-Host ""
 Write-Host "=== SHARE OF WALL TIME ==="
 if ($bB2c.Count -gt 0) {
-    $sumB2c  = ($bB2c     | Measure-Object -Sum).Sum
-    $sumEeid = ($bEeidMax  | Measure-Object -Sum).Sum
-    $sumWall = ($wall      | Measure-Object -Sum).Sum
+    $sumB2c  = ($bB2c    | Measure-Object -Sum).Sum
+    $sumEeid = ($bEeidMax | Measure-Object -Sum).Sum
+    $sumWall = ($wall     | Measure-Object -Sum).Sum
     Write-Host ("  B2C fetch  : {0,8:N1}s  ({1,3}% of wall)" -f ($sumB2c/1000),  [Math]::Round($sumB2c*100/$sumWall))
     Write-Host ("  EEID create: {0,8:N1}s  ({1,3}% of wall)" -f ($sumEeid/1000), [Math]::Round($sumEeid*100/$sumWall))
     Write-Host ("  Total wall : {0,8:N1}s  (sum across {1} batches)" -f ($sumWall/1000), $bB2c.Count)
@@ -87,12 +140,11 @@ if ($bB2c.Count -gt 0) {
 
 Write-Host ""
 Write-Host "=== THROUGHPUT ==="
-if ($timestamps.Count -ge 2) {
-    # Use the last WorkerMigrate.Started as t0 to scope to current run only
-    $t0 = if ($lastStartedTs) { $lastStartedTs } else { ($timestamps | Sort-Object)[0] }
-    $t1 = ($timestamps | Sort-Object)[-1]
+if ($migrateTs.Count -ge 2) {
+    $t0 = if ($lastStartedTs) { $lastStartedTs } else { ($migrateTs | Sort-Object)[0] }
+    $t1 = ($migrateTs | Sort-Object)[-1]
     $elapsed = ($t1 - $t0).TotalSeconds
-    $runNote = if ($lastStartedTs) { " (from last WorkerMigrate.Started)" } else { " (from first event in file)" }
+    $runNote = if ($lastStartedTs) { " (from last WorkerMigrate.Started)" } else { " (from first event)" }
     Write-Host "  Run start   : $t0$runNote"
     Write-Host "  Last event  : $t1"
     Write-Host ("  Elapsed     : {0:N1}s" -f $elapsed)
@@ -114,12 +166,182 @@ if ($wall.Count -gt 0) {
 }
 
 Write-Host ""
-Write-Host "=== TAIL LATENCY (EEID > 1000ms) ==="
-$slowCount = ($lines | Where-Object {
+Write-Host "=== TAIL LATENCY (EEID create > 1000ms) ==="
+$slowCount = ($migrateLines | Where-Object {
     $_ -match '"name":"WorkerMigrate\.UserCreated"' -and
     $_ -match '"eeidCreateMs":"(\d+)"' -and [int]$Matches[1] -gt 1000
 }).Count
 if ($userMs.Count -gt 0) {
     Write-Host ("  Slow users (>1s): {0} / {1}  ({2:N1}%)" `
         -f $slowCount, $userMs.Count, ($slowCount * 100.0 / $userMs.Count))
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PHONE REGISTRATION WORKERS
+# ═══════════════════════════════════════════════════════════════════════════════
+if ($phoneLines.Count -gt 0) {
+
+    $phB2cGet    = [System.Collections.Generic.List[int]]::new()  # b2cGetPhoneMs (success only)
+    $phEeidPost  = [System.Collections.Generic.List[int]]::new()  # eeidRegisterMs (success only)
+    $phEeidApiAll = [System.Collections.Generic.List[int]]::new() # eeidRegisterMs from EEIDApiCall (success + failed)
+    $phTotal     = [System.Collections.Generic.List[int]]::new()  # totalMs (success only)
+    $phSkipB2c   = [System.Collections.Generic.List[int]]::new()  # b2cGetPhoneMs (skipped — no phone in B2C)
+    $phoneTs     = [System.Collections.Generic.List[datetime]]::new()
+    $lastPhoneStartedTs = $null
+    $phSucceeded = 0
+    $phSkipped   = 0
+    $phFailed    = 0
+    $phThrottled = 0
+    $phFailedStepB2c  = 0
+    $phFailedStepEeid = 0
+    # Per-error-code breakdown for failures
+    $phErrCodes  = @{}
+
+    foreach ($l in $phoneLines) {
+        if ($l -match '"ts":"([^"]+)"') {
+            $tsRaw = $Matches[1] -replace '\\u002B', '+'
+            try {
+                $ts = [datetime]$tsRaw
+                $phoneTs.Add($ts)
+                if ($l -match '"name":"PhoneRegistration\.Started"') { $lastPhoneStartedTs = $ts }
+            } catch {}
+        }
+
+        if ($l -match '"name":"PhoneRegistration\.Success"') {
+            $phSucceeded++
+            if ($l -match '"b2cGetPhoneMs":"(\d+)"')  { $phB2cGet.Add([int]$Matches[1]) }
+            if ($l -match '"eeidRegisterMs":"(\d+)"') { $phEeidPost.Add([int]$Matches[1]) }
+            if ($l -match '"totalMs":"(\d+)"')         { $phTotal.Add([int]$Matches[1]) }
+        } elseif ($l -match '"name":"PhoneRegistration\.Skipped"') {
+            $phSkipped++
+            if ($l -match '"b2cGetPhoneMs":"(\d+)"')  { $phSkipB2c.Add([int]$Matches[1]) }
+        } elseif ($l -match '"name":"PhoneRegistration\.EEIDApiCall"') {
+            if ($l -match '"eeidRegisterMs":"(\d+)"') { $phEeidApiAll.Add([int]$Matches[1]) }
+        } elseif ($l -match '"name":"PhoneRegistration\.Failed"') {
+            $phFailed++
+            if ($l -match '"step":"b2c-get-phone"')   { $phFailedStepB2c++ }
+            if ($l -match '"step":"eeid-register"')   { $phFailedStepEeid++ }
+            if ($l -match '"errorCode":"([^"]+)"') {
+                $ec = $Matches[1]
+                $phErrCodes[$ec] = ($phErrCodes[$ec] -as [int]) + 1
+            }
+        } elseif ($l -match '"name":"Graph\.Throttled"') {
+            $phThrottled++
+        }
+    }
+
+    Write-Host ""
+    Write-Host ""
+    Write-Host "════════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host " PHONE REGISTRATION WORKERS" -ForegroundColor Cyan
+    Write-Host "════════════════════════════════════════════" -ForegroundColor Cyan
+
+    Write-Host ""
+    Write-Host "=== OUTCOMES ==="
+    $phTotal_n = $phSucceeded + $phSkipped + $phFailed
+    Write-Host ("  Succeeded (phone registered) : {0,6}" -f $phSucceeded)
+    Write-Host ("  Skipped   (no phone in B2C)  : {0,6}" -f $phSkipped)
+    Write-Host ("  Failed    (exhausted retries): {0,6}" -f $phFailed)
+    Write-Host ("  Total messages processed     : {0,6}" -f $phTotal_n)
+    if ($phFailed -gt 0) {
+        Write-Host ""
+        Write-Host "  Failure breakdown by step:"
+        if ($phFailedStepB2c  -gt 0) { Write-Host ("    b2c-get-phone  : {0}" -f $phFailedStepB2c)  -ForegroundColor Yellow }
+        if ($phFailedStepEeid -gt 0) { Write-Host ("    eeid-register  : {0}" -f $phFailedStepEeid) -ForegroundColor Yellow }
+        if ($phErrCodes.Count -gt 0) {
+            Write-Host "  Failure breakdown by error code:"
+            foreach ($kv in $phErrCodes.GetEnumerator() | Sort-Object Value -Descending) {
+                Write-Host ("    {0,-30}: {1}" -f $kv.Key, $kv.Value) -ForegroundColor Yellow
+            }
+        }
+    }
+
+    Write-Host ""
+    Write-Host "=== LATENCY BY PHASE (ms) ==="
+    Stats "B2C GET phone  (success)"        ([int[]]$phB2cGet)
+    Stats "EEID POST phone (success)"       ([int[]]$phEeidPost)
+    Stats "EEID POST phone (all API calls)" ([int[]]$phEeidApiAll)
+    Stats "Total per user (success)"        ([int[]]$phTotal)
+    Stats "B2C GET phone  (skipped)"        ([int[]]$phSkipB2c)
+
+    Write-Host ""
+    Write-Host "=== SHARE OF PHONE TIME ==="
+    if ($phB2cGet.Count -gt 0 -and $phEeidPost.Count -gt 0) {
+        $sumPhB2c  = ($phB2cGet  | Measure-Object -Sum).Sum
+        $sumPhEeid = ($phEeidPost | Measure-Object -Sum).Sum
+        $sumPhWall = $sumPhB2c + $sumPhEeid
+        Write-Host ("  B2C GET phone  : {0,8:N1}s  ({1,3}% of total API time)" -f ($sumPhB2c/1000),  [Math]::Round($sumPhB2c*100/$sumPhWall))
+        Write-Host ("  EEID POST phone: {0,8:N1}s  ({1,3}% of total API time)" -f ($sumPhEeid/1000), [Math]::Round($sumPhEeid*100/$sumPhWall))
+    }
+
+    Write-Host ""
+    Write-Host "=== THROUGHPUT ==="
+    if ($phoneTs.Count -ge 2) {
+        $pt0 = if ($lastPhoneStartedTs) { $lastPhoneStartedTs } else { ($phoneTs | Sort-Object)[0] }
+        $pt1 = ($phoneTs | Sort-Object)[-1]
+        $pelapsed = ($pt1 - $pt0).TotalSeconds
+        $prunNote = if ($lastPhoneStartedTs) { " (from last PhoneRegistration.Started)" } else { " (from first event)" }
+        Write-Host "  Run start   : $pt0$prunNote"
+        Write-Host "  Last event  : $pt1"
+        Write-Host ("  Elapsed     : {0:N1}s" -f $pelapsed)
+        if ($pelapsed -gt 0 -and $phTotal_n -gt 0) {
+            # Total throughput = all messages (success + skip + fail)
+            Write-Host ("  Msgs/sec    : {0:N2}  (success+skip+fail)" -f ($phTotal_n / $pelapsed))
+            Write-Host ("  Msgs/min    : {0:N1}  (success+skip+fail)" -f ($phTotal_n / $pelapsed * 60))
+        }
+        if ($pelapsed -gt 0 -and $phSucceeded -gt 0) {
+            Write-Host ("  Registered/min: {0:N2}" -f ($phSucceeded / $pelapsed * 60))
+        }
+    }
+
+    Write-Host ""
+    Write-Host "=== TAIL LATENCY (phone > 1000ms) ==="
+    $slowPhB2c  = ($phoneLines | Where-Object {
+        $_ -match '"name":"PhoneRegistration\.Success"' -and
+        $_ -match '"b2cGetPhoneMs":"(\d+)"' -and [int]$Matches[1] -gt 1000
+    }).Count
+    $slowPhEeid = ($phEeidApiAll | Where-Object { $_ -gt 1000 }).Count
+    if ($phSucceeded -gt 0) {
+        Write-Host ("  Slow B2C GET   (>1s): {0} / {1}  ({2:N1}%)" `
+            -f $slowPhB2c,  $phSucceeded, ($slowPhB2c  * 100.0 / $phSucceeded))
+    }
+    if ($phEeidApiAll.Count -gt 0) {
+        Write-Host ("  Slow EEID POST (>1s): {0} / {1}  ({2:N1}%)  [all API calls]" `
+            -f $slowPhEeid, $phEeidApiAll.Count, ($slowPhEeid * 100.0 / $phEeidApiAll.Count))
+    }
+
+    Write-Host ""
+    Write-Host "=== THROTTLES (429) ==="
+    Write-Host ("  Graph.Throttled across all phone workers: {0}" -f $phThrottled)
+    if ($phThrottled -gt 0) {
+        Write-Host "  ⚠ Throttles detected — consider increasing ThrottleDelayMs or reducing MaxConcurrency" -ForegroundColor Yellow
+    }
+
+    # ── Cross-pipeline summary ─────────────────────────────────────────────────
+    if ($userMs.Count -gt 0) {
+        Write-Host ""
+        Write-Host ""
+        Write-Host "════════════════════════════════════════════" -ForegroundColor Cyan
+        Write-Host " CROSS-PIPELINE SUMMARY" -ForegroundColor Cyan
+        Write-Host "════════════════════════════════════════════" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host ("  Users migrated (EEID created)   : {0,6}" -f $userMs.Count)
+        Write-Host ("  Phones registered (EEID POST)   : {0,6}" -f $phSucceeded)
+        Write-Host ("  Phones skipped  (no B2C phone)  : {0,6}" -f $phSkipped)
+        Write-Host ("  Phones failed   (retries exh.)  : {0,6}" -f $phFailed)
+        $phoneAttempted = $phSucceeded + $phSkipped + $phFailed
+        # Coverage > 100% means the phone queue had stale messages from a previous run
+        if ($userMs.Count -gt 0 -and $phoneAttempted -gt 0) {
+            $coveragePct = $phoneAttempted * 100.0 / $userMs.Count
+            if ($coveragePct -gt 110) {
+                Write-Host ("  Phone pipeline coverage         : {0,5:N1}%  ⚠ >100%% — queue had stale messages from a prior run" -f $coveragePct) -ForegroundColor Yellow
+                Write-Host "    → Run: az storage queue clear --name phone-registration --connection-string UseDevelopmentStorage=true" -ForegroundColor Yellow
+            } else {
+                Write-Host ("  Phone pipeline coverage         : {0,5:N1}%%" -f $coveragePct)
+            }
+        }
+        if ($userMs.Count -gt 0 -and $phSucceeded -gt 0) {
+            Write-Host ("  Users with phone registered     : {0,5:N1}%" -f ($phSucceeded * 100.0 / $userMs.Count))
+        }
+    }
 }

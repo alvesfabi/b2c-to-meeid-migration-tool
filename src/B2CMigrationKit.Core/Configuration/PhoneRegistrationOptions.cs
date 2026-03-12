@@ -53,4 +53,13 @@ public class PhoneRegistrationOptions
     /// </summary>
     [System.ComponentModel.DataAnnotations.Range(1, 10)]
     public int MaxConcurrency { get; set; } = 1;
+
+    /// <summary>
+    /// When <c>true</c>, users with no MFA phone in B2C are assigned a synthetic E.164
+    /// phone number derived deterministically from their B2CUserId instead of being skipped.
+    /// This allows benchmarking the EEID phoneMethods POST API when real B2C phone data
+    /// is not available. <b>Never enable in production.</b>
+    /// Default: false
+    /// </summary>
+    public bool UseFakePhoneWhenMissing { get; set; } = false;
 }

@@ -87,6 +87,9 @@ public class PhoneRegistrationWorker : IOrchestrator<ExecutionResult>
             "[PhoneReg] Starting worker | Queue: {Queue} | ThrottleDelay: {Delay}ms | Concurrency: {Concurrency} | VisibilityTimeout: {Timeout}s | AuditTable: {Table}",
             queueName, opts.ThrottleDelayMs, opts.MaxConcurrency, opts.MessageVisibilityTimeoutSeconds, auditTable);
 
+        if (opts.UseFakePhoneWhenMissing)
+            _logger.LogWarning("[PhoneReg] ⚠ UseFakePhoneWhenMissing=true — synthetic phone numbers will be used for users with no B2C phone. DO NOT use in production.");
+
         _telemetry.TrackEvent("PhoneRegistration.Started");
 
         try
@@ -176,6 +179,7 @@ public class PhoneRegistrationWorker : IOrchestrator<ExecutionResult>
                         var currentStep = "b2c-get-phone";
                         long b2cGetPhoneMs = 0;
                         long eeidRegisterMs = 0;
+                        bool fakePhoneUsed = false;
                         try
                         {
                             // 1. Fetch MFA phone number from B2C (not stored in the queue message)
@@ -186,32 +190,68 @@ public class PhoneRegistrationWorker : IOrchestrator<ExecutionResult>
 
                             if (string.IsNullOrWhiteSpace(phoneNumber))
                             {
-                                _logger.LogInformation(
-                                    "[PhoneReg] No phone found for B2CUserId {B2CId} ({Upn}) b2c={B2CMs}ms — skipping.",
-                                    capturedTask.B2CUserId, capturedTask.EEIDUpn, b2cGetPhoneMs);
-
-                                await _tableClient.UpsertAuditRecordAsync(
-                                    MigrationAuditRecord.CreatePhone(
-                                        capturedTask.B2CUserId, capturedTask.EEIDUpn, "PhoneSkipped", b2cGetPhoneMs),
-                                    auditTable, cancellationToken);
-
-                                await SafeDeleteAsync(queueName, capturedMessageId, capturedPopReceipt, cancellationToken);
-                                Interlocked.Increment(ref succeeded);
-                                _telemetry.TrackEvent("PhoneRegistration.Skipped", new Dictionary<string, string>
+                                if (opts.UseFakePhoneWhenMissing)
                                 {
-                                    ["b2cUserId"]     = capturedTask.B2CUserId,
-                                    ["eeidUpn"]       = capturedTask.EEIDUpn,
-                                    ["b2cGetPhoneMs"] = b2cGetPhoneMs.ToString()
-                                });
-                                return;
+                                    phoneNumber = GenerateFakePhone(capturedTask.B2CUserId);
+                                    fakePhoneUsed = true;
+                                    _logger.LogWarning(
+                                        "[PhoneReg] No phone in B2C for {B2CId} — using fake phone for EEID benchmark (b2c={B2CMs}ms)",
+                                        capturedTask.B2CUserId, b2cGetPhoneMs);
+                                }
+                                else
+                                {
+                                    _logger.LogInformation(
+                                        "[PhoneReg] No phone found for B2CUserId {B2CId} ({Upn}) b2c={B2CMs}ms — skipping.",
+                                        capturedTask.B2CUserId, capturedTask.EEIDUpn, b2cGetPhoneMs);
+
+                                    await _tableClient.UpsertAuditRecordAsync(
+                                        MigrationAuditRecord.CreatePhone(
+                                            capturedTask.B2CUserId, capturedTask.EEIDUpn, "PhoneSkipped", b2cGetPhoneMs),
+                                        auditTable, cancellationToken);
+
+                                    await SafeDeleteAsync(queueName, capturedMessageId, capturedPopReceipt, cancellationToken);
+                                    Interlocked.Increment(ref succeeded);
+                                    _telemetry.TrackEvent("PhoneRegistration.Skipped", new Dictionary<string, string>
+                                    {
+                                        ["b2cUserId"]     = capturedTask.B2CUserId,
+                                        ["eeidUpn"]       = capturedTask.EEIDUpn,
+                                        ["b2cGetPhoneMs"] = b2cGetPhoneMs.ToString()
+                                    });
+                                    return;
+                                }
                             }
 
                             // 2. Register the phone in EEID
                             currentStep = "eeid-register";
                             var eeidStart = DateTimeOffset.UtcNow;
-                            await _eeidGraphClient.RegisterPhoneAuthMethodAsync(
-                                capturedTask.EEIDUpn, phoneNumber, cancellationToken);
-                            eeidRegisterMs = (long)(DateTimeOffset.UtcNow - eeidStart).TotalMilliseconds;
+                            string? eeidApiErrorCode = null;
+                            try
+                            {
+                                await _eeidGraphClient.RegisterPhoneAuthMethodAsync(
+                                    capturedTask.EEIDUpn, phoneNumber, cancellationToken);
+                            }
+                            catch (OperationCanceledException) { throw; }
+                            catch (Exception eeidEx)
+                            {
+                                eeidApiErrorCode = eeidEx is Microsoft.Graph.Models.ODataErrors.ODataError oErrApi
+                                    ? oErrApi.ResponseStatusCode.ToString()
+                                    : eeidEx.GetType().Name;
+                                throw;
+                            }
+                            finally
+                            {
+                                eeidRegisterMs = (long)(DateTimeOffset.UtcNow - eeidStart).TotalMilliseconds;
+                                if (!cancellationToken.IsCancellationRequested)
+                                {
+                                    _telemetry.TrackEvent("PhoneRegistration.EEIDApiCall", new Dictionary<string, string>
+                                    {
+                                        ["eeidUpn"]        = capturedTask.EEIDUpn,
+                                        ["eeidRegisterMs"] = eeidRegisterMs.ToString(),
+                                        ["success"]        = (eeidApiErrorCode == null).ToString().ToLower(),
+                                        ["errorCode"]      = eeidApiErrorCode ?? string.Empty
+                                    });
+                                }
+                            }
 
                             var totalMs = (long)(DateTimeOffset.UtcNow - opStart).TotalMilliseconds;
 
@@ -233,7 +273,8 @@ public class PhoneRegistrationWorker : IOrchestrator<ExecutionResult>
                                 ["b2cUserId"]      = capturedTask.B2CUserId,
                                 ["b2cGetPhoneMs"]  = b2cGetPhoneMs.ToString(),
                                 ["eeidRegisterMs"] = eeidRegisterMs.ToString(),
-                                ["totalMs"]        = totalMs.ToString()
+                                ["totalMs"]        = totalMs.ToString(),
+                                ["fakePhone"]      = fakePhoneUsed ? "true" : "false"
                             });
                         }
                         catch (OperationCanceledException)
@@ -335,6 +376,19 @@ public class PhoneRegistrationWorker : IOrchestrator<ExecutionResult>
                 Summary = summary
             };
         }
+    }
+
+    /// <summary>
+    /// Derives a deterministic synthetic E.164 phone number from the B2C user ID.
+    /// Used only when <see cref="PhoneRegistrationOptions.UseFakePhoneWhenMissing"/> is true.
+    /// Format: +1800 followed by 7 digits (US toll-free space, 10M unique numbers).
+    /// </summary>
+    private static string GenerateFakePhone(string userId)
+    {
+        // Take the last 7 hex chars of the GUID (28 bits → 0..268,435,455) mod 10,000,000
+        var clean = userId.Replace("-", "");
+        var suffix = Convert.ToInt64(clean[^7..], 16) % 10_000_000L;
+        return $"+1800{suffix:D7}";
     }
 
     private async Task SafeDeleteAsync(

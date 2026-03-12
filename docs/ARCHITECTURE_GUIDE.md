@@ -142,7 +142,7 @@ Queue: phone-registration
 
 Phone numbers are fetched from B2C **at drain time** — they are never stored in the queue. This keeps PII out of the message store and in memory only for the duration of a single API call pair.
 
-> **Throttle note**: The `phoneMethods` API has a significantly lower throttle budget than the main Users API, and GET and POST/PATCH calls count together against the same per-app budget. Each worker uses two independent app registrations (one B2C, one EEID) with independent quotas. `ThrottleDelayMs` (default **400 ms**) is the user-side rate control knob — increase it if you see sustained 429s. Run additional workers with dedicated app registration pairs to scale throughput.
+> **Throttle note**: The `phoneMethods` API is throttled at **30 requests / 10 seconds per app registration**, shared across GET and POST/PATCH calls (≈ 3 RPS). This is significantly lower than the main `/users` creation limit (~60 writes/s). Each worker uses two independent app registrations (one B2C, one EEID) with independent quotas. `ThrottleDelayMs` (default **400 ms**) is the user-side rate control knob — increase it if you see sustained 429s. Run additional workers with dedicated app registration pairs to scale throughput.
 
 #### Step 3 — JIT Migration (first login — Azure Function, always running)
 
@@ -205,9 +205,10 @@ After `phone-registration` has run, users whose phones were registered are promp
 
 ### 3.5 Scalability
 
-- **Multi-App Parallelization**: Use 3-5 app registrations to multiply throughput
-- **Stateless Design**: Horizontal scaling without shared state
-- **Batching**: Efficient Graph API batch requests (20 user IDs per queue message, resolved via `$batch`)
+- **Multi-App Parallelization**: Each worker instance uses a dedicated pair of app registrations (B2C + EEID) for independent API quotas. Tested sweet spot: **4 workers × 8 threads ≈ 2,076 users/min** with zero throttle events.
+- **Stateless Design**: Horizontal scaling without shared state — workers pull autonomously from a shared queue with no central coordinator.
+- **Batching**: Efficient Graph API batch requests (20 user IDs per queue message, resolved via `$batch`).
+- **Concurrency ceiling**: `MaxConcurrency = 8` per worker is the validated optimum. More threads per worker triggers a soft API concurrency limit (no 429, but extended timeouts and throughput regression). Scale by adding more workers instead.
 
 ---
 
@@ -468,7 +469,7 @@ Every user outcome is written to Azure Table Storage (`migration-audit` table) i
 
 #### Why a Separate Async Worker?
 
-The Graph endpoint `POST /users/{id}/authentication/phoneMethods` has a significantly lower throttle budget than the main `/users` endpoints. Calling it inline during the migrate phase would stall the creation pipeline. Instead, `WorkerMigrateOrchestrator` enqueues a lightweight `{ B2CUserId, EEIDUpn }` message — no phone number stored — and this dedicated worker fetches the phone from B2C at drain time, then registers it in EEID.
+The Graph `phoneMethods` endpoints (`GET` and `POST/PATCH /users/{id}/authentication/phoneMethods`) are throttled at **30 requests per 10 seconds per app registration**, shared across all call types. This is significantly lower than the main `/users` creation endpoints (~60 writes/s). Calling phone registration inline during the migrate phase would stall the creation pipeline. Instead, `WorkerMigrateOrchestrator` enqueues a lightweight `{ B2CUserId, EEIDUpn }` message — no phone number stored — and this dedicated worker fetches the phone from B2C at drain time, then registers it in EEID.
 
 **Why not store the phone in the queue?**
 
@@ -494,6 +495,8 @@ WorkerMigrate ──► Queue: phone-registration ──► PhoneRegistrationWor
 | `MessageVisibilityTimeoutSeconds` | 120 s | If processing fails, message re-appears after this delay |
 | `MaxEmptyPolls` | 3 | Worker exits after 3 consecutive empty polls (for CLI use) |
 | `EmptyQueuePollDelayMs` | 5000 ms | Wait before re-polling when queue is empty |
+
+**API ceiling**: Each worker is bounded by **30 requests / 10 s per app registration** (combined GET + POST/PATCH on phoneMethods). At 2 calls per user this allows up to ~90 users/min per worker. Scale by adding workers with dedicated app registration pairs.
 
 Multiple `PhoneRegistrationWorker` instances can run in parallel, each with dedicated B2C and EEID app registration pairs, to increase throughput proportionally.
 
@@ -693,8 +696,8 @@ private static readonly SemaphoreSlim _keyLoadLock = new(1, 1);
 - Reduce network latency (<50ms)
 
 **4. Background Processing**
-- Audit logging and telemetry as Fire-and-Forget
-- Use durable queue for critical non-blocking tasks
+- Telemetry writes are buffered internally and flushed on shutdown — `FlushAsync` awaits all pending file writes before the process exits.
+- Table Storage audit writes complete synchronously per user, before the queue message is deleted.
 
 ---
 
@@ -897,45 +900,115 @@ traces
 
 ### 8.1 Graph API Throttling Model
 
-**CRITICAL**: Microsoft Graph API throttling works on **two dimensions** for the main Users API:
+All limits apply simultaneously; the first constraint reached triggers an HTTP 429. Source: [Microsoft Graph service-specific throttling limits](https://learn.microsoft.com/en-us/graph/throttling-limits).
 
-1. **Per App Registration (Client ID)** - ~60 operations/second per app
-2. **Per IP Address** - Cumulative limit across all apps from that IP
-3. **Per Tenant** - 200 RPS for all apps in tenant
-4. **Write operations** (create users) have a lower throttling limit
+#### User creation — `POST /users` (EEID tenant, worker-migrate)
 
-**Implications for user creation**:
-- ✅ Single instance with 1 app = ~60 ops/sec
-- ❌ Single instance with 3 apps ≠ 180 ops/sec (still limited by IP)
-- ✅ 3 instances (different IPs) with 1 app each = ~180 ops/sec
+| Scope | Limit | Notes |
+|---|---|---|
+| Per app registration | **~60 writes / second** | Rate limit for write operations (user creation) in EEID tenants |
+| Per IP address | Cumulative cap shared across apps | Multiple workers from the same IP share an IP-level quota; use separate IPs beyond ~4 workers |
+| Per tenant (all apps) | **~200 RPS** | Hard ceiling for all app registrations combined in the EEID tenant; reached at approximately 23 parallel workers |
 
-#### Phone Methods API — Throttle Behaviour
+> **$batch accounting**: Each individual request inside a `$batch` call is counted separately against the throttle budget. A batch of 20 user GETs from B2C counts as 20 individual requests against the B2C tenant quota.
 
-The `GET` and `POST/PATCH /users/{id}/authentication/phoneMethods` endpoints have a **significantly lower throttle budget** than the general Users API, and GET and POST/PATCH calls count together against the same per-app budget.
+#### Phone methods — `GET` + `POST/PATCH /authentication/phoneMethods` (phone-registration)
 
-Use `ThrottleDelayMs` (see [§5.3](#53-phone-registration-worker)) as the user-side rate control knob. Scale throughput by running multiple workers with dedicated app registration pairs.
+| Scope | Limit | Notes |
+|---|---|---|
+| Per app registration | **30 requests / 10 seconds** | Combined across GET and POST/PATCH calls for phoneMethods endpoints |
 
-### 8.2 Multi-Instance Scaling Architecture
+> At 2 API calls per user (1 GET from B2C + 1 POST to EEID), each phone worker can process up to **15 users per 10 seconds ≈ 90 users/min** at the API ceiling. Run multiple phone workers with dedicated app registration pairs to scale throughput proportionally.
 
-To scale beyond 60 ops/sec, deploy **multiple instances** on **different IP addresses**:
+#### Harvest reads — `GET /users?$select=id` (B2C tenant)
+
+`$select` reduces the request cost by 1 resource unit, making `GET /users?$select=id` the cheapest Graph call in the pipeline. Harvest will not hit the per-app RPS limit even for multi-million-user B2C tenants.
+
+#### JIT function — Custom Authentication Extension (Azure Function)
+
+The Identity Providers service (which covers `customAuthenticationExtension`) has a separate limit: **300 requests / minute per app**. This is the governing throttle for the JIT endpoint when validating logins at scale.
+
+#### Effective concurrency ceiling (soft limit — no 429 signal)
+
+Testing revealed a **soft concurrency ceiling of ~8 simultaneous threads per app registration** for EEID user-create calls. Beyond this point:
+
+- The Graph API does **not** return HTTP 429 (no explicit throttle signal).
+- Requests instead experience elevated latency and intermittent 5xx errors. Polly's retry policy catches these silently, manifesting as large `eeidMax` spikes (observed: up to **50,266 ms** at 16 threads vs. ~1,400 ms at 8 threads).
+- Overall throughput **decreases** even though the `Graph.Throttled` event count stays at zero.
+
+This is a separate constraint from the documented RPS limits above. At the tested sweet-spot of 4 workers × 8 threads, combined throughput is ~34.6 writes/s — well under the 60/s per-app limit and far below the 200 RPS per-tenant ceiling. The binding constraint is round-trip latency, not rate limits.
+
+**Rule of thumb**: Keep `MaxConcurrency = 8` per worker. Scale out by adding workers (more app registrations), not by increasing threads per worker.
+
+### 8.2 Observed Benchmarks
+
+All runs used a real B2C test tenant (~23,000 users) and a real Entra External ID tenant, with Azurite as local queue/table storage. All workers ran on the same developer workstation (same public IP).
+
+| Configuration | Throughput | Wall avg | EEID max | 429s | Notes |
+|---|---|---|---|---|---|
+| 1 worker, 8 threads | ~470 u/min | 1,563 ms | — | 0 | Baseline |
+| **4 workers, 8 threads** | **~2,076 u/min** | **1,354 ms** | — | **0** | **Sweet spot ✓** |
+| 4 workers, 16 threads | ~870 u/min | 1,731 ms | 50,266 ms | 0 | Soft limit hit — **avoid** |
+
+> **Why the 16-thread run is worse**: No explicit 429s were received, but EEID started queuing or rejecting connections internally. Polly retried with exponential backoff (capped at ~31 s), causing EEID max latency to exceed 50 seconds. Overall throughput fell to less than half the 8-thread baseline.
+
+#### Time Distribution (4 workers × 8 threads — sweet spot)
+
+| Phase | Share of wall time | Description |
+|---|---|---|
+| B2C `$batch` fetch | ~48 % | Fetching 20 full user profiles via Graph `$batch` |
+| EEID `POST /users` create | ~52 % | Creating the user account in External ID |
+
+The near-equal split confirms that neither the B2C read path nor the EEID write path is a bottleneck — the pipeline is well balanced at this configuration.
+
+### 8.3 Scaling Model
+
+#### Recommended per-worker configuration
+
+```
+MaxConcurrency = 8   # validated sweet spot — do not exceed
+IdsPerMessage  = 20  # aligns with Graph $batch limit
+```
+
+Each worker processes a batch of 20 users in three waves:
+
+- Wave 1: 8 concurrent EEID creates (in-flight simultaneously)
+- Wave 2: 8 concurrent EEID creates
+- Wave 3: remaining 4 concurrent EEID creates
+
+#### Horizontal scaling projection
+
+Scaling is **linear** up to the EEID tenant's hard ceiling of ~200 RPS:
+
+| Workers | Threads each | Throughput (est.) | Status |
+|---|---|---|---|
+| 1 | 8 | ~470 u/min | Tested |
+| 4 | 8 | ~2,076 u/min | Tested — sweet spot |
+| 8 | 8 | ~4,150 u/min | Projected |
+| 16 | 8 | ~8,300 u/min | Projected |
+| ~23 | 8 | ~12,000 u/min | Approx. 200 RPS tenant ceiling |
+
+Each additional worker **must** use a **dedicated app registration pair** (one B2C, one EEID) to get independent API quotas. Workers from the same IP showed near-linear gains up to 4 workers; for larger deployments, use distinct IPs (separate VMs, ACI, or AKS pods) to avoid hitting any per-IP soft floors.
+
+### 8.4 Multi-Instance Deployment
 
 ```
 ┌─────────────────┐
-│  Container 1    │  App Registration 1
-│  IP: 10.0.1.10  │  ~60 ops/sec
+│  Container 1    │  App Registration B2C-1 / EEID-1
+│  IP: 10.0.1.10  │  MaxConcurrency: 8  →  ~520 u/min
 └─────────────────┘
          +
 ┌─────────────────┐
-│  Container 2    │  App Registration 2
-│  IP: 10.0.1.11  │  ~60 ops/sec
+│  Container 2    │  App Registration B2C-2 / EEID-2
+│  IP: 10.0.1.11  │  MaxConcurrency: 8  →  ~520 u/min
 └─────────────────┘
          +
+         ⋮
 ┌─────────────────┐
-│  Container 3    │  App Registration 3
-│  IP: 10.0.1.12  │  ~60 ops/sec
+│  Container N    │  App Registration B2C-N / EEID-N
+│  IP: 10.0.1.NN  │  MaxConcurrency: 8  →  ~520 u/min
 └─────────────────┘
-         =
-   ~180 ops/sec total
+         =   (N × ~520) u/min  [hard cap: ~12,000 u/min at EEID 200 RPS tenant limit]
 ```
 
 #### Deployment Options
@@ -950,20 +1023,22 @@ az container create \
 ```
 
 **Option 2: Azure Kubernetes Service (AKS)**
-- Deploy 3-5 pods with unique IP addresses
-- Use DaemonSet or StatefulSet for IP assignment
+- Deploy N pods with unique IP addresses
+- Use StatefulSet for stable IP assignment
 - Configure network policies to ensure IP diversity
 
 **Option 3: Virtual Machines**
-- Deploy 3-5 VMs in different subnets
-- Each VM runs Console app with different app registration
+- Deploy N VMs in separate subnets
+- Each VM runs the Console app with a dedicated app registration pair
 
-### 8.3 Throttling Management
+### 8.5 Throttle Management
 
-#### Retry Policy Configuration
+#### Retry Policy
+
+The migration kit uses Polly with exponential backoff + jitter for all Graph API calls:
 
 ```csharp
-// Exponential backoff with jitter
+// Exponential backoff with jitter (up to ~31 s at retry 5)
 var retryPolicy = Policy
     .Handle<HttpRequestException>()
     .Or<RateLimitExceededException>()
@@ -980,7 +1055,9 @@ var retryPolicy = Policy
         });
 ```
 
-#### Circuit Breaker Pattern
+> **Diagnosing soft-limit degradation**: If `Graph.Throttled` events are zero but `eeidMax` latency exceeds ~5 s (visible via `scripts/Analyze-Telemetry.ps1`), the API is hitting a soft concurrency ceiling — reduce `MaxConcurrency` rather than adding more retry attempts.
+
+#### Circuit Breaker
 
 ```csharp
 var circuitBreakerPolicy = Policy

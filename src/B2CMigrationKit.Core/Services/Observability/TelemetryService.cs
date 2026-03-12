@@ -24,6 +24,7 @@ public class TelemetryService : ITelemetryService
     private readonly TelemetryOptions _options;
     private readonly ConcurrentDictionary<string, long> _counters = new();
     private readonly SemaphoreSlim _fileLock = new(1, 1);
+    private readonly ConcurrentBag<Task> _pendingFileTasks = new();
     private static readonly JsonSerializerOptions _jsonOpts = new()
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
@@ -68,10 +69,10 @@ public class TelemetryService : ITelemetryService
             _logger.LogInformation("[EVENT] {EventName} {Properties}", eventName, props);
         }
 
-        // File logging (fire-and-forget; errors do not propagate to caller)
+        // File logging (tracked for graceful flush on shutdown)
         if (!string.IsNullOrEmpty(_options.LogFilePath))
         {
-            _ = AppendToLogFileAsync("event", eventName, properties);
+            _pendingFileTasks.Add(AppendToLogFileAsync("event", eventName, properties));
         }
 
         // Application Insights
@@ -136,7 +137,7 @@ public class TelemetryService : ITelemetryService
             _logger.LogError(exception, "[EXCEPTION] {Properties}", props);
         }
 
-        // File logging
+        // File logging (tracked for graceful flush on shutdown)
         if (!string.IsNullOrEmpty(_options.LogFilePath))
         {
             var exProps = new Dictionary<string, string>(properties ?? new Dictionary<string, string>())
@@ -144,7 +145,7 @@ public class TelemetryService : ITelemetryService
                 ["exceptionType"] = exception.GetType().Name,
                 ["message"] = exception.Message
             };
-            _ = AppendToLogFileAsync("exception", exception.GetType().Name, exProps);
+            _pendingFileTasks.Add(AppendToLogFileAsync("exception", exception.GetType().Name, exProps));
         }
 
         // Application Insights
@@ -219,9 +220,9 @@ public class TelemetryService : ITelemetryService
         }
     }
 
-    public Task FlushAsync()
+    public async Task FlushAsync()
     {
-        if (!_options.Enabled) return Task.CompletedTask;
+        if (!_options.Enabled) return;
 
         // Console logging - log all final counter values
         if (_options.UseConsoleLogging)
@@ -238,7 +239,11 @@ public class TelemetryService : ITelemetryService
             _telemetryClient.Flush();
         }
 
-        return Task.CompletedTask;
+        // Drain any in-flight file writes so no telemetry is lost on shutdown
+        if (!string.IsNullOrEmpty(_options.LogFilePath) && !_pendingFileTasks.IsEmpty)
+        {
+            await Task.WhenAll(_pendingFileTasks).ConfigureAwait(false);
+        }
     }
 
     private async Task AppendToLogFileAsync(string type, string name, IDictionary<string, string>? properties)

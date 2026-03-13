@@ -210,7 +210,7 @@ After `phone-registration` has run, users whose phones were registered are promp
 - **Multi-App Parallelization**: Each worker instance uses a dedicated pair of app registrations (B2C + EEID) for independent API quotas. Tested sweet spot: **4 workers × 8 threads ≈ 2,076 users/min** with zero throttle events.
 - **Stateless Design**: Horizontal scaling without shared state — workers pull autonomously from a shared queue with no central coordinator.
 - **Batching**: Efficient Graph API batch requests (20 user IDs per queue message, resolved via `$batch`).
-- **Concurrency ceiling**: `MaxConcurrency = 8` per worker is the validated optimum. More threads per worker triggers a soft API concurrency limit (no 429, but extended timeouts and throughput regression). Scale by adding more workers instead.
+- **Concurrency ceiling**: `MaxConcurrency` (default: **1**) controls per-worker thread count. The validated optimum is **8**. More threads per worker triggers a soft API concurrency limit (no 429, but extended timeouts and throughput regression). Scale by adding more workers instead.
 
 ---
 
@@ -980,9 +980,11 @@ The near-equal split confirms that neither the B2C read path nor the EEID write 
 #### Recommended per-worker configuration
 
 ```
-MaxConcurrency = 8   # validated sweet spot — do not exceed
+MaxConcurrency = 8   # validated sweet spot — do not exceed (default: 1)
 IdsPerMessage  = 20  # aligns with Graph $batch limit
 ```
+
+> **Note**: `MaxConcurrency` defaults to **1** in both `MigrationOptions` (root level, used by `worker-migrate`) and `PhoneRegistrationOptions`. Set it explicitly to **8** in your configuration for optimal throughput.
 
 Each worker processes a batch of 20 users in three waves:
 

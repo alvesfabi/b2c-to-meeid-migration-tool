@@ -184,9 +184,35 @@ public class PhoneRegistrationWorker : IOrchestrator<ExecutionResult>
                         {
                             // 1. Fetch MFA phone number from B2C (not stored in the queue message)
                             var b2cStart = DateTimeOffset.UtcNow;
-                            var phoneNumber = await _b2cGraphClient.GetMfaPhoneNumberAsync(
-                                capturedTask.B2CUserId, cancellationToken);
-                            b2cGetPhoneMs = (long)(DateTimeOffset.UtcNow - b2cStart).TotalMilliseconds;
+                            string? b2cApiErrorCode = null;
+                            string? phoneNumber = null;
+                            try
+                            {
+                                phoneNumber = await _b2cGraphClient.GetMfaPhoneNumberAsync(
+                                    capturedTask.B2CUserId, cancellationToken);
+                            }
+                            catch (OperationCanceledException) { throw; }
+                            catch (Exception b2cEx)
+                            {
+                                b2cApiErrorCode = b2cEx is Microsoft.Graph.Models.ODataErrors.ODataError oErrB2c
+                                    ? oErrB2c.ResponseStatusCode.ToString()
+                                    : b2cEx.GetType().Name;
+                                throw;
+                            }
+                            finally
+                            {
+                                b2cGetPhoneMs = (long)(DateTimeOffset.UtcNow - b2cStart).TotalMilliseconds;
+                                if (!cancellationToken.IsCancellationRequested)
+                                {
+                                    _telemetry.TrackEvent("PhoneRegistration.B2CApiCall", new Dictionary<string, string>
+                                    {
+                                        ["b2cUserId"]     = capturedTask.B2CUserId,
+                                        ["b2cGetPhoneMs"] = b2cGetPhoneMs.ToString(),
+                                        ["success"]       = (b2cApiErrorCode == null).ToString().ToLower(),
+                                        ["errorCode"]     = b2cApiErrorCode ?? string.Empty
+                                    });
+                                }
+                            }
 
                             if (string.IsNullOrWhiteSpace(phoneNumber))
                             {

@@ -186,7 +186,9 @@ public class WorkerMigrateOrchestrator : IOrchestrator<ExecutionResult>
                                 PrepareUserForEeid(user);
                                 eeidUpn = user.UserPrincipalName;
 
+                                var eeidApiStart = DateTimeOffset.UtcNow;
                                 var created = await _eeidGraphClient.CreateUserAsync(user, cancellationToken);
+                                var eeidApiMs = (long)(DateTimeOffset.UtcNow - eeidApiStart).TotalMilliseconds;
                                 var durationMs = (long)(DateTimeOffset.UtcNow - opStart).TotalMilliseconds;
 
                                 Interlocked.Increment(ref batchCreated);
@@ -222,6 +224,7 @@ public class WorkerMigrateOrchestrator : IOrchestrator<ExecutionResult>
                                     ["b2cObjectId"]  = b2cObjectId,
                                     ["eeidUpn"]      = eeidUpn ?? "unknown",
                                     ["eeidUserId"]   = created.Id ?? "unknown",
+                                    ["eeidApiMs"]    = eeidApiMs.ToString(),
                                     ["eeidCreateMs"] = durationMs.ToString()
                                 });
                             }

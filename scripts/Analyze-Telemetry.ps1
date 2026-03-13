@@ -89,8 +89,11 @@ $userMs   = [System.Collections.Generic.List[int]]::new()
 $bB2c     = [System.Collections.Generic.List[int]]::new()
 $bEeidAvg = [System.Collections.Generic.List[int]]::new()
 $bEeidMax = [System.Collections.Generic.List[int]]::new()
-$migrateTs      = [System.Collections.Generic.List[datetime]]::new()
-$lastStartedTs  = $null
+$migrateTs           = [System.Collections.Generic.List[datetime]]::new()
+$lastStartedTs       = $null
+$userApiMs           = [System.Collections.Generic.List[int]]::new()
+$migrateThrottledB2c  = 0
+$migrateThrottledEeid = 0
 
 foreach ($l in $migrateLines) {
     if ($l -match '"ts":"([^"]+)"') {
@@ -105,6 +108,10 @@ foreach ($l in $migrateLines) {
         if ($l -match '"fetchMs":"(\d+)"') { $fetches.Add([int]$Matches[1]) }
     } elseif ($l -match '"name":"WorkerMigrate\.UserCreated"') {
         if ($l -match '"eeidCreateMs":"(\d+)"') { $userMs.Add([int]$Matches[1]) }
+        if ($l -match '"eeidApiMs":"(\d+)"')    { $userApiMs.Add([int]$Matches[1]) }
+    } elseif ($l -match '"name":"Graph\.Throttled"') {
+        if ($l -match '"tenantRole":"B2C"') { $migrateThrottledB2c++ }
+        else                                { $migrateThrottledEeid++ }
     } elseif ($l -match '"name":"WorkerMigrate\.BatchDone"') {
         if ($l -match '"b2cFetchMs":"(\d+)"')  { $bB2c.Add([int]$Matches[1]) }
         if ($l -match '"eeidAvgMs":"(\d+)"')   { $bEeidAvg.Add([int]$Matches[1]) }
@@ -121,10 +128,11 @@ Write-Host "══════════════════════�
 
 Write-Host ""
 Write-Host "=== LATENCY BY COMPONENT (ms) ==="
-Stats "B2C fetch  (per batch)"    ([int[]]$bB2c)
-Stats "EEID create (per user)"    ([int[]]$userMs)
-Stats "EEID max   (per batch)"    ([int[]]$bEeidMax)
-Stats "EEID avg   (per batch)"    ([int[]]$bEeidAvg)
+Stats "B2C fetch    (per batch)"   ([int[]]$bB2c)
+Stats "EEID create  (pure API)"    ([int[]]$userApiMs)
+Stats "EEID create  (total op)"    ([int[]]$userMs)
+Stats "EEID max     (per batch)"   ([int[]]$bEeidMax)
+Stats "EEID avg     (per batch)"   ([int[]]$bEeidAvg)
 Stats "Wall time  (b2c+eeid_max)" $wall
 
 Write-Host ""
@@ -175,13 +183,21 @@ if ($userMs.Count -gt 0) {
     Write-Host ("  Slow users (>1s): {0} / {1}  ({2:N1}%)" `
         -f $slowCount, $userMs.Count, ($slowCount * 100.0 / $userMs.Count))
 }
-
+Write-Host ""
+Write-Host "=== THROTTLES (429) ==="
+$migTot = $migrateThrottledB2c + $migrateThrottledEeid
+Write-Host ("  Graph.Throttled (B2C  - batch users): {0}" -f $migrateThrottledB2c)
+Write-Host ("  Graph.Throttled (EEID - create user): {0}" -f $migrateThrottledEeid)
+if ($migTot -gt 0) {
+    Write-Host "  ⚠ Throttles detected in migrate workers" -ForegroundColor Yellow
+}
 # ═══════════════════════════════════════════════════════════════════════════════
 # PHONE REGISTRATION WORKERS
 # ═══════════════════════════════════════════════════════════════════════════════
 if ($phoneLines.Count -gt 0) {
 
     $phB2cGet    = [System.Collections.Generic.List[int]]::new()  # b2cGetPhoneMs (success only)
+    $phB2cApiAll = [System.Collections.Generic.List[int]]::new()  # b2cGetPhoneMs from B2CApiCall (all calls)
     $phEeidPost  = [System.Collections.Generic.List[int]]::new()  # eeidRegisterMs (success only)
     $phEeidApiAll = [System.Collections.Generic.List[int]]::new() # eeidRegisterMs from EEIDApiCall (success + failed)
     $phTotal     = [System.Collections.Generic.List[int]]::new()  # totalMs (success only)
@@ -192,6 +208,8 @@ if ($phoneLines.Count -gt 0) {
     $phSkipped   = 0
     $phFailed    = 0
     $phThrottled = 0
+    $phThrottledB2c  = 0
+    $phThrottledEeid = 0
     $phFailedStepB2c  = 0
     $phFailedStepEeid = 0
     # Per-error-code breakdown for failures
@@ -215,6 +233,8 @@ if ($phoneLines.Count -gt 0) {
         } elseif ($l -match '"name":"PhoneRegistration\.Skipped"') {
             $phSkipped++
             if ($l -match '"b2cGetPhoneMs":"(\d+)"')  { $phSkipB2c.Add([int]$Matches[1]) }
+        } elseif ($l -match '"name":"PhoneRegistration\.B2CApiCall"') {
+            if ($l -match '"b2cGetPhoneMs":"(\d+)"') { $phB2cApiAll.Add([int]$Matches[1]) }
         } elseif ($l -match '"name":"PhoneRegistration\.EEIDApiCall"') {
             if ($l -match '"eeidRegisterMs":"(\d+)"') { $phEeidApiAll.Add([int]$Matches[1]) }
         } elseif ($l -match '"name":"PhoneRegistration\.Failed"') {
@@ -227,6 +247,8 @@ if ($phoneLines.Count -gt 0) {
             }
         } elseif ($l -match '"name":"Graph\.Throttled"') {
             $phThrottled++
+            if ($l -match '"tenantRole":"B2C"') { $phThrottledB2c++ }
+            else                                { $phThrottledEeid++ }
         }
     }
 
@@ -258,11 +280,12 @@ if ($phoneLines.Count -gt 0) {
 
     Write-Host ""
     Write-Host "=== LATENCY BY PHASE (ms) ==="
-    Stats "B2C GET phone  (success)"        ([int[]]$phB2cGet)
+    Stats "B2C GET phone   (success)"       ([int[]]$phB2cGet)
+    Stats "B2C GET phone   (all API calls)" ([int[]]$phB2cApiAll)
     Stats "EEID POST phone (success)"       ([int[]]$phEeidPost)
     Stats "EEID POST phone (all API calls)" ([int[]]$phEeidApiAll)
-    Stats "Total per user (success)"        ([int[]]$phTotal)
-    Stats "B2C GET phone  (skipped)"        ([int[]]$phSkipB2c)
+    Stats "Total per user  (success)"       ([int[]]$phTotal)
+    Stats "B2C GET phone   (skipped)"       ([int[]]$phSkipB2c)
 
     Write-Host ""
     Write-Host "=== SHARE OF PHONE TIME ==="
@@ -312,7 +335,9 @@ if ($phoneLines.Count -gt 0) {
 
     Write-Host ""
     Write-Host "=== THROTTLES (429) ==="
-    Write-Host ("  Graph.Throttled across all phone workers: {0}" -f $phThrottled)
+    Write-Host ("  Graph.Throttled total             : {0}" -f $phThrottled)
+    Write-Host ("    B2C  (GET phone - polly retries): {0}" -f $phThrottledB2c)
+    Write-Host ("    EEID (POST phone- polly retries): {0}" -f $phThrottledEeid)
     if ($phThrottled -gt 0) {
         Write-Host "  ⚠ Throttles detected — consider increasing ThrottleDelayMs or reducing MaxConcurrency" -ForegroundColor Yellow
     }
@@ -335,7 +360,7 @@ if ($phoneLines.Count -gt 0) {
             $coveragePct = $phoneAttempted * 100.0 / $userMs.Count
             if ($coveragePct -gt 110) {
                 Write-Host ("  Phone pipeline coverage         : {0,5:N1}%  ⚠ >100%% — queue had stale messages from a prior run" -f $coveragePct) -ForegroundColor Yellow
-                Write-Host "    → Run: az storage queue clear --name phone-registration --connection-string UseDevelopmentStorage=true" -ForegroundColor Yellow
+                Write-Host "    → Clear per-worker queues: az storage queue clear --name phone-reg-w{1..4} --connection-string UseDevelopmentStorage=true" -ForegroundColor Yellow
             } else {
                 Write-Host ("  Phone pipeline coverage         : {0,5:N1}%%" -f $coveragePct)
             }

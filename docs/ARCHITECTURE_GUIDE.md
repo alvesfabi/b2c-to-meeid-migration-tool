@@ -182,10 +182,12 @@ After `phone-registration` has run, users whose phones were registered are promp
    - Scalable, event-driven architecture
    - Integrated with Azure monitoring and security
 
-### 3.2 Security First
+### 3.2 Security First (Target Architecture)
 
-- **Private Endpoints Only**: All Azure PaaS resources (Storage, Key Vault) accessible only via private network
-- **Managed Identity**: Zero secrets in code or configuration (except Key Vault references)
+> **Current State**: v1.0 uses client secrets and connection strings for local development. The controls below describe the production target.
+
+- **Private Endpoints Only** *(future)*: All Azure PaaS resources (Storage, Key Vault) accessible only via private network
+- **Managed Identity** *(future)*: Zero secrets in code or configuration (except Key Vault references)
 - **Encryption Everywhere**: At rest (Storage/Key Vault) and in transit (HTTPS/TLS 1.2+)
 - **Least Privilege**: Service principals with minimal required permissions
 
@@ -201,7 +203,7 @@ After `phone-registration` has run, users whose phones were registered are promp
 - **Idempotency**: Safe to retry operations without duplication
 - **Graceful Degradation**: Continue processing on non-critical failures
 - **Checkpoint/Resume**: Workers restart automatically by re-processing any queue message that returned after a visibility timeout (at-least-once delivery)
-- **Circuit Breaker**: Automatic backoff on API throttling (HTTP 429)
+- **Retry with Backoff**: Polly exponential backoff + jitter on API throttling (HTTP 429)
 
 ### 3.5 Scalability
 
@@ -226,6 +228,7 @@ B2CMigrationKit.Core/
 │   ├── ITableStorageClient.cs        # Azure Table Storage (audit trail)
 │   ├── IAuthenticationService.cs     # B2C ROPC validation
 │   ├── ICredentialManager.cs         # App credential resolution
+│   ├── IRsaKeyManager.cs             # RSA key loading/caching
 │   ├── ISecretProvider.cs            # Key Vault integration
 │   └── ITelemetryService.cs          # Custom metrics/events
 ├── Configuration/
@@ -238,15 +241,23 @@ B2CMigrationKit.Core/
 │   ├── PhoneRegistrationOptions.cs   # Throttle delay, poll settings
 │   ├── StorageOptions.cs             # Queue names + AuditTableName
 │   ├── RetryOptions.cs               # Throttling/backoff settings
-│   └── JitAuthenticationOptions.cs   # JIT function settings
+│   ├── JitAuthenticationOptions.cs   # JIT function settings
+│   ├── KeyVaultOptions.cs            # Key Vault connection settings
+│   └── TelemetryOptions.cs           # Application Insights settings
 ├── Models/
-│   ├── UserProfile.cs                # Unified user model
-│   ├── ExecutionResult.cs            # Per-user operation outcome
-│   ├── RunSummary.cs                 # Aggregated run statistics
-│   ├── MigrationAuditRecord.cs       # ITableEntity for audit table
-│   ├── PhoneRegistrationMessage.cs   # { B2CUserId, EEIDUpn } queue message
-│   ├── JitAuthenticationRequest.cs   # JIT payload from External ID
-│   └── JitAuthenticationResponse.cs  # JIT response to External ID
+│   ├── AuthenticationResult.cs               # ROPC validation result
+│   ├── BatchResult.cs                        # Graph $batch response wrapper
+│   ├── CustomAuthenticationExtensionModels.cs # JIT request/response models
+│   ├── ExecutionResult.cs                    # Per-user operation outcome
+│   ├── ExportJobMessage.cs                   # Legacy export message (unused)
+│   ├── ImportAuditLog.cs                     # Import audit log entry
+│   ├── MigrationAuditRecord.cs               # ITableEntity for audit table
+│   ├── MigrationStatus.cs                    # Enum: migration outcome states
+│   ├── PagedResult.cs                        # Paged Graph API response
+│   ├── PhoneLookupEntry.cs                   # Phone lookup cache entry
+│   ├── PhoneRegistrationMessage.cs           # { B2CUserId, EEIDUpn } queue message
+│   ├── RunSummary.cs                         # Aggregated run statistics
+│   └── UserProfile.cs                        # Unified user model
 ├── Services/
 │   ├── Orchestrators/
 │   │   ├── HarvestOrchestrator.cs        # harvest command
@@ -261,6 +272,9 @@ B2CMigrationKit.Core/
 │   │   ├── TableStorageClient.cs         # Azure Table Storage (audit)
 │   │   ├── CredentialManager.cs          # Credential resolution
 │   │   ├── AuthenticationService.cs      # B2C ROPC implementation
+│   │   ├── FileAuditClient.cs           # File-based audit (dev/testing)
+│   │   ├── NullAuditClient.cs           # No-op audit (benchmarking)
+│   │   ├── RsaKeyManager.cs             # RSA key loading and caching
 │   │   └── SecretProvider.cs             # Key Vault / inline secret provider
 │   └── Observability/
 │       └── TelemetryService.cs           # Application Insights wrapper
@@ -742,7 +756,7 @@ private static readonly SemaphoreSlim _keyLoadLock = new(1, 1);
 └────────────────────────────────────────────────────────────────┘
 ```
 
-#### Infrastructure as Code (Bicep Example)
+#### Infrastructure as Code (Bicep Example — not included in this repo)
 
 ```bicep
 // Key Vault with Private Endpoint
@@ -1056,24 +1070,6 @@ var retryPolicy = Policy
 ```
 
 > **Diagnosing soft-limit degradation**: If `Graph.Throttled` events are zero but `eeidMax` latency exceeds ~5 s (visible via `scripts/Analyze-Telemetry.ps1`), the API is hitting a soft concurrency ceiling — reduce `MaxConcurrency` rather than adding more retry attempts.
-
-#### Circuit Breaker
-
-```csharp
-var circuitBreakerPolicy = Policy
-    .Handle<HttpRequestException>()
-    .CircuitBreakerAsync(
-        handledEventsAllowedBeforeBreaking: 10,
-        durationOfBreak: TimeSpan.FromMinutes(1),
-        onBreak: (exception, duration) =>
-        {
-            _logger.LogError("Circuit breaker opened for {Duration}", duration);
-        },
-        onReset: () =>
-        {
-            _logger.LogInformation("Circuit breaker reset");
-        });
-```
 
 ---
 

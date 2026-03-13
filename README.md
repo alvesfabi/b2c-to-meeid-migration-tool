@@ -29,7 +29,7 @@ This migration kit provides a sample solution for identity migration with:
 
 ```mermaid
 graph TB
-    subgraph "Phase 1: Harvest"
+    subgraph "Step 1: Harvest"
         B2C[(Azure AD B2C<br/>Source Tenant)]
         Harvest[1. Harvest<br/>Enqueue user IDs]
         Queue1[(Azure Queue<br/>user-ids-to-process)]
@@ -38,7 +38,7 @@ graph TB
         Harvest -->|Batches of IDs| Queue1
     end
 
-    subgraph "Phase 2: Worker Migrate + Phone Registration"
+    subgraph "Step 2: Worker Migrate + Phone Registration"
         Worker[2a. Worker Migrate × N<br/>Fetch profiles + create users]
         ExtID[(Entra External ID<br/>Target Tenant)]
         Queue2[(Azure Queue<br/>phone-registration)]
@@ -56,7 +56,7 @@ graph TB
         PhoneWorker -->|Audit record| AuditTable
     end
 
-    subgraph "Phase 3: JIT Password Migration"
+    subgraph "Step 3: JIT Password Migration"
         User[User Login]
         ExtIDLogin[External ID<br/>Sign-In Policy]
         JIT[3. JIT Function<br/>HTTP Trigger]
@@ -79,8 +79,8 @@ graph TB
 
 ### ✅ Currently Available
 
-- **Harvest + Worker Migrate** - Harvest phase enqueues user IDs; N parallel worker-migrate instances fetch full B2C profiles and create users directly in EEID (no intermediate blob storage; validated with 181K users in local dev; throughput bounded by the B2C tenant's default 200 RPS Graph API limit)
-- **Async Phone Registration** - After worker-migrate, MFA phone numbers are fetched from B2C and registered in EEID at a throttle-safe rate (0.5 RPS per app registration) by the `phone-registration` worker
+- **Harvest + Worker Migrate** - Harvest phase enqueues user IDs; N parallel worker-migrate instances fetch full B2C profiles and create users directly in EEID (no intermediate blob storage; tested in local dev with up to ~23K users; throughput bounded by the B2C tenant's default 200 RPS Graph API limit)
+- **Async Phone Registration** - After worker-migrate, MFA phone numbers are fetched from B2C and registered in EEID at a throttle-safe rate (default 400 ms delay between calls per app registration) by the `phone-registration` worker
 - **Audit Trail** - Every user operation (Created, Duplicate, Failed, PhoneRegistered, PhoneSkipped) is written to Azure Table Storage (`migrationAudit`)
 - **JIT Password Migration** via Custom Authentication Extension
 - **UPN Domain Transformation** preserving local-part identifiers as a workaround to enable [sign-in alias](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-sign-in-alias) functionality

@@ -95,13 +95,22 @@ $userApiMs           = [System.Collections.Generic.List[int]]::new()
 $migrateThrottledB2c  = 0
 $migrateThrottledEeid = 0
 
+# First pass: find the timestamp of the last WorkerMigrate.Started (= last run)
+foreach ($l in $migrateLines) {
+    if ($l -match '"name":"WorkerMigrate\.Started"' -and $l -match '"ts":"([^"]+)"') {
+        $tsRaw = $Matches[1] -replace '\u002B', '+'
+        try { $lastStartedTs = [datetime]$tsRaw } catch {}
+    }
+}
+
+# Second pass: only process events from the last run
 foreach ($l in $migrateLines) {
     if ($l -match '"ts":"([^"]+)"') {
-        $tsRaw = $Matches[1] -replace '\\u002B', '+'
+        $tsRaw = $Matches[1] -replace '\u002B', '+'
         try {
             $ts = [datetime]$tsRaw
+            if ($lastStartedTs -and $ts -lt $lastStartedTs) { continue }
             $migrateTs.Add($ts)
-            if ($l -match '"name":"WorkerMigrate\.Started"') { $lastStartedTs = $ts }
         } catch {}
     }
     if ($l -match '"name":"WorkerMigrate\.B2CFetch"') {
@@ -215,13 +224,22 @@ if ($phoneLines.Count -gt 0) {
     # Per-error-code breakdown for failures
     $phErrCodes  = @{}
 
+    # First pass: find the timestamp of the last PhoneRegistration.Started (= last run)
+    foreach ($l in $phoneLines) {
+        if ($l -match '"name":"PhoneRegistration\.Started"' -and $l -match '"ts":"([^"]+)"') {
+            $tsRaw = $Matches[1] -replace '\u002B', '+'
+            try { $lastPhoneStartedTs = [datetime]$tsRaw } catch {}
+        }
+    }
+
+    # Second pass: only process events from the last run
     foreach ($l in $phoneLines) {
         if ($l -match '"ts":"([^"]+)"') {
-            $tsRaw = $Matches[1] -replace '\\u002B', '+'
+            $tsRaw = $Matches[1] -replace '\u002B', '+'
             try {
                 $ts = [datetime]$tsRaw
+                if ($lastPhoneStartedTs -and $ts -lt $lastPhoneStartedTs) { continue }
                 $phoneTs.Add($ts)
-                if ($l -match '"name":"PhoneRegistration\.Started"') { $lastPhoneStartedTs = $ts }
             } catch {}
         }
 

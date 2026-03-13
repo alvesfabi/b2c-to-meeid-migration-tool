@@ -506,12 +506,17 @@ public class GraphClient : IGraphClient
                 _telemetry.IncrementCounter("GraphClient.PhoneMethodRegistered");
             }
             catch (Microsoft.Graph.Models.ODataErrors.ODataError odataError)
-                when (odataError.ResponseStatusCode == (int)System.Net.HttpStatusCode.Conflict)
+                when (odataError.ResponseStatusCode == (int)System.Net.HttpStatusCode.Conflict ||
+                      (odataError.ResponseStatusCode == (int)System.Net.HttpStatusCode.BadRequest &&
+                       odataError.Error?.Message != null &&
+                       odataError.Error.Message.Contains("already registered", StringComparison.OrdinalIgnoreCase)))
             {
-                // 409 = phone already registered — treat as success (idempotent)
+                // 409 = phone already registered (standard conflict)
+                // 400 "already registered" = EEID returns BadRequest instead of Conflict in some cases
+                // Both are treated as success (idempotent)
                 _logger.LogDebug(
-                    "Phone method already registered for user {User} (409 Conflict — skipping)",
-                    userIdOrUpn);
+                    "Phone method already registered for user {User} ({Status} — skipping)",
+                    userIdOrUpn, odataError.ResponseStatusCode);
                 _telemetry.IncrementCounter("GraphClient.PhoneMethodAlreadyRegistered");
             }
         }, cancellationToken);

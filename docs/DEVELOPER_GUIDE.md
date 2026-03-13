@@ -58,7 +58,7 @@ B2CMigrationKit.Function/  # Azure Function for JIT
 |---|---|---|
 | `HarvestOrchestrator` | `harvest` | Step 1 — pages B2C user IDs, enqueues batches to the migrate queue |
 | `WorkerMigrateOrchestrator` | `worker-migrate` | Step 2a — dequeues ID batches, fetches users from B2C, creates in EEID, enqueues phone tasks |
-| `PhoneRegistrationWorker` | `phone-registration` | Step 2b — dequeues phone tasks, fetches MFA phone from B2C, registers in EEID at 0.5 RPS |
+| `PhoneRegistrationWorker` | `phone-registration` | Step 2b — dequeues phone tasks, fetches MFA phone from B2C, registers in EEID (default 400 ms throttle delay) |
 | `JitMigrationService` | *(Azure Function)* | Validates B2C credentials and returns `MigratePassword` action |
 
 ## Configuration Guide
@@ -155,7 +155,7 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
 ```json
 "PhoneRegistration": {
   "QueueName": "phone-registration",
-  "ThrottleDelayMs": 2000,
+  "ThrottleDelayMs": 400,
   "MessageVisibilityTimeoutSeconds": 120,
   "EmptyQueuePollDelayMs": 5000,
   "MaxEmptyPolls": 3
@@ -936,7 +936,7 @@ az functionapp config appsettings set `
 
 **Scenario: Graph API Throttling (HTTP 429)**
 - General Users API limit: ~60 ops/sec per app registration
-- `authenticationMethod` API limit: **5 req/10s per app per tenant (0.5 RPS)** — ensure `ThrottleDelayMs ≥ 2000`
+- `authenticationMethod` API limit: **30 req/10s per app registration (~3 RPS)** — default `ThrottleDelayMs` is 400 ms; increase if you see sustained 429s
 - View retry logs: `[GraphClient] Request throttled (429/503) - Retrying in X ms...`
 - For load testing, add delays between requests
 
@@ -1007,7 +1007,7 @@ Controls how attributes are imported into External ID:
       "MigrationAttributes": {
         "StoreB2CObjectId": true,
         "B2CObjectIdTarget": "extension_xyz789_OriginalB2CId",
-        "SetRequiresMigration": true,
+        "SetRequireMigration": true,
         "RequiresMigrationTarget": "extension_xyz789_RequiresMigration"
       }
     }
@@ -1061,7 +1061,7 @@ Controls migration-specific attributes:
 - Default: `extension_{ExtensionAppId}_B2CObjectId`
 - Only used if `StoreB2CObjectId` is `true`
 
-**SetRequiresMigration** (bool, default: `true`)
+**SetRequireMigration** (bool, default: `true`)
 - Whether to set the RequiresMigration flag
 - Used by JIT authentication to know if password needs migration
 - The value is set to `true` by default (password NOT yet migrated)
@@ -1070,7 +1070,7 @@ Controls migration-specific attributes:
 **RequiresMigrationTarget** (string, optional)
 - Target attribute name for the RequiresMigration flag
 - Default: `extension_{ExtensionAppId}_RequiresMigration`
-- Only used if `SetRequiresMigration` is `true`
+- Only used if `SetRequireMigration` is `true`
 
 ### Common Mapping Scenarios
 
@@ -1114,7 +1114,7 @@ The `extension_b2c_CustomerId` will be renamed to `extension_extid_LegacyUserId`
     "MigrationAttributes": {
       "StoreB2CObjectId": true,
       "B2CObjectIdTarget": "extension_xyz_B2COriginalId",
-      "SetRequiresMigration": true,
+      "SetRequireMigration": true,
       "RequiresMigrationTarget": "extension_xyz_RequiresMigration"
     }
   }
@@ -1299,8 +1299,8 @@ Every user processed by the worker-migrate and phone-registration steps is recor
 
 | Column | Type | Description |
 |---|---|---|
-| `PartitionKey` | string | B2C `objectId` of the source user |
-| `RowKey` | string | ISO-8601 timestamp of the operation (sortable) |
+| `PartitionKey` | string | Run date in `yyyyMMdd` format (groups all records for a day) |
+| `RowKey` | string | `{stage}_{B2CObjectId}` where stage is `migrate` or `phone` |
 | `Status` | string | `Created`, `Duplicate`, `Failed`, `PhoneRegistered`, `PhoneSkipped` |
 | `DurationMs` | double | How long the Graph API call took |
 | `ErrorCode` | string | OData error code when `Status = Failed` (otherwise empty) |
@@ -1414,9 +1414,9 @@ Restrict access to the audit table using RBAC:
 
 ### Infrastructure Deployment
 
-1. **Deploy Azure Resources**
+1. **Deploy Azure Resources** *(example — Bicep templates not included in this repo; planned for v2.0)*
    ```bash
-   # Deploy via Azure Portal or Bicep
+   # Example: Deploy via Bicep (when templates are available)
    az deployment group create \
      --resource-group rg-b2c-migration \
      --template-file infra/main.bicep
@@ -1626,9 +1626,6 @@ Run each instance with its own config file (e.g. `appsettings.worker1.json`, `ap
 
 ### Common Errors
 
-**Error: "Directory.Read.All permission required"**
-- Solution: Grant permission in app registration and admin consent
-
 **Error: "Throttle limit exceeded (HTTP 429)"**
 - Solution: Reduce batch size or add delay between batches
 
@@ -1652,4 +1649,4 @@ Run each instance with its own config file (e.g. `appsettings.worker1.json`, `ap
 
 ---
 
-For additional support, consult your Microsoft representative or review the [operations runbook](OPERATIONS.md).
+For additional support, consult your Microsoft representative.

@@ -10,7 +10,7 @@ This directory contains PowerShell scripts for local development, testing, and J
 - [Quick Start](#quick-start)
 - [Migration Scripts](#migration-scripts)
   - [Start-LocalHarvest.ps1](#start-localharvestps1--producer-phase)
-  - [Start-LocalWorkerMigrate.ps1](#start-localworkermigratemasterps1--worker-phase)
+  - [Start-LocalWorkerMigrate.ps1](#start-localworkermigrateps1--worker-phase)
   - [Start-LocalPhoneRegistration.ps1](#start-localphoneregistrationps1--phone-registration-phase)
 - [JIT Migration Setup](#jit-migration-setup)
   - [Generate RSA Keys](#1-generate-rsa-keys)
@@ -19,6 +19,10 @@ This directory contains PowerShell scripts for local development, testing, and J
 - [Testing & Utility Scripts](#testing--utility-scripts)
   - [New-TestUser.ps1](#new-testuserps1--create-test-users)
   - [Manage-MigrationFlag.ps1](#manage-migrationflagps1--manage-migration-flag)
+  - [New-WorkerAppRegistrations.ps1](#new-workerappregistrationsps1--provision-worker-app-registrations)
+  - [Analyze-Telemetry.ps1](#analyze-telemetryps1--analyze-migration-telemetry)
+- [Shared Helpers](#shared-helpers)
+  - [_Common.ps1](#_commonps1--shared-helper-functions)
 - [Configuration](#configuration)
 - [Troubleshooting](#troubleshooting)
 
@@ -65,8 +69,6 @@ This directory contains PowerShell scripts for local development, testing, and J
    ```powershell
    npm install -g azure-functions-core-tools@4
    ```
-
----
 
 ---
 
@@ -517,6 +519,108 @@ Useful for monitoring migration progress and resetting users for re-testing.
 - **Reset for testing:** Set flag back to `true` for re-testing JIT
 - **Troubleshoot:** Find users missing the attribute (`-Filter notset`)
 - **Debug:** Discover exact attribute names (`-Discover`)
+
+### New-WorkerAppRegistrations.ps1  *(Provision worker app registrations)*
+
+Provisions additional app registrations in both B2C and External ID tenants for parallel
+migration workers. For each worker number, it creates a B2C app (with `User.Read.All`),
+an External ID app (with `User.ReadWrite.All`), grants admin consent, generates client
+secrets, and writes a ready-to-use `appsettings.workerN.json` file.
+
+Authentication uses device code flow — you will be prompted to sign in as an admin once
+per tenant.
+
+**Usage:**
+```powershell
+# Provision workers 5-8 (default)
+.\New-WorkerAppRegistrations.ps1
+
+# Provision only worker 6
+.\New-WorkerAppRegistrations.ps1 -StartWorker 6 -EndWorker 6
+
+# Preview everything without touching Azure
+.\New-WorkerAppRegistrations.ps1 -WhatIf
+
+# Overwrite existing config files
+.\New-WorkerAppRegistrations.ps1 -Force
+```
+
+**Parameters:**
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `StartWorker` | No | `5` | First worker number to provision (1-99) |
+| `EndWorker` | No | `8` | Last worker number to provision (1-99) |
+| `ConfigFile` | No | `appsettings.worker1.json` | Template config for tenant IDs |
+| `SecretExpiryYears` | No | `2` | Client secret validity period (1-5 years) |
+| `Force` | No | — | Overwrite existing `appsettings.workerN.json` files |
+| `WhatIf` | No | — | Preview actions without calling Graph API |
+
+**What it does per worker:**
+1. Creates a B2C app registration with `User.Read.All` (Application) + admin consent
+2. Creates an External ID app registration with `User.ReadWrite.All` (Application) + admin consent
+3. Generates a client secret for each registration
+4. Writes `appsettings.workerN.json` to `src/B2CMigrationKit.Console/`
+
+**Prerequisites:**
+- Application Administrator (or Global Administrator) role in both tenants
+- An existing `appsettings.worker1.json` (or specified template) with tenant IDs
+
+**Security:** Generated config files contain client secrets and are already in `.gitignore`.
+
+---
+
+### Analyze-Telemetry.ps1  *(Analyze migration telemetry)*
+
+Aggregates and analyzes telemetry JSONL files produced by migrate workers and phone
+registration workers. Outputs latency percentiles, throughput, throttle counts, and a
+cross-pipeline summary.
+
+**Usage:**
+```powershell
+# Aggregate all 4 workers (default)
+.\Analyze-Telemetry.ps1
+
+# Aggregate 8 workers
+.\Analyze-Telemetry.ps1 -WorkerCount 8
+
+# Analyze a single file
+.\Analyze-Telemetry.ps1 -TelemetryFile ..\src\B2CMigrationKit.Console\worker2-telemetry.jsonl
+```
+
+**Parameters:**
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `WorkerCount` | No | `4` | Number of workers to aggregate (loads `worker1..N-telemetry.jsonl`) |
+| `ConsoleDir` | No | `../src/B2CMigrationKit.Console` | Directory containing telemetry files |
+| `TelemetryFile` | No | — | Analyze a single JSONL file instead of aggregating |
+
+**Report sections:**
+- **Migrate Workers** — B2C fetch and EEID create latency (per-user and per-batch), wall time breakdown, throughput (users/sec), tail latency (>1s), and 429 throttle counts
+- **Phone Registration Workers** — Outcomes (succeeded/skipped/failed), B2C GET and EEID POST latency, throughput, failure breakdown by step and error code, throttle counts
+- **Cross-Pipeline Summary** — Total users migrated vs phones registered, coverage percentage
+
+**Note:** Only analyzes the last run per file (events before the last `*.Started` marker are ignored).
+
+---
+
+## Shared Helpers
+
+### _Common.ps1  *(Shared helper functions)*
+
+Shared PowerShell module dot-sourced by all local-run scripts. Provides:
+
+- **Output helpers** — Color-coded console output: `Write-Success` (green), `Write-Info` (cyan), `Write-Warn` (yellow), `Write-Err` (red)
+- **`Confirm-AzuriteRunning`** — Checks that Azurite blob (port 10000) and queue (port 10001) ports are open; exits with instructions if not
+- **`Get-StorageMode`** — Reads `ConnectionStringOrUri` from a config file and returns whether local Azurite or cloud storage is configured
+- **`Initialize-LocalStorage`** — Pre-creates queues (`user-ids-to-process`, `phone-registration`) and audit table via Azure CLI (if available)
+- **`Invoke-ConsoleApp`** — Builds and runs the .NET console application with the specified operation and config file
+
+This file is not meant to be run directly. Each script loads it via:
+```powershell
+. (Join-Path $PSScriptRoot "_Common.ps1")
+```
 
 ---
 

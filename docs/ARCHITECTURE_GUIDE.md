@@ -126,6 +126,63 @@ User Login → EEID checks RequiresMigration = true
 
 ---
 
+## 2.1 End-to-End Pipeline Narrative
+
+This section walks through the complete bulk migration pipeline from start to finish, explaining **why** each stage exists and how they connect.
+
+### Stage 1 — Harvest (single instance, run once)
+
+The harvest step pages all B2C users using the cheapest possible Graph query (`$select=id`, page size 999). It splits the collected IDs into batches of 20 and enqueues each batch as a single message to the `user-ids-to-process` queue. The harvest process exits when all pages have been processed.
+
+**Why batch of 20?** Graph `$batch` requests support up to 20 individual requests per call, so each queue message maps directly to one `$batch` call downstream.
+
+### Stage 2 — Worker-Migrate (N parallel instances)
+
+Each worker-migrate instance dequeues a batch message, fetches full user profiles from B2C via a single `POST /$batch` request (up to 20 profiles), transforms each profile to the External ID schema (UPN domain rewrite, extension attributes, email identity, random password), and creates the user in EEID via `POST /users`.
+
+After creating (or detecting a duplicate of) each user, the worker **enqueues a phone-registration message** containing `{ B2CUserId, EEIDUpn }` — no phone number, just references. Phone registration is a separate stage because:
+
+1. **Dependency**: The EEID user must exist before a phone method can be registered on it.
+2. **Rate limit isolation**: The `phoneMethods` API has its own stricter throttle budget (30 req/10s per app registration, ~3 RPS) vs user creation (~60 writes/s). Running phone registration inline would bottleneck the entire pipeline.
+
+### Stage 3 — Phone-Registration Worker (N parallel instances)
+
+Each phone-registration worker reads from the queue populated by **its paired worker-migrate instance**. For each message it fetches the phone number from B2C (`GET /authentication/phoneMethods`) and registers it in EEID (`POST /authentication/phoneMethods`). Phone numbers are fetched at drain time — never stored in the queue (PII protection).
+
+The worker runs with `ThrottleDelayMs` (default 400 ms) to stay under the `phoneMethods` rate limit. It treats 409 Conflict as success (idempotent).
+
+### Stage 4 — Telemetry & Audit
+
+All workers emit structured JSONL telemetry to local files (`worker{N}-telemetry.jsonl`, `phone-registration{N}-telemetry.jsonl`) and write audit records to Azure Table Storage (`migration-audit`). This enables post-run analysis via `Analyze-Telemetry.ps1` and full traceability of every user processed.
+
+### Stage 5 — Scaling
+
+Throughput scales along two axes:
+
+1. **More worker pairs** — each pair consists of one worker-migrate instance + one phone-registration instance, with **dedicated app registration pairs** (B2C + EEID) and **per-pair queues** for phone registration (e.g., `phone-reg-w1`, `phone-reg-w2`). This multiplies the API throttle budget linearly.
+2. **More concurrency within a worker** — increase `MaxConcurrency` (default 1, sweet spot 8). Beyond ~8 threads per app registration, latency spikes without throughput gains.
+
+### Per-Worker Queue Pairing
+
+Each worker-migrate instance communicates with its dedicated phone-registration worker through a **per-pair queue**, not a shared queue:
+
+```
+Worker 1  (App Reg B2C-1 / EEID-1)  ──► queue: phone-reg-w1  ──► Phone Worker 1
+Worker 2  (App Reg B2C-2 / EEID-2)  ──► queue: phone-reg-w2  ──► Phone Worker 2
+Worker 3  (App Reg B2C-3 / EEID-3)  ──► queue: phone-reg-w3  ──► Phone Worker 3
+Worker N  (App Reg B2C-N / EEID-N)  ──► queue: phone-reg-wN  ──► Phone Worker N
+```
+
+**Why per-pair queues?**
+
+- **Throttle isolation**: Each phone-registration worker uses its own app registration, so its 30 req/10s budget is independent.
+- **Clean telemetry**: Per-worker JSONL files stay isolated, making analysis straightforward.
+- **No cross-contamination**: If a worker restarts, only its own queue has stale messages.
+
+> **⚠️ Stale messages**: If you re-run a migration without clearing per-worker queues, the phone-registration workers will process leftover messages from the prior run. This causes >100% coverage in telemetry analysis. Clear queues before re-running: `az storage queue clear --name phone-reg-w1 --connection-string "UseDevelopmentStorage=true"`.
+
+---
+
 ## 3. Design Principles
 
 > **🚧 Note**: Principles describe the **target production architecture**. v1.0 implements core migration for local development. SFI features (Private Endpoints, VNet, Key Vault) are design guidance for future releases.
@@ -136,7 +193,7 @@ User Login → EEID checks RequiresMigration = true
 | **Security First** | Target: Private Endpoints, Managed Identity, Key Vault. Current v1.0: client secrets for local dev. Encryption at rest + in transit (TLS 1.2+). Least privilege permissions. |
 | **Observability** | Structured logging (App Insights), run summaries, distributed tracing, custom metrics. |
 | **Reliability** | Idempotent operations, graceful degradation, checkpoint/resume via queue visibility timeouts, Polly exponential backoff + jitter on 429s. |
-| **Scalability** | Multi-app parallelization (dedicated app registration pairs per worker). Tested: **4 workers × 8 threads ≈ 2,076 users/min** with zero throttles. Stateless workers, batched Graph API calls (20 IDs per message). |
+| **Scalability** | Multi-app parallelization via per-worker-pair queues (see [§2.1](#21-end-to-end-pipeline-narrative)). Each worker pair has dedicated app registrations (B2C + EEID) and a per-pair phone-registration queue. Two scaling axes: add more worker pairs (linear throughput), or increase `MaxConcurrency` within a worker (sweet spot: 8). Tested: **4 workers × 8 threads ≈ 2,076 users/min** with zero throttles. |
 
 ---
 

@@ -164,6 +164,8 @@ Throughput scales along two axes:
 
 ### Per-Worker Queue Pairing
 
+> **Note**: Per-pair queues are a **configuration pattern**, not an automatic feature. By default, all workers share a single `phone-registration` queue (suitable for single-instance or smoke-test runs). For multi-instance production deployments, configure each worker pair with a distinct `PhoneRegistration.QueueName` (e.g., `phone-reg-w1`, `phone-reg-w2`) to achieve throttle isolation.
+
 Each worker-migrate instance communicates with its dedicated phone-registration worker through a **per-pair queue**, not a shared queue:
 
 ```

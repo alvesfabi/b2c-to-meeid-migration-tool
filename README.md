@@ -14,14 +14,14 @@ A toolkit for migrating users from Azure AD B2C to Microsoft Entra External ID w
 
 This migration kit provides a sample solution for identity migration with:
 
-- ✅ **Bulk Export/Import** - Efficient batch processing with retry logic and throttling management
+- ✅ **Bulk Migration** - Queue-based pipeline (harvest → worker-migrate → phone-registration) with retry logic and throttling management
 - ✅ **Just-In-Time (JIT) Password Migration** - Seamless password migration on user's first login
 
 ## 🏗️ Architecture
 
 **Key Components:**
 
-1. **B2CMigrationKit.Console** - CLI tool for export/import/harvest/phone-registration operations
+1. **B2CMigrationKit.Console** - CLI tool for bulk migration operations (harvest, worker-migrate, phone-registration)
 2. **B2CMigrationKit.Function** - Azure Function for JIT password migration
 3. **B2CMigrationKit.Core** - Shared business logic and services
 
@@ -88,7 +88,7 @@ graph TB
 - **Structured Logging** with optional Application Insights telemetry (requires a connection string; untested outside local development)
 - **Local Development Mode** using Azurite emulator (no Azure resources)
   
-> **⚠️ PREVIEW/SAMPLE STATUS**: This toolkit is currently a **sample implementation** to showcase how to implement the [Just-In-Time password migration public preview](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-migrate-passwords-just-in-time?tabs=graph) for export, import and JIT function. Production-ready features including full SFI compliance (Private Endpoints, VNet integration, automated infrastructure deployment) are planned for future releases. 
+> **⚠️ PREVIEW/SAMPLE STATUS**: This toolkit is currently a **sample implementation** to showcase how to implement the [Just-In-Time password migration public preview](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-migrate-passwords-just-in-time?tabs=graph) for bulk migration and JIT password migration. Production-ready features including full SFI compliance (Private Endpoints, VNet integration, automated infrastructure deployment) are planned for future releases. 
 
 ## 📚 Documentation
 
@@ -97,7 +97,7 @@ This migration kit includes two comprehensive guides:
 ### [Architecture Guide](docs/ARCHITECTURE_GUIDE.md)
 Complete architectural overview for solutions architects, technical leads, and security reviewers:
 - Executive summary and system design
-- Component architecture (Export, Import, JIT)
+- Component architecture (Harvest, Worker-Migrate, Phone-Registration, JIT)
 - Security architecture and compliance patterns
 - Scalability, performance benchmarks, and multi-instance deployments
 - Deployment topologies and operational considerations

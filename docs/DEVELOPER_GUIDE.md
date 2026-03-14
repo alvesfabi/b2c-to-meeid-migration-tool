@@ -549,12 +549,13 @@ If sustained 429s on phoneMethods, increase `PhoneRegistration.ThrottleDelayMs`.
 
 ### Scaling Patterns
 
-| Scale | Setup | Throughput |
-|---|---|---|
-| Single instance | 1 process, 1 app reg, 1 IP | ~60 ops/sec |
-| Multiple instances | N processes, N IPs, N app regs | ~N × 60 ops/sec |
+| Scale | Setup | API ceiling | Measured throughput |
+|---|---|---|---|
+| Single instance | 1 process, 8 threads, 1 app reg | ~60 writes/s | ~470 u/min (~7.8/s) |
+| 4 instances | 4 processes, 8 threads each, 4 app regs | ~240 writes/s | ~2,076 u/min (~34.6/s) |
+| N instances | N processes, N IPs, N app regs | ~N × 60 writes/s | Linear up to 200 RPS tenant ceiling |
 
-Recommended: single instance up to ~100K users; multiple instances for larger volumes. See [Architecture Guide](ARCHITECTURE_GUIDE.md) for benchmarks.
+Recommended: single instance up to ~100K users; multiple instances for larger volumes. For >4 instances, use distinct IPs (separate VMs/ACI/AKS pods). See [Architecture Guide](ARCHITECTURE_GUIDE.md) for detailed benchmarks.
 
 ## Troubleshooting
 

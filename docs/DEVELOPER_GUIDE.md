@@ -75,10 +75,35 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
     "Storage": { ... },
     "Telemetry": { ... },
     "Retry": { ... },
+    "MaxConcurrency": 1,
     "BatchSize": 100
   }
 }
 ```
+
+#### MaxConcurrency
+
+Controls the number of concurrent Graph API calls within a single process instance. Both `MigrationOptions` (root level, used by worker-migrate) and `PhoneRegistrationOptions` expose this setting independently.
+
+```json
+{
+  "Migration": {
+    "MaxConcurrency": 4,
+    "PhoneRegistration": {
+      "MaxConcurrency": 2
+    }
+  }
+}
+```
+
+- **Root `MaxConcurrency`** (default: `1`) — parallel user-creation calls in worker-migrate. Increase to 4–8 for higher throughput on a single instance (monitor for 429s).
+- **`PhoneRegistration.MaxConcurrency`** (default: `1`) — parallel phone-registration calls. Keep low due to the stricter phoneMethods API throttle budget.
+
+> **Tip:** Increasing concurrency within a single process is limited by the per-app-registration and per-IP throttle budgets. For significant scale, run **multiple instances** on separate IPs with dedicated app registrations (see [Scaling Patterns](#console-app-scaling)).
+
+#### BatchSize
+
+Legacy configuration field (default: `100`). Currently unused by the queue-based orchestrators — batch sizes are controlled by `Harvest.IdsPerMessage` and queue message granularity. Retained for backward compatibility.
 
 ### B2C Configuration
 
@@ -167,6 +192,7 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
 - `MessageVisibilityTimeoutSeconds` — How long a message is invisible while being processed. If the worker crashes, the message reappears after this timeout.
 - `EmptyQueuePollDelayMs` — How long the worker sleeps between polls when the queue is empty.
 - `MaxEmptyPolls` — How many consecutive empty polls before the CLI process exits cleanly.
+- `UseFakePhoneWhenMissing` — (**Load-test only**, default: `false`). When `true`, generates synthetic phone numbers (`+1555XXXXXXX`) for users who have no MFA phone in B2C, allowing stress-testing of the EEID phoneMethods API without real phone data. **⚠️ NEVER enable in production** — it will register fake phone numbers on real user accounts.
 
 > **Why async?** The phoneMethods API has a significantly lower throttle budget than the user-creation API. Decoupling via queue lets worker-migrate proceed at full speed while phone registration runs independently at a safe rate.
 
@@ -180,7 +206,29 @@ The toolkit uses hierarchical configuration with `MigrationOptions` as the root:
 }
 ```
 
-**Required Roles:**
+#### Audit Mode
+
+The `AuditMode` setting controls where migration audit records are written:
+
+```json
+{
+  "Migration": {
+    "Storage": {
+      "AuditMode": "Table",
+      "AuditTableName": "migrationAudit",
+      "AuditFilePath": "migration-audit.jsonl"
+    }
+  }
+}
+```
+
+| Mode | Backend | Description |
+|---|---|---|
+| `Table` | Azure Table Storage (or Azurite) | **Default.** Production-grade, queryable audit trail. |
+| `File` | Local JSONL file | Writes one JSON object per line to `AuditFilePath`. Useful for local development when Azurite is unavailable or causes contention. Thread-safe. |
+| `None` | No-op (`NullAuditClient`) | Disables audit logging entirely. Use only for quick smoke tests. |
+
+**Required Roles** (when `AuditMode` is `Table`):
 - Console/Function Managed Identity needs:
   - `Storage Queue Data Contributor`
   - `Storage Table Data Contributor`
@@ -809,6 +857,9 @@ http://localhost:4040
 **Symptom:** User enters correct B2C password but no JIT call happens
 
 **Solutions:**
+
+> **Prerequisite:** The commands below use `Get-MgUser` from the [Microsoft Graph PowerShell SDK](https://learn.microsoft.com/powershell/microsoftgraph/installation). Install with `Install-Module Microsoft.Graph -Scope CurrentUser` and connect with `Connect-MgGraph -Scopes "User.Read.All"`.
+
 ```powershell
 # Verify user has random password (not real B2C password)
 Get-MgUser -UserId "user@domain.com" | Select-Object PasswordProfile
@@ -939,6 +990,10 @@ az functionapp config appsettings set `
 - `authenticationMethod` API limit: **30 req/10s per app registration (~3 RPS)** — default `ThrottleDelayMs` is 400 ms; increase if you see sustained 429s
 - View retry logs: `[GraphClient] Request throttled (429/503) - Retrying in X ms...`
 - For load testing, add delays between requests
+
+#### Reference Implementation
+
+The file `src/B2CMigrationKit.Function/sample/sample.cs` contains a standalone Azure WebJobs-style JIT migration function adapted from Microsoft's official documentation. It serves as a **reference implementation** showing the raw Custom Authentication Extension contract (payload parsing, RSA decryption, ROPC validation, and Graph API user updates) without the production abstractions used in this project. Useful for understanding the underlying protocol or as a starting point for custom implementations.
 
 #### JIT Debugging Tips
 

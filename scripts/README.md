@@ -601,6 +601,69 @@ cross-pipeline summary.
 - **Phone Registration Workers** — Outcomes (succeeded/skipped/failed), B2C GET and EEID POST latency, throughput, failure breakdown by step and error code, throttle counts
 - **Cross-Pipeline Summary** — Total users migrated vs phones registered, coverage percentage
 
+#### JSONL Telemetry Format
+
+Each worker emits one JSON object per line to its telemetry file. Every event has a `ts` (ISO-8601 timestamp) and `name` field, plus event-specific fields:
+
+| Event Name | Emitted By | Fields | Description |
+|---|---|---|---|
+| `WorkerMigrate.Started` | worker-migrate | *(none)* | Run boundary marker — marks the start of a new run |
+| `WorkerMigrate.B2CFetch` | worker-migrate | `fetchMs` | Time to fetch a batch of profiles from B2C via `$batch` |
+| `WorkerMigrate.UserCreated` | worker-migrate | `eeidCreateMs`, `eeidApiMs` | Per-user EEID creation timing (total operation vs pure API call) |
+| `WorkerMigrate.BatchDone` | worker-migrate | `b2cFetchMs`, `eeidAvgMs`, `eeidMaxMs` | Per-batch summary: B2C fetch time, average and max EEID create time |
+| `Graph.Throttled` | both | `tenantRole` (`B2C` or `EEID`) | A 429 response was received (Polly will retry) |
+| `PhoneRegistration.Started` | phone-registration | *(none)* | Run boundary marker for phone registration |
+| `PhoneRegistration.Success` | phone-registration | `b2cGetPhoneMs`, `eeidRegisterMs`, `totalMs` | Phone successfully registered in EEID |
+| `PhoneRegistration.Skipped` | phone-registration | `b2cGetPhoneMs` | User has no phone number in B2C — nothing to register |
+| `PhoneRegistration.Failed` | phone-registration | `step` (`b2c-get-phone` or `eeid-register`), `errorCode` | Phone registration failed after retries exhausted |
+| `PhoneRegistration.B2CApiCall` | phone-registration | `b2cGetPhoneMs` | Every B2C GET phone call (success, skip, and failed) |
+| `PhoneRegistration.EEIDApiCall` | phone-registration | `eeidRegisterMs` | Every EEID POST phone call (success and failed) |
+
+**Example JSONL lines:**
+
+```jsonl
+{"ts":"2026-03-14T10:00:00.000Z","name":"WorkerMigrate.Started"}
+{"ts":"2026-03-14T10:00:01.234Z","name":"WorkerMigrate.B2CFetch","fetchMs":"842"}
+{"ts":"2026-03-14T10:00:02.567Z","name":"WorkerMigrate.UserCreated","eeidCreateMs":"1354","eeidApiMs":"1280"}
+{"ts":"2026-03-14T10:00:03.890Z","name":"WorkerMigrate.BatchDone","b2cFetchMs":"842","eeidAvgMs":"1300","eeidMaxMs":"1520"}
+{"ts":"2026-03-14T10:00:04.100Z","name":"Graph.Throttled","tenantRole":"EEID"}
+{"ts":"2026-03-14T10:05:00.000Z","name":"PhoneRegistration.Started"}
+{"ts":"2026-03-14T10:05:01.200Z","name":"PhoneRegistration.Success","b2cGetPhoneMs":"310","eeidRegisterMs":"420","totalMs":"730"}
+{"ts":"2026-03-14T10:05:02.100Z","name":"PhoneRegistration.Skipped","b2cGetPhoneMs":"280"}
+{"ts":"2026-03-14T10:05:03.500Z","name":"PhoneRegistration.Failed","step":"eeid-register","errorCode":"Authorization_RequestDenied"}
+{"ts":"2026-03-14T10:05:01.200Z","name":"PhoneRegistration.B2CApiCall","b2cGetPhoneMs":"310"}
+{"ts":"2026-03-14T10:05:01.600Z","name":"PhoneRegistration.EEIDApiCall","eeidRegisterMs":"420"}
+```
+
+#### File Naming Convention
+
+Telemetry files are written to the console application directory (`src/B2CMigrationKit.Console/`):
+
+| Worker Type | File Pattern | Example |
+|---|---|---|
+| Worker-migrate | `worker{N}-telemetry.jsonl` | `worker1-telemetry.jsonl`, `worker2-telemetry.jsonl` |
+| Phone-registration | `phone-registration{N}-telemetry.jsonl` | `phone-registration1-telemetry.jsonl` |
+
+The `-WorkerCount` parameter tells the script how many file pairs to load (default: 4).
+
+#### Last-Run Boundary Logic
+
+Each telemetry file may contain events from multiple runs (e.g., if the worker was restarted). The script finds the **last** `WorkerMigrate.Started` (or `PhoneRegistration.Started`) event in each file and **ignores all events before it**. This ensures the report reflects only the most recent run.
+
+If no `*.Started` marker is found, all events in the file are included.
+
+#### Analysis Pipeline
+
+The script computes the following for each section:
+
+1. **Latency percentiles** — p50, p90, p95, p99, min, max, and average for each metric (B2C fetch, EEID create, phone GET/POST, etc.)
+2. **Wall-time breakdown** — Percentage of total batch wall time spent in B2C fetch vs EEID create (migrate) or B2C GET vs EEID POST (phone)
+3. **Throughput** — Users/sec and users/min (migrate), messages/sec and registered/min (phone), calculated from first `*.Started` to last event timestamp
+4. **Theoretical max** — Best-case throughput based on average and minimum batch wall times (migrate only)
+5. **Tail latency** — Count and percentage of operations exceeding 1 second
+6. **Throttle counts** — 429 responses broken down by tenant (B2C vs EEID)
+7. **Cross-pipeline coverage** — Users migrated vs phone messages processed; coverage >100% indicates stale messages from a prior run (clear per-worker queues with `az storage queue clear`)
+
 **Note:** Only analyzes the last run per file (events before the last `*.Started` marker are ignored).
 
 ---

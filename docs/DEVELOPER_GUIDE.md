@@ -1562,7 +1562,7 @@ traces
 | render timechart
 ```
 
-If you see sustained 429s, increase `PhoneRegistration.ThrottleDelayMs` in your config (e.g., from 1200 to 2000).
+If you see sustained 429s, increase `PhoneRegistration.ThrottleDelayMs` in your config (e.g., from 400 to 800).
 
 **Key Counters:**
 | Metric | Description |

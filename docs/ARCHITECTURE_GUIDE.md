@@ -243,7 +243,7 @@ public class WorkerMigrateOrchestrator : IOrchestrator
 Pages B2C with `$select=id` (~10× cheaper than full profile fetch), splits into batches of `IdsPerMessage` (default: 20), enqueues to `user-ids-to-process`. Single instance, exits on completion.
 
 - **Permissions**: B2C `User.Read.All` (Application) — read-only, no EEID access needed
-- **Config**: `HarvestOptions.PageSize` (default: 999), `HarvestOptions.BatchSize` (default: 20)
+- **Config**: `HarvestOptions.PageSize` (default: 999), `HarvestOptions.IdsPerMessage` (default: 20)
 
 ### 5.2 Worker Migrate
 

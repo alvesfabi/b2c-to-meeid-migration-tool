@@ -194,7 +194,7 @@ Key metrics: `harvest.users.enqueued`, `WorkerMigrate.UserCreated/Duplicate/Fail
 cd src/B2CMigrationKit.Console
 cp appsettings.master.example.json appsettings.master.json
 cp appsettings.worker1.example.json appsettings.worker1.json
-cp appsettings.phone-registration.example.json appsettings.phone-registration1.json
+cp appsettings.phone-registration.example.json appsettings.phone-registration.json
 # Edit each file with your tenant credentials
 ```
 
@@ -222,10 +222,10 @@ Workers auto-exit when queue is empty. Existing users recorded as `Duplicate` (p
 **3. Phone Registration** — drains phone queue, registers MFA phones in EEID.
 ```powershell
 # Single instance
-.\scripts\Start-LocalPhoneRegistration.ps1 -ConfigFile appsettings.phone-registration1.json -VerboseLogging
+.\scripts\Start-LocalPhoneRegistration.ps1 -VerboseLogging
 
-# Parallel (separate terminal per instance)
-.\scripts\Start-LocalPhoneRegistration.ps1 -ConfigFile appsettings.phone-registration1.json
+# Parallel (separate terminal per instance, each with different app registrations)
+.\scripts\Start-LocalPhoneRegistration.ps1 -ConfigFile appsettings.phone-registration.json
 .\scripts\Start-LocalPhoneRegistration.ps1 -ConfigFile appsettings.phone-registration2.json
 ```
 

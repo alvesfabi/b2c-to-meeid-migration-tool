@@ -130,7 +130,47 @@ public static class ServiceCollectionExtensions
 
         // Register orchestrators and services
 
-        // HarvestOrchestrator: uses B2C Graph client + queue
+        // ExportOrchestrator (Mode A): B2C Graph client + blob storage
+        services.AddScoped<ExportOrchestrator>(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<MigrationOptions>>().Value;
+            var credManagers = sp.GetRequiredService<IEnumerable<ICredentialManager>>();
+            var telemetry = sp.GetRequiredService<ITelemetryService>();
+            var factoryLogger = sp.GetRequiredService<ILogger<GraphClientFactory>>();
+            var clientLogger = sp.GetRequiredService<ILogger<GraphClient>>();
+            var retryOptions = sp.GetRequiredService<IOptions<RetryOptions>>();
+            var blobClient = sp.GetRequiredService<IBlobStorageClient>();
+            var orchestratorLogger = sp.GetRequiredService<ILogger<ExportOrchestrator>>();
+
+            var factory = new GraphClientFactory(credManagers.First(), factoryLogger, telemetry);
+            var graphServiceClient = factory.CreateClient(options.B2C.Scopes);
+            var graphClient = new GraphClient(graphServiceClient, retryOptions, clientLogger, telemetry, "B2C");
+
+            return new ExportOrchestrator(graphClient, blobClient, telemetry,
+                Options.Create(options), orchestratorLogger);
+        });
+
+        // ImportOrchestrator (Mode A): EEID Graph client + blob storage
+        services.AddScoped<ImportOrchestrator>(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<MigrationOptions>>().Value;
+            var credManagers = sp.GetRequiredService<IEnumerable<ICredentialManager>>().ToList();
+            var telemetry = sp.GetRequiredService<ITelemetryService>();
+            var factoryLogger = sp.GetRequiredService<ILogger<GraphClientFactory>>();
+            var clientLogger = sp.GetRequiredService<ILogger<GraphClient>>();
+            var retryOptions = sp.GetRequiredService<IOptions<RetryOptions>>();
+            var blobClient = sp.GetRequiredService<IBlobStorageClient>();
+            var orchestratorLogger = sp.GetRequiredService<ILogger<ImportOrchestrator>>();
+
+            var factory = new GraphClientFactory(credManagers.Last(), factoryLogger, telemetry);
+            var graphServiceClient = factory.CreateClient(options.ExternalId.Scopes);
+            var graphClient = new GraphClient(graphServiceClient, retryOptions, clientLogger, telemetry, "EEID");
+
+            return new ImportOrchestrator(graphClient, blobClient, telemetry,
+                Options.Create(options), orchestratorLogger);
+        });
+
+        // HarvestOrchestrator (Mode B): uses B2C Graph client + queue
         services.AddScoped<HarvestOrchestrator>(sp =>
         {
             var options = sp.GetRequiredService<IOptions<MigrationOptions>>().Value;

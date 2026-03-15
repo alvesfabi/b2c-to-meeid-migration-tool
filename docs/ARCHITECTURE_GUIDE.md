@@ -20,7 +20,7 @@
 
 ## 1. Executive Summary
 
-The **B2C Migration Kit** migrates user identities from **Azure AD B2C** to **Microsoft Entra External ID** with two migration modes:
+The **B2C Migration Kit** migrates user identities from **Azure AD B2C** to **Microsoft Entra External ID**.
 
 The kit has two independent concerns:
 

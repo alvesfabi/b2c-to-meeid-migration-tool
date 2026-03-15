@@ -270,7 +270,7 @@ Config patterns: **Local** → `ClientSecret` with actual value. **Production** 
 
 ### Running Simple Mode (Export → Import)
 
-Two commands, no queues. Best for <50K users without MFA phone migration.
+Two commands, no queues. Best for small & medium tenant, < 1 million users without MFA phone migration.
 
 **1. Export** — pages B2C users to Blob Storage JSON files.
 ```powershell
@@ -600,19 +600,6 @@ az functionapp restart --name func-b2c-migration --resource-group rg-b2c-migrati
 
 > Always restart after deployment to load new binaries.
 
-### Infrastructure (Planned for v2.0)
-
-Bicep/Terraform templates, Private Endpoints, Managed Identity setup. For now:
-
-```bash
-# Enable Managed Identity
-az functionapp identity assign --name func-b2c-migration --resource-group rg-b2c-migration
-
-# Grant storage roles
-az role assignment create --assignee <mi-id> --role "Storage Queue Data Contributor" --scope <storage-id>
-az role assignment create --assignee <mi-id> --role "Storage Table Data Contributor" --scope <storage-id>
-```
-
 ## Operations & Monitoring
 
 > KQL queries below are reference patterns. Configure App Insights with `Telemetry:UseApplicationInsights: true`.
@@ -637,7 +624,7 @@ If sustained 429s on phoneMethods, increase `PhoneRegistration.ThrottleDelayMs`.
 
 ### Scaling Patterns
 
-Scale by adding worker instances with dedicated app registrations and distinct IPs. Increase `MaxConcurrency` within a worker (sweet spot: 8) for more parallelism per instance. For multiple instances, use separate VMs/ACI/AKS pods to avoid per-IP soft limits. See [Architecture Guide](ARCHITECTURE_GUIDE.md) for architecture details.
+Scale by adding worker instances with dedicated app registrations and distinct IPs. Increase `MaxConcurrency` within a worker for more parallelism per instance. For multiple instances, use separate VMs/ACI/AKS pods to avoid per-IP soft limits. See [Architecture Guide](ARCHITECTURE_GUIDE.md) for architecture details.
 
 ## Troubleshooting
 

@@ -24,15 +24,18 @@
 
 The **B2C Migration Kit** migrates user identities from **Azure AD B2C** to **Microsoft Entra External ID** with two migration modes:
 
-- **Mode A — Export/Import**: Simple blob-based pipeline (`export` → Blob Storage → `import`). Best for small tenants, no MFA phone migration needed.
-- **Mode B — Workers**: Queue-based parallel pipeline (`harvest` → `worker-migrate` → `phone-registration`). Best for large tenants, full MFA phone migration, parallel scaling.
-- **JIT Password Migration**: Seamless password validation on first login via Custom Authentication Extension (works with both modes).
+The kit has two independent concerns:
 
-### Choose Your Migration Mode
+1. **Bulk user migration** — export/import user profiles from B2C to External ID, with two modes:
+   - **Mode A — Export/Import**: Simple blob-based pipeline (`export` → Blob Storage → `import`). Best for small tenants, no MFA phone migration needed.
+   - **Mode B — Workers**: Queue-based parallel pipeline (`harvest` → `worker-migrate` → `phone-registration`). Best for large tenants, full MFA phone migration, parallel scaling.
+2. **JIT Password Migration** — Seamless password validation on first login via Custom Authentication Extension. Works independently of which bulk mode you choose — it runs as an Azure Function triggered on each user's first login after bulk migration.
+
+### Choose Your Bulk Migration Mode
 
 | Factor | Mode A (Export/Import) | Mode B (Workers) |
 |--------|----------------------|-------------------|
-| **Best for** | <50K users, no MFA phones | Any size, MFA phone migration |
+| **Best for** | Small/medium tenants, no MFA phones | Large tenants, MFA phone migration |
 | **Infrastructure** | Blob Storage only | Queue + Table Storage |
 | **Parallelism** | Single-threaded | N worker pairs, configurable concurrency |
 | **MFA phones** | ❌ Not supported | ✅ Full phone method migration |
@@ -267,7 +270,7 @@ Worker N  (App Reg B2C-N / EEID-N)  ──► queue: phone-reg-wN  ──► Pho
 | **Security First** | Target: Private Endpoints, Managed Identity, Key Vault. Current v1.0: client secrets for local dev. Encryption at rest + in transit (TLS 1.2+). Least privilege permissions. |
 | **Observability** | Structured logging (App Insights), run summaries, distributed tracing, custom metrics. |
 | **Reliability** | Idempotent operations, graceful degradation, checkpoint/resume via queue visibility timeouts, Polly exponential backoff + jitter on 429s. |
-| **Scalability** | Multi-app parallelization via per-worker-pair queues (see [§2.1](#21-end-to-end-pipeline-narrative)). Each worker pair has dedicated app registrations (B2C + EEID) and a per-pair phone-registration queue. Two scaling axes: add more worker pairs (linear throughput), or increase `MaxConcurrency` within a worker (sweet spot: 8). Tested: **4 workers × 8 threads ≈ 2,076 users/min** with zero throttles. |
+| **Scalability** | Multi-app parallelization via per-worker-pair queues (see [§2.1](#21-end-to-end-pipeline-narrative)). Each worker pair has dedicated app registrations (B2C + EEID) and a per-pair phone-registration queue. Two scaling axes: add more worker pairs (linear throughput), or increase `MaxConcurrency` within a worker (sweet spot: 8). |
 
 ---
 
@@ -486,28 +489,11 @@ Beyond **~8 threads per app registration**, no 429s are returned but latency spi
 
 ### Benchmarks
 
-All runs: real B2C tenant (~23K users), real EEID tenant, Azurite local storage, same developer workstation.
-
-| Configuration | Throughput | Avg latency | EEID max | 429s |
-|---|---|---|---|---|
-| 1 worker, 8 threads | ~470 u/min | 1,563 ms | — | 0 |
-| **4 workers, 8 threads** | **~2,076 u/min** | **1,354 ms** | — | **0** |
-| 4 workers, 16 threads | ~870 u/min | 1,731 ms | 50,266 ms | 0 |
-
-Time split at sweet spot: ~48% B2C fetch, ~52% EEID create (well balanced).
+> **⚠️ Pending**: Formal multi-machine benchmarks have not been conducted yet. The numbers below are from preliminary single-workstation runs and should not be treated as production reference data. A proper benchmark with multiple PCs and dedicated app registrations is planned.
 
 ### Scaling Projection
 
-Linear up to ~200 RPS tenant ceiling. Each worker needs a **dedicated app registration pair** (B2C + EEID).
-
-| Workers | Threads | Throughput | Status |
-|---|---|---|---|
-| 1 | 8 | ~470 u/min | Tested |
-| 4 | 8 | ~2,076 u/min | Tested ✓ |
-| 8 | 8 | ~4,150 u/min | Projected |
-| ~23 | 8 | ~12,000 u/min | ~200 RPS ceiling |
-
-For >4 workers, use distinct IPs (separate VMs/ACI/AKS pods) to avoid per-IP soft limits.
+Linear scaling expected up to ~200 RPS tenant ceiling. Each worker needs a **dedicated app registration pair** (B2C + EEID). For multiple workers, use distinct IPs (separate VMs/ACI/AKS pods) to avoid per-IP soft limits.
 
 ### Retry Policy
 
@@ -539,11 +525,10 @@ Developer Workstation
 ### Multi-Instance Deployment
 
 ```
-Container 1  (App Reg B2C-1/EEID-1, IP: 10.0.1.10)  → ~520 u/min
-Container 2  (App Reg B2C-2/EEID-2, IP: 10.0.1.11)  → ~520 u/min
+Container 1  (App Reg B2C-1/EEID-1, IP: 10.0.1.10)
+Container 2  (App Reg B2C-2/EEID-2, IP: 10.0.1.11)
 ...
-Container N  (App Reg B2C-N/EEID-N, IP: 10.0.1.NN)  → ~520 u/min
-= N × ~520 u/min  (hard cap: ~12,000 u/min at 200 RPS)
+Container N  (App Reg B2C-N/EEID-N, IP: 10.0.1.NN)
 ```
 
 Options: ACI, AKS (StatefulSet), or separate VMs.

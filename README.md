@@ -14,10 +14,13 @@ A toolkit for migrating users from Azure AD B2C to Microsoft Entra External ID w
 
 This migration kit provides a sample solution for identity migration with:
 
-- ✅ **Two Bulk Migration Modes** — choose the right complexity for your scenario
-- ✅ **Just-In-Time (JIT) Password Migration** — seamless password migration on user's first login
+- ✅ **Two Bulk Migration Modes** — choose the right complexity for your bulk user export/import
+- ✅ **Just-In-Time (JIT) Password Migration** — seamless password migration on user's first login (independent of bulk mode choice)
 
-### Choose Your Migration Mode
+### Choose Your Bulk Migration Mode
+
+Both modes handle bulk user export/import. JIT password migration works independently with either mode — it runs as an Azure Function triggered on each user's first login.
+
 
 | | **Mode A: Simple Export/Import** | **Mode B: Queue-based Workers** |
 |---|---|---|
@@ -47,6 +50,18 @@ graph LR
 
     style Export fill:#0078d4,color:#fff
     style Import fill:#0078d4,color:#fff
+```
+
+### JIT Password Migration (works with both modes)
+
+```mermaid
+graph LR
+    User[User Login] -->|First login| ExtID[Entra External ID]
+    ExtID -->|Custom Auth Extension| JIT[Azure Function]
+    JIT -->|Validate password via ROPC| B2C[(Azure AD B2C)]
+    JIT -->|MigratePassword| ExtID
+
+    style JIT fill:#107c10,color:#fff
 ```
 
 ### Mode B: Queue-based Workers
@@ -80,21 +95,9 @@ graph TB
         PhoneWorker -->|Audit record| AuditTable
     end
 
-    subgraph "Step 3: JIT Password Migration"
-        User[User Login]
-        ExtIDLogin[External ID<br/>Sign-In Policy]
-        JIT[3. JIT Function<br/>HTTP Trigger]
-
-        User -->|First login attempt| ExtIDLogin
-        ExtIDLogin -->|Call with credentials| JIT
-        JIT -->|Validate credentials via ROPC| B2C
-        JIT -->|Return MigratePassword action| ExtIDLogin
-    end
-
     style Harvest fill:#0078d4,color:#fff
     style Worker fill:#0078d4,color:#fff
     style PhoneWorker fill:#0078d4,color:#fff
-    style JIT fill:#107c10,color:#fff
 ```
 
 ---

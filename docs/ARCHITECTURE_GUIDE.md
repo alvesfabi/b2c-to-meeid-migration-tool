@@ -20,8 +20,6 @@
 
 ## 1. Executive Summary
 
-> **⚠️ IMPORTANT**: This document describes the **target architecture**. The current release (v1.0) is a **sample/preview** validated for local development. Production features (SFI compliance, Key Vault integration, automated deployment) are documented as design patterns for future releases.
-
 The **B2C Migration Kit** migrates user identities from **Azure AD B2C** to **Microsoft Entra External ID** with two migration modes:
 
 The kit has two independent concerns:
@@ -35,18 +33,12 @@ The kit has two independent concerns:
 
 | Factor | Simple Mode (Export/Import) | Advanced Mode (Workers) |
 |--------|----------------------|-------------------|
-| **Best for** | Small/medium tenants, no MFA phones | Large tenants, MFA phone migration |
+| **Best for** | Small/medium tenants < 1 million users, no MFA phones | Large tenants, MFA phone migration |
 | **Infrastructure** | Blob Storage only | Queue + Table Storage |
 | **Parallelism** | Single-threaded | N worker pairs, configurable concurrency |
-| **MFA phones** | ❌ Not supported | ✅ Full phone method migration |
+| **MFA phones** | ❌ Not implemented | ✅ Full phone method migration |
 | **Commands** | `export` → `import` (2 steps) | `harvest` → `worker-migrate` → `phone-registration` (3 steps) |
 | **Complexity** | Low | Medium |
-
-| Scenario | Recommendation |
-|----------|----------------|
-| B2C → External ID (User Flows, no custom policies) | ✅ Primary use case |
-| Local development & testing | ✅ Fully validated |
-| Production with SFI requirements | ⚠️ Wait for future release or implement security hardening |
 
 ---
 
@@ -201,8 +193,6 @@ Simple Mode is a straightforward two-step pipeline:
 
 **Why blobs?** For small tenants, the overhead of queues and Table Storage is unnecessary. Blobs provide a simple checkpoint — if import fails mid-blob, re-run skips duplicates (409 = idempotent). Export blobs also serve as a backup of the source data.
 
-**Why no phone migration?** The `phoneMethods` API's strict throttle budget (30 req/10s) makes sequential processing impractical for any meaningful user count. Advanced Mode's parallel workers with dedicated app registrations solve this.
-
 ### Advanced Mode — Worker Pipeline Narrative
 
 ### Stage 1 — Harvest (single instance, run once)
@@ -218,7 +208,7 @@ Each worker-migrate instance dequeues a batch message, fetches full user profile
 After creating (or detecting a duplicate of) each user, the worker **enqueues a phone-registration message** containing `{ B2CUserId, EEIDUpn }` — no phone number, just references. Phone registration is a separate stage because:
 
 1. **Dependency**: The EEID user must exist before a phone method can be registered on it.
-2. **Rate limit isolation**: The `phoneMethods` API has its own stricter throttle budget (30 req/10s per app registration, ~3 RPS) vs user creation (~60 writes/s). Running phone registration inline would bottleneck the entire pipeline.
+2. **Rate limit isolation**: The `phoneMethods` API has its own throttle budget. Running phone registration inline would bottleneck the entire pipeline.
 
 ### Stage 3 — Phone-Registration Worker (N parallel instances)
 
@@ -252,7 +242,7 @@ Worker N  (App Reg B2C-N / EEID-N)  ──► queue: phone-reg-wN  ──► Pho
 
 **Why per-pair queues?**
 
-- **Throttle isolation**: Each phone-registration worker uses its own app registration, so its 30 req/10s budget is independent.
+- **Throttle isolation**: Each phone-registration worker uses its own app registration.
 - **Clean telemetry**: Per-worker JSONL files stay isolated, making analysis straightforward.
 - **No cross-contamination**: If a worker restarts, only its own queue has stale messages.
 
@@ -357,7 +347,7 @@ Consumes harvest queue, fetches full profiles via `$batch`, transforms and creat
 
 ### 5.3 Advanced Mode — Phone Registration
 
-Registers MFA phone numbers in EEID so users confirm (not re-register) on first JIT login. Separate from worker-migrate because `phoneMethods` API has a much lower throttle budget (30 req/10s vs ~60 writes/s).
+Registers MFA phone numbers in EEID so users confirm (not re-register) on first JIT login. 
 
 Queue messages contain only `{ B2CUserId, EEIDUpn }` — phone numbers are fetched at drain time (PII never persisted in queue).
 
@@ -402,24 +392,11 @@ JIT:     user@externalid.com → user@b2c.com  (reverse using same local part)
 | **Replay protection** | Nonce in encrypted payload, validated by function |
 | **Timeout** | EEID hard limit: 2s. Function internal: 1.5s (configurable). Exceeds → `BlockSignIn`. |
 
-### Performance
-
-Target: **<500ms** total (well within 2s timeout).
-
-| Step | Target |
-|------|--------|
-| RSA decrypt | <20ms |
-| B2C ROPC validation | 200-400ms |
-| Complexity check | <10ms |
-| Response | <5ms |
-
-Optimizations: RSA key caching (first load ~100ms, subsequent ~1ms), HttpClient singleton with connection pooling, regional deployment (same region as EEID tenant).
-
 ---
 
 ## 7. Security Architecture
 
-> **⚠️ STATUS**: v1.0 includes TLS 1.2+, client secret auth, no secrets in code. **Future**: Key Vault, Managed Identity, Private Endpoints, VNet, full SFI compliance.
+> **⚠️ STATUS**: v1.0 includes TLS 1.2+, client secret auth, no secrets in code. 
 
 ### Service Principal Permissions
 
@@ -442,62 +419,12 @@ Optimizations: RSA key caching (first load ~100ms, subsequent ~1ms), HttpClient 
 - **In transit**: TLS 1.2+ everywhere, strict certificate validation, HTTPS enforced
 - **Secrets**: Target: Key Vault references (`@Microsoft.KeyVault(SecretUri=...)`). Current: config files (gitignored)
 
-### Network Security (Target — SFI)
-
-All PaaS resources behind Private Endpoints, public access disabled. VNet with App Subnet (Function integration) + PE Subnet (Storage, Key Vault). Managed Identity for all resource access (zero secrets).
-
 ### Audit & Compliance
 
 - Key Vault audit logs (all secret access tracked)
 - Function invocation logs (correlation IDs, user IDs, results)
 - External ID sign-in audit logs (30-day retention, export for long-term)
 - Table Storage migration audit (permanent, queryable)
-
----
-
-## 8. Scalability & Performance
-
-### Graph API Throttle Limits
-
-#### User creation — `POST /users` (worker-migrate)
-
-| Scope | Limit |
-|---|---|
-| Per app registration | ~60 writes/s |
-| Per IP address | Cumulative cap (shared across apps) |
-| Per tenant (all apps) | ~200 RPS hard ceiling |
-
-> `$batch` requests: each individual request counts separately against throttle budgets.
-
-#### Phone methods (phone-registration)
-
-| Scope | Limit |
-|---|---|
-| Per app registration | 30 requests / 10 seconds (GET + POST combined) |
-
-At 2 calls/user → ~90 users/min per worker.
-
-#### JIT — Custom Authentication Extension
-
-300 requests/min per app (Identity Providers service limit).
-
-#### Soft concurrency ceiling
-
-Beyond **~8 threads per app registration**, no 429s are returned but latency spikes dramatically (50s+ vs ~1.4s) and throughput drops. This is a separate constraint from RPS limits.
-
-**Rule of thumb**: `MaxConcurrency = 8` per worker. Scale out with more workers, not more threads.
-
-### Benchmarks
-
-> **⚠️ Pending**: Formal multi-machine benchmarks have not been conducted yet. The numbers below are from preliminary single-workstation runs and should not be treated as production reference data. A proper benchmark with multiple PCs and dedicated app registrations is planned.
-
-### Scaling Projection
-
-Linear scaling expected up to ~200 RPS tenant ceiling. Each worker needs a **dedicated app registration pair** (B2C + EEID). For multiple workers, use distinct IPs (separate VMs/ACI/AKS pods) to avoid per-IP soft limits.
-
-### Retry Policy
-
-Polly exponential backoff + jitter (up to ~31s at retry 5) on 429/5xx. If `Graph.Throttled` is zero but latency exceeds ~5s, reduce `MaxConcurrency` (soft ceiling hit).
 
 ---
 

@@ -6,7 +6,7 @@
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 > **⚠️ PREVIEW/SAMPLE STATUS**  
-> This is a **sample implementation** showcasing the [Just-In-Time password migration public preview](https://learn.microsoft.com/entra/external-id/customers/how-to-migrate-passwords-just-in-time). **NOT PRODUCTION-READY**. See [roadmap](#-next-steps-and-future-enhancements) for planned features.
+> This is a **sample implementation** showcasing the [Just-In-Time password migration public preview](https://learn.microsoft.com/entra/external-id/customers/how-to-migrate-passwords-just-in-time). 
 
 A toolkit for migrating users from Azure AD B2C to Microsoft Entra External ID with minimal downtime and seamless password migration through Just-In-Time (JIT) authentication.
 
@@ -22,10 +22,10 @@ This migration kit provides a sample solution for identity migration with:
 | | **Mode A: Simple Export/Import** | **Mode B: Queue-based Workers** |
 |---|---|---|
 | **Commands** | `export` → `import` | `harvest` → `worker-migrate` + `phone-registration` |
-| **Best for** | < 50K users, no MFA phones | Large tenants, MFA phone migration |
+| **Best for** | Small or Medium tenants < 1 million users, no MFA phones | Large tenants, MFA phone migration |
 | **Azure infra** | Blob Storage only | Blob + Queue + Table Storage |
 | **Parallelism** | Single process | N workers in parallel |
-| **MFA phones** | ❌ Not supported | ✅ Throttled phone registration |
+| **MFA phones** | ❌ Not implemented | ✅ Available |
 | **Complexity** | Low — 2 sequential commands | Medium — 3 commands, parallel workers |
 
 ## 🏗️ Architecture
@@ -104,16 +104,16 @@ graph TB
 ### ✅ Currently Available
 
 - **Mode A: Export/Import** — Simple two-step bulk migration via Blob Storage; ideal for smaller tenants without MFA phone migration needs
-- **Mode B: Harvest + Worker Migrate** — Harvest phase enqueues user IDs; N parallel worker-migrate instances fetch full B2C profiles and create users directly in EEID (tested in local dev with up to ~23K users; throughput bounded by the B2C tenant's default 200 RPS Graph API limit)
-- **Async Phone Registration** (Mode B) — MFA phone numbers fetched from B2C and registered in EEID at a throttle-safe rate (default 400 ms delay per app registration)
+- **Mode B: Harvest + Worker Migrate** — Harvest phase enqueues user IDs; N parallel worker-migrate instances fetch full B2C profiles and create users directly in EEID
+- **Async Phone Registration** (Mode B) — MFA phone numbers fetched from B2C and registered in EEID at a throttle-safe rate 
 - **Audit Trail** — Every user operation (Created, Duplicate, Failed, PhoneRegistered, PhoneSkipped) written to Azure Table Storage (`migrationAudit`)
 - **JIT Password Migration** via Custom Authentication Extension
 - **UPN Domain Transformation** preserving local-part identifiers as a workaround to enable [sign-in alias](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-sign-in-alias) functionality
 - **Built-in Retry Logic** with exponential backoff
-- **Structured Logging** with optional Application Insights telemetry (requires a connection string; untested outside local development)
+- **Structured Logging** with optional Application Insights telemetry
 - **Local Development Mode** using Azurite emulator (no Azure resources)
   
-> **⚠️ PREVIEW/SAMPLE STATUS**: This toolkit is currently a **sample implementation** to showcase how to implement the [Just-In-Time password migration public preview](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-migrate-passwords-just-in-time?tabs=graph) for bulk migration and JIT password migration. Production-ready features including full SFI compliance (Private Endpoints, VNet integration, automated infrastructure deployment) are planned for future releases. 
+> **⚠️ PREVIEW/SAMPLE STATUS**: This toolkit is currently a **sample implementation** to showcase how to implement the [Just-In-Time password migration public preview](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-migrate-passwords-just-in-time?tabs=graph) for bulk migration and JIT password migration. 
 
 ## 📚 Documentation
 
@@ -142,26 +142,6 @@ Complete technical reference for developers implementing and operating the migra
 - Security best practices and deployment procedures
 
 **Target Audience:** Developers, DevOps Engineers, Operations Teams
-
-## 🚀 Next Steps and Future Enhancements
-
-This repository currently focuses on exemplifying the implementation of the [Just-In-Time password migration public preview](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-migrate-passwords-just-in-time?tabs=graph). Future enhancements will include:
-
-- **Automated Infrastructure Deployment**: Alignment with Secure Future Initiative (SFI) standards through automated deployment templates (Bicep/Terraform)
-- **Production-Ready Security**: Full integration with Private Endpoints, VNet integration, and Managed Identity
-
-These features are planned for upcoming releases to provide a complete enterprise-grade migration solution.
-
-## 📊 Telemetry
-
-This project uses Application Insights to collect telemetry data for monitoring and diagnostics. Telemetry collection is optional and can be controlled via configuration:
-
-- To **enable telemetry**: Set `Telemetry:Enabled` to `true` and provide an Application Insights connection string in `appsettings.json`
-- To **disable telemetry**: Set `Telemetry:Enabled` to `false` in your configuration
-
-For local development, telemetry is disabled by default. See the [Developer Guide](docs/DEVELOPER_GUIDE.md#telemetry-configuration) for detailed configuration options.
-
-**Privacy Note**: When telemetry is enabled, Microsoft may collect information about your use of the software. The data collected helps improve the quality and reliability of the software. For more information about Microsoft's privacy practices, please see the [Microsoft Privacy Statement](https://privacy.microsoft.com/privacystatement).
 
 ## 🤝 Contributing
 

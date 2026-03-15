@@ -451,7 +451,7 @@ Most Graph User attributes copy directly. Configure mappings only for custom ext
     "StoreB2CObjectId": true,
     "B2CObjectIdTarget": "extension_xyz_OriginalB2CId",
     "SetRequireMigration": true,
-    "RequiresMigrationTarget": "extension_xyz_RequiresMigration"
+    "RequireMigrationTarget": "extension_xyz_RequiresMigration"
   }
 }
 ```

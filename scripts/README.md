@@ -27,30 +27,36 @@ Additional for JIT testing: **PowerShell 7.0+**, **ngrok**, **Azure Function Cor
 
 ## Simple Mode (Export → Import)
 
-Two sequential commands for straightforward bulk migration without MFA phone migration.
+Two sequential scripts for straightforward bulk migration without MFA phone migration.
+
+> ⚠️ **Azurite must be running first.** Start via VS Code: `Ctrl+Shift+P` → `Azurite: Start Service`
 
 ### 1. Export
 
 Pages all B2C users and writes full profiles to Blob Storage as JSON files.
 
 ```powershell
-cd src/B2CMigrationKit.Console
-dotnet run -- export --config appsettings.export-import.json
+.\scripts\Start-LocalExport.ps1
 ```
 
-Set `Export.MaxUsers` to a small number (e.g., `20`) for smoke tests.
+- Uses `-ConfigFile appsettings.export-import.json` by default
+- Set `Export.MaxUsers: 20` in config for smoke tests (`0` = all users)
 
 ### 2. Import
 
 Reads exported blobs, transforms profiles, and creates users in External ID.
 
 ```powershell
-dotnet run -- import --config appsettings.export-import.json
+.\scripts\Start-LocalImport.ps1
 ```
 
-Users are created with `RequiresMigration=true` — JIT handles real password on first login. Duplicates (409) are skipped gracefully.
+- Uses the same config file as export
+- Users are created with `RequiresMigration=true` — JIT handles real password on first login
+- Duplicates (409) are skipped gracefully
 
 **Config template:** `appsettings.export-import.example.json`
+
+Both scripts accept `-VerboseLogging` and `-SkipAzurite` parameters.
 
 ---
 

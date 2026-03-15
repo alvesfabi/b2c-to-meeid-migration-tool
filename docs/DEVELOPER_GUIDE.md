@@ -5,6 +5,8 @@
 - [Overview](#overview)
 - [Configuration Guide](#configuration-guide)
 - [Development Workflow](#development-workflow)
+  - [Running Mode A (Export → Import)](#running-mode-a-export--import)
+  - [Running Mode B (Harvest → Worker Migrate → Phone Registration)](#running-mode-b-harvest--worker-migrate--phone-registration)
 - [JIT Migration Implementation](#jit-migration-implementation)
 - [Attribute Mapping](#attribute-mapping)
 - [Migration Audit Table](#migration-audit-table)
@@ -20,16 +22,30 @@
 
 ```
 B2CMigrationKit.Core/       # Business logic, models, abstractions, DI registration
-B2CMigrationKit.Console/    # CLI for bulk operations (harvest, worker-migrate, phone-registration)
+B2CMigrationKit.Console/    # CLI for bulk operations (5 commands across 2 modes)
 B2CMigrationKit.Function/   # Azure Function for JIT authentication
 ```
+
+The CLI supports two migration modes:
+
+**Mode A — Simple Export/Import** (no MFA, no queues):
+
+| Orchestrator | Command | Description |
+|---|---|---|
+| `ExportOrchestrator` | `export` | Pages B2C users, writes JSON files to Blob Storage |
+| `ImportOrchestrator` | `import` | Reads blobs, creates users in EEID with attribute mapping + JIT flag |
+
+**Mode B — Workers** (full MFA, parallel scaling):
 
 | Orchestrator | Command | Description |
 |---|---|---|
 | `HarvestOrchestrator` | `harvest` | Pages B2C user IDs, enqueues batches to migrate queue |
 | `WorkerMigrateOrchestrator` | `worker-migrate` | Dequeues IDs, fetches from B2C, creates in EEID, enqueues phone tasks |
 | `PhoneRegistrationWorker` | `phone-registration` | Fetches MFA phone from B2C, registers in EEID (400 ms throttle delay) |
-| `JitMigrationService` | *(Azure Function)* | Validates B2C credentials, returns `MigratePassword` action |
+
+**Both modes**: `JitMigrationService` *(Azure Function)* — Validates B2C credentials on first login, returns `MigratePassword` action.
+
+See [Architecture Guide](ARCHITECTURE_GUIDE.md) for detailed mode comparison and when to choose which.
 
 ## Configuration Guide
 
@@ -104,6 +120,50 @@ Each worker instance needs a **dedicated** app registration on a **dedicated IP*
 | phone-registration | `UserAuthenticationMethod.ReadWrite.All` | Application |
 
 Admin consent required. `Directory.ReadWrite.All` is **NOT** required. `ExtensionAppId` = Application ID without hyphens for custom extension attributes.
+
+### Export Configuration (Mode A)
+
+```json
+"Export": {
+  "SelectFields": "id,userPrincipalName,displayName,givenName,surname,mail,mobilePhone,identities",
+  "MaxUsers": 0,
+  "FilterPattern": ""
+}
+```
+
+| Setting | Default | Notes |
+|---------|---------|-------|
+| `SelectFields` | *(all standard)* | Comma-separated Graph `$select` fields. Include custom extension attributes here. |
+| `MaxUsers` | 0 (unlimited) | Cap for smoke tests (e.g., `20`). `0` = export all. |
+| `FilterPattern` | *(empty)* | OData `$filter` expression to subset users. |
+
+Storage sections used by export: `ExportContainerName`, `ErrorContainerName`, `ExportBlobPrefix`.
+
+### Import Configuration (Mode A)
+
+```json
+"Import": {
+  "AttributeMappings": {},
+  "ExcludeFields": ["createdDateTime", "lastPasswordChangeDateTime"],
+  "MigrationAttributes": {
+    "StoreB2CObjectId": true,
+    "SetRequireMigration": true,
+    "OverwriteExtensionAttributes": false
+  },
+  "SkipPhoneRegistration": true
+}
+```
+
+| Setting | Default | Notes |
+|---------|---------|-------|
+| `AttributeMappings` | `{}` | Rename custom extensions: `"b2c_attr": "eeid_attr"` |
+| `ExcludeFields` | `[]` | Attributes to drop during import |
+| `StoreB2CObjectId` | `true` | Saves original B2C objectId as extension attribute |
+| `SetRequireMigration` | `true` | Marks users for JIT password migration |
+| `OverwriteExtensionAttributes` | `false` | If `true`, overwrites existing extension values |
+| `SkipPhoneRegistration` | `true` | Mode A skips MFA phone migration (use Mode B if needed) |
+
+Storage sections used by import: `ExportContainerName` (reads from), `ImportAuditContainerName`, `AuditTableName`.
 
 ### Harvest Configuration
 
@@ -190,6 +250,14 @@ Key metrics: `harvest.users.enqueued`, `WorkerMigrate.UserCreated/Duplicate/Fail
 
 ### Local Setup
 
+**Mode A** (Export/Import):
+```bash
+cd src/B2CMigrationKit.Console
+cp appsettings.export-import.example.json appsettings.export-import.json
+# Edit with your tenant credentials
+```
+
+**Mode B** (Workers):
 ```bash
 cd src/B2CMigrationKit.Console
 cp appsettings.master.example.json appsettings.master.json
@@ -200,7 +268,27 @@ cp appsettings.phone-registration.example.json appsettings.phone-registration.js
 
 Config patterns: **Local** → `ClientSecret` with actual value. **Production** → `ClientSecretName` with Key Vault secret name.
 
-### Running the Pipeline
+### Running Mode A (Export → Import)
+
+Two commands, no queues. Best for <50K users without MFA phone migration.
+
+**1. Export** — pages B2C users to Blob Storage JSON files.
+```powershell
+dotnet run -- export --config appsettings.export-import.json
+
+# Smoke test: set Export.MaxUsers to 20 in config first
+```
+
+**2. Import** — reads exported blobs, creates users in EEID.
+```powershell
+dotnet run -- import --config appsettings.export-import.json
+```
+
+Users are created with random passwords + `RequiresMigration=true` (JIT handles real password on first login). Existing users recorded as `Duplicate`.
+
+### Running Mode B (Harvest → Worker Migrate → Phone Registration)
+
+Three-stage pipeline with Azure Queues. Best for large tenants and MFA phone migration.
 
 **1. Harvest** — enqueues B2C user IDs. Use `MaxUsers` in config to cap (e.g., `20` for smoke test).
 ```powershell

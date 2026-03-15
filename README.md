@@ -14,24 +14,48 @@ A toolkit for migrating users from Azure AD B2C to Microsoft Entra External ID w
 
 This migration kit provides a sample solution for identity migration with:
 
-- ✅ **Bulk Migration** - Queue-based pipeline (harvest → worker-migrate → phone-registration) with retry logic and throttling management
-- ✅ **Just-In-Time (JIT) Password Migration** - Seamless password migration on user's first login
+- ✅ **Two Bulk Migration Modes** — choose the right complexity for your scenario
+- ✅ **Just-In-Time (JIT) Password Migration** — seamless password migration on user's first login
+
+### Choose Your Migration Mode
+
+| | **Mode A: Simple Export/Import** | **Mode B: Queue-based Workers** |
+|---|---|---|
+| **Commands** | `export` → `import` | `harvest` → `worker-migrate` + `phone-registration` |
+| **Best for** | < 50K users, no MFA phones | Large tenants, MFA phone migration |
+| **Azure infra** | Blob Storage only | Blob + Queue + Table Storage |
+| **Parallelism** | Single process | N workers in parallel |
+| **MFA phones** | ❌ Not supported | ✅ Throttled phone registration |
+| **Complexity** | Low — 2 sequential commands | Medium — 3 commands, parallel workers |
 
 ## 🏗️ Architecture
 
 **Key Components:**
 
-1. **B2CMigrationKit.Console** - CLI tool for bulk migration operations (harvest, worker-migrate, phone-registration)
-2. **B2CMigrationKit.Function** - Azure Function for JIT password migration
-3. **B2CMigrationKit.Core** - Shared business logic and services
+1. **B2CMigrationKit.Console** — CLI tool with 5 bulk migration commands (export, import, harvest, worker-migrate, phone-registration)
+2. **B2CMigrationKit.Function** — Azure Function for JIT password migration
+3. **B2CMigrationKit.Core** — Shared business logic and services
 
-## Migration Flow
+### Mode A: Simple Export/Import
+
+```mermaid
+graph LR
+    B2C[(Azure AD B2C)] -->|Page users| Export[1. export]
+    Export -->|JSON files| Blob[(Blob Storage)]
+    Blob -->|Read users| Import[2. import]
+    Import -->|Create users| ExtID[(Entra External ID)]
+
+    style Export fill:#0078d4,color:#fff
+    style Import fill:#0078d4,color:#fff
+```
+
+### Mode B: Queue-based Workers
 
 ```mermaid
 graph TB
     subgraph "Step 1: Harvest"
         B2C[(Azure AD B2C<br/>Source Tenant)]
-        Harvest[1. Harvest<br/>Enqueue user IDs]
+        Harvest[1. harvest<br/>Enqueue user IDs]
         Queue1[(Azure Queue<br/>user-ids-to-process)]
 
         B2C -->|Page IDs only| Harvest
@@ -39,10 +63,10 @@ graph TB
     end
 
     subgraph "Step 2: Worker Migrate + Phone Registration"
-        Worker[2a. Worker Migrate × N<br/>Fetch profiles + create users]
+        Worker[2a. worker-migrate × N<br/>Fetch profiles + create users]
         ExtID[(Entra External ID<br/>Target Tenant)]
         Queue2[(Azure Queue<br/>phone-registration)]
-        PhoneWorker[2b. Phone Registration × N<br/>Register MFA phones — throttled]
+        PhoneWorker[2b. phone-registration × N<br/>Register MFA phones — throttled]
         AuditTable[(Azure Table<br/>migrationAudit)]
 
         Queue1 -->|Dequeue ID batch| Worker
@@ -79,9 +103,10 @@ graph TB
 
 ### ✅ Currently Available
 
-- **Harvest + Worker Migrate** - Harvest phase enqueues user IDs; N parallel worker-migrate instances fetch full B2C profiles and create users directly in EEID (no intermediate blob storage; tested in local dev with up to ~23K users; throughput bounded by the B2C tenant's default 200 RPS Graph API limit)
-- **Async Phone Registration** - After worker-migrate, MFA phone numbers are fetched from B2C and registered in EEID at a throttle-safe rate (default 400 ms delay between calls per app registration) by the `phone-registration` worker
-- **Audit Trail** - Every user operation (Created, Duplicate, Failed, PhoneRegistered, PhoneSkipped) is written to Azure Table Storage (`migrationAudit`)
+- **Mode A: Export/Import** — Simple two-step bulk migration via Blob Storage; ideal for smaller tenants without MFA phone migration needs
+- **Mode B: Harvest + Worker Migrate** — Harvest phase enqueues user IDs; N parallel worker-migrate instances fetch full B2C profiles and create users directly in EEID (tested in local dev with up to ~23K users; throughput bounded by the B2C tenant's default 200 RPS Graph API limit)
+- **Async Phone Registration** (Mode B) — MFA phone numbers fetched from B2C and registered in EEID at a throttle-safe rate (default 400 ms delay per app registration)
+- **Audit Trail** — Every user operation (Created, Duplicate, Failed, PhoneRegistered, PhoneSkipped) written to Azure Table Storage (`migrationAudit`)
 - **JIT Password Migration** via Custom Authentication Extension
 - **UPN Domain Transformation** preserving local-part identifiers as a workaround to enable [sign-in alias](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-sign-in-alias) functionality
 - **Built-in Retry Logic** with exponential backoff

@@ -118,7 +118,7 @@ graph LR
 - **Structured Logging** with optional Application Insights telemetry
 - **Local Development Mode** using Azurite emulator (no Azure resources)
   
-> **⚠️ SAMPLE **: This toolkit is currently a **sample implementation** to showcase how to implement the [Just-In-Time password migration mechanism](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-migrate-passwords-just-in-time?tabs=graph) for bulk migration and JIT password migration. 
+> **⚠️ SAMPLE**: This toolkit is currently a **sample implementation** to showcase how to implement the [Just-In-Time password migration mechanism](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-migrate-passwords-just-in-time?tabs=graph) for bulk migration and JIT password migration.
 
 ## 📚 Documentation
 

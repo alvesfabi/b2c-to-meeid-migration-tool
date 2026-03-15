@@ -16,7 +16,7 @@
 
 ## Overview
 
-> **📋 STATUS**: This repository exemplifies the [JIT password migration public preview](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-migrate-passwords-just-in-time?tabs=graph). Automated SFI-aligned deployment (Bicep/Terraform) is planned for future releases.
+> **📋 STATUS**: This repository exemplifies the [JIT password migration mechanism](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-migrate-passwords-just-in-time?tabs=graph).
 
 ### Component Architecture
 
@@ -28,7 +28,7 @@ B2CMigrationKit.Function/   # Azure Function for JIT authentication
 
 The CLI supports two migration modes:
 
-**Simple Mode — Simple Export/Import** (no MFA, no queues):
+**Simple Mode — Export/Import** (no MFA, no queues):
 
 | Orchestrator | Command | Description |
 |---|---|---|
@@ -41,7 +41,7 @@ The CLI supports two migration modes:
 |---|---|---|
 | `HarvestOrchestrator` | `harvest` | Pages B2C user IDs, enqueues batches to migrate queue |
 | `WorkerMigrateOrchestrator` | `worker-migrate` | Dequeues IDs, fetches from B2C, creates in EEID, enqueues phone tasks |
-| `PhoneRegistrationWorker` | `phone-registration` | Fetches MFA phone from B2C, registers in EEID (400 ms throttle delay) |
+| `PhoneRegistrationWorker` | `phone-registration` | Fetches MFA phone from B2C, registers in EEID (throttled) |
 
 **Both modes**: `JitMigrationService` *(Azure Function)* — Validates B2C credentials on first login, returns `MigratePassword` action.
 
@@ -637,13 +637,7 @@ If sustained 429s on phoneMethods, increase `PhoneRegistration.ThrottleDelayMs`.
 
 ### Scaling Patterns
 
-| Scale | Setup | API ceiling | Measured throughput |
-|---|---|---|---|
-| Single instance | 1 process, 8 threads, 1 app reg | ~60 writes/s | ~470 u/min (~7.8/s) |
-| 4 instances | 4 processes, 8 threads each, 4 app regs | ~240 writes/s | ~2,076 u/min (~34.6/s) |
-| N instances | N processes, N IPs, N app regs | ~N × 60 writes/s | Linear up to 200 RPS tenant ceiling |
-
-Recommended: single instance up to ~100K users; multiple instances for larger volumes. For >4 instances, use distinct IPs (separate VMs/ACI/AKS pods). See [Architecture Guide](ARCHITECTURE_GUIDE.md) for detailed benchmarks.
+Scale by adding worker instances with dedicated app registrations and distinct IPs. Increase `MaxConcurrency` within a worker (sweet spot: 8) for more parallelism per instance. For multiple instances, use separate VMs/ACI/AKS pods to avoid per-IP soft limits. See [Architecture Guide](ARCHITECTURE_GUIDE.md) for architecture details.
 
 ## Troubleshooting
 
@@ -651,7 +645,7 @@ Recommended: single instance up to ~100K users; multiple instances for larger vo
 |-------|---------|
 | HTTP 429 (throttle) | Reduce `MaxConcurrency`, increase `ThrottleDelayMs`, or add workers with separate app regs |
 | "User already exists" | Check for duplicates, use `B2CObjectId` to correlate. Handled as `Duplicate` status. |
-| High latency, zero 429s | Soft concurrency ceiling hit. Reduce `MaxConcurrency` to 8. |
+| High latency, zero 429s | Soft concurrency ceiling hit. Reduce `MaxConcurrency`. |
 
 **Tips**: Enable `--verbose` logging, check App Insights traces, test with small subsets first, use VS Code breakpoints for local debugging.
 

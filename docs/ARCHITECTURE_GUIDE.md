@@ -7,10 +7,10 @@
 ## Table of Contents
 
 1. [Executive Summary](#1-executive-summary) — Migration modes overview & decision table
-2. [System Overview](#2-system-overview) — Architecture diagrams, Mode A & Mode B data flows
+2. [System Overview](#2-system-overview) — Architecture diagrams, Simple Mode & Advanced Mode data flows
 3. [Design Principles](#3-design-principles)
 4. [Component Architecture](#4-component-architecture)
-5. [Bulk Migration Pipeline](#5-bulk-migration-pipeline) — Mode A (Export/Import) + Mode B (Workers)
+5. [Bulk Migration Pipeline](#5-bulk-migration-pipeline) — Simple Mode (Export/Import) + Advanced Mode (Workers)
 6. [Just-In-Time (JIT) Migration](#6-just-in-time-jit-migration)
 7. [Security Architecture](#7-security-architecture)
 8. [Scalability & Performance](#8-scalability--performance)
@@ -27,13 +27,13 @@ The **B2C Migration Kit** migrates user identities from **Azure AD B2C** to **Mi
 The kit has two independent concerns:
 
 1. **Bulk user migration** — export/import user profiles from B2C to External ID, with two modes:
-   - **Mode A — Export/Import**: Simple blob-based pipeline (`export` → Blob Storage → `import`). Best for small tenants, no MFA phone migration needed.
-   - **Mode B — Workers**: Queue-based parallel pipeline (`harvest` → `worker-migrate` → `phone-registration`). Best for large tenants, full MFA phone migration, parallel scaling.
+   - **Simple Mode — Export/Import**: Simple blob-based pipeline (`export` → Blob Storage → `import`). Best for small tenants, no MFA phone migration needed.
+   - **Advanced Mode — Workers**: Queue-based parallel pipeline (`harvest` → `worker-migrate` → `phone-registration`). Best for large tenants, full MFA phone migration, parallel scaling.
 2. **JIT Password Migration** — Seamless password validation on first login via Custom Authentication Extension. Works independently of which bulk mode you choose — it runs as an Azure Function triggered on each user's first login after bulk migration.
 
 ### Choose Your Bulk Migration Mode
 
-| Factor | Mode A (Export/Import) | Mode B (Workers) |
+| Factor | Simple Mode (Export/Import) | Advanced Mode (Workers) |
 |--------|----------------------|-------------------|
 | **Best for** | Small/medium tenants, no MFA phones | Large tenants, MFA phone migration |
 | **Infrastructure** | Blob Storage only | Queue + Table Storage |
@@ -60,8 +60,8 @@ The kit has two independent concerns:
 │                                                                 │
 │  ┌──────────────────────────┐  ┌──────────────┐               │
 │  │ Console App              │  │Azure Function│               │
-│  │  Mode A: Export/Import   │  │(JIT Auth)    │               │
-│  │  Mode B: Harvest/Worker/ │  │              │               │
+│  │  Simple Mode: Export/Import   │  │(JIT Auth)    │               │
+│  │  Advanced Mode: Harvest/Worker/ │  │              │               │
 │  │          PhoneReg        │  │              │               │
 │  └──────┬───────────────────┘  └──────┬───────┘               │
 │         │                             │                        │
@@ -89,7 +89,7 @@ The kit supports two migration pipelines. Choose based on your scenario (see [Ch
 
 ---
 
-### Mode A — Export/Import Pipeline
+### Simple Mode — Export/Import Pipeline
 
 A simple two-step blob-based pipeline for straightforward migrations without MFA phone migration.
 
@@ -125,11 +125,11 @@ Reads exported blobs sequentially, transforms each user profile, creates in EEID
 - **Config**: `Import.ExtensionAttributes`, `Storage.ImportAuditContainerName`
 - **Permissions**: B2C `User.Read.All` (for export), EEID `User.ReadWrite.All` (Application)
 
-> **Limitations**: No MFA phone migration, no parallel scaling, no Table Storage audit trail. For large tenants or MFA scenarios, use Mode B.
+> **Limitations**: No MFA phone migration, no parallel scaling, no Table Storage audit trail. For large tenants or MFA scenarios, use Advanced Mode.
 
 ---
 
-### Mode B — Worker Pipeline
+### Advanced Mode — Worker Pipeline
 
 A queue-based parallel pipeline for large-scale migrations with full MFA phone support.
 
@@ -192,18 +192,18 @@ User Login → EEID checks RequiresMigration = true
 
 This section walks through both migration pipelines from start to finish, explaining **why** each stage exists and how they connect.
 
-### Mode A — Export/Import Narrative
+### Simple Mode — Export/Import Narrative
 
-Mode A is a straightforward two-step pipeline:
+Simple Mode is a straightforward two-step pipeline:
 
 1. **Export** pages all B2C users and writes full profiles to Blob Storage as JSON files. Each page becomes one blob (~999 users). Optional client-side filtering (`FilterPattern`) limits export to matching users.
 2. **Import** reads each blob sequentially, transforms user profiles (UPN rewrite, extension attribute mapping, email identity, random password with `RequiresMigration` flag), and creates each user in EEID via `POST /users`. Results are written to audit blobs.
 
 **Why blobs?** For small tenants, the overhead of queues and Table Storage is unnecessary. Blobs provide a simple checkpoint — if import fails mid-blob, re-run skips duplicates (409 = idempotent). Export blobs also serve as a backup of the source data.
 
-**Why no phone migration?** The `phoneMethods` API's strict throttle budget (30 req/10s) makes sequential processing impractical for any meaningful user count. Mode B's parallel workers with dedicated app registrations solve this.
+**Why no phone migration?** The `phoneMethods` API's strict throttle budget (30 req/10s) makes sequential processing impractical for any meaningful user count. Advanced Mode's parallel workers with dedicated app registrations solve this.
 
-### Mode B — Worker Pipeline Narrative
+### Advanced Mode — Worker Pipeline Narrative
 
 ### Stage 1 — Harvest (single instance, run once)
 
@@ -284,7 +284,7 @@ B2CMigrationKit.Core/
 ├── Configuration/         # MigrationOptions, B2COptions, ExternalIdOptions, StorageOptions, etc.
 ├── Models/                # UserProfile, MigrationAuditRecord, RunSummary, PhoneRegistrationMessage, etc.
 ├── Services/
-│   ├── Orchestrators/     # ExportOrchestrator, ImportOrchestrator (Mode A), HarvestOrchestrator, WorkerMigrateOrchestrator, PhoneRegistrationWorker (Mode B), JitMigrationService
+│   ├── Orchestrators/     # ExportOrchestrator, ImportOrchestrator (Simple Mode), HarvestOrchestrator, WorkerMigrateOrchestrator, PhoneRegistrationWorker (Advanced Mode), JitMigrationService
 │   ├── Infrastructure/    # GraphClient, QueueStorageClient, TableStorageClient, BlobStorageClient, etc.
 │   └── Observability/     # TelemetryService
 └── Extensions/            # ServiceCollectionExtensions (DI registration)
@@ -313,7 +313,7 @@ public class WorkerMigrateOrchestrator : IOrchestrator
 
 ## 5. Bulk Migration Pipeline
 
-### 5.0 Mode A — Export
+### 5.0 Simple Mode — Export
 
 Pages B2C users with configurable `$select` fields, writes each page as a JSON blob to `ExportContainerName`. Supports optional `FilterPattern` for client-side filtering by `displayName`/`userPrincipalName`.
 
@@ -321,7 +321,7 @@ Pages B2C users with configurable `$select` fields, writes each page as a JSON b
 - **Config**: `Export.SelectFields`, `Export.FilterPattern`, `PageSize` (default: 999)
 - **Output**: `{ExportContainerName}/{ExportBlobPrefix}page-{N}.json`
 
-### 5.0b Mode A — Import
+### 5.0b Simple Mode — Import
 
 Reads exported blobs sequentially, transforms user profiles (UPN domain rewrite, extension attribute mapping, email identity, random password + `RequiresMigration` JIT flag), creates users in EEID. Audit results written as JSON blobs to `ImportAuditContainerName`.
 
@@ -329,14 +329,14 @@ Reads exported blobs sequentially, transforms user profiles (UPN domain rewrite,
 - **Config**: `Import.ExtensionAttributes` (source → target attribute mapping)
 - **Idempotency**: 409 Conflict = duplicate, skipped gracefully
 
-### 5.1 Mode B — Harvest
+### 5.1 Advanced Mode — Harvest
 
 Pages B2C with `$select=id` (~10× cheaper than full profile fetch), splits into batches of `IdsPerMessage` (default: 20), enqueues to `user-ids-to-process`. Single instance, exits on completion.
 
 - **Permissions**: B2C `User.Read.All` (Application) — read-only, no EEID access needed
 - **Config**: `HarvestOptions.PageSize` (default: 999), `HarvestOptions.IdsPerMessage` (default: 20)
 
-### 5.2 Mode B — Worker Migrate
+### 5.2 Advanced Mode — Worker Migrate
 
 Consumes harvest queue, fetches full profiles via `$batch`, transforms and creates users in EEID, enqueues phone tasks. Replaces the old three-step blob pipeline.
 
@@ -355,7 +355,7 @@ Consumes harvest queue, fetches full profiles via `$batch`, transforms and creat
 
 **Permissions**: B2C `User.Read.All`, EEID `User.ReadWrite.All` (both Application).
 
-### 5.3 Mode B — Phone Registration
+### 5.3 Advanced Mode — Phone Registration
 
 Registers MFA phone numbers in EEID so users confirm (not re-register) on first JIT login. Separate from worker-migrate because `phoneMethods` API has a much lower throttle budget (30 req/10s vs ~60 writes/s).
 

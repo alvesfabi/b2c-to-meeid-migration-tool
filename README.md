@@ -22,7 +22,7 @@ This migration kit provides a sample solution for identity migration with:
 Both modes handle bulk user export/import. JIT password migration works independently with either mode — it runs as an Azure Function triggered on each user's first login.
 
 
-| | **Mode A: Simple Export/Import** | **Mode B: Queue-based Workers** |
+| | **Simple Mode: Export/Import** | **Advanced Mode: Queue-based Workers** |
 |---|---|---|
 | **Commands** | `export` → `import` | `harvest` → `worker-migrate` + `phone-registration` |
 | **Best for** | Small or Medium tenants < 1 million users, no MFA phones | Large tenants, MFA phone migration |
@@ -39,7 +39,7 @@ Both modes handle bulk user export/import. JIT password migration works independ
 2. **B2CMigrationKit.Function** — Azure Function for JIT password migration
 3. **B2CMigrationKit.Core** — Shared business logic and services
 
-### Mode A: Simple Export/Import
+### Simple Mode: Export/Import
 
 ```mermaid
 graph LR
@@ -52,19 +52,7 @@ graph LR
     style Import fill:#0078d4,color:#fff
 ```
 
-### JIT Password Migration (works with both modes)
-
-```mermaid
-graph LR
-    User[User Login] -->|First login| ExtID[Entra External ID]
-    ExtID -->|Custom Auth Extension| JIT[Azure Function]
-    JIT -->|Validate password via ROPC| B2C[(Azure AD B2C)]
-    JIT -->|MigratePassword| ExtID
-
-    style JIT fill:#107c10,color:#fff
-```
-
-### Mode B: Queue-based Workers
+### Advanced Mode: Queue-based Workers
 
 ```mermaid
 graph TB
@@ -100,15 +88,29 @@ graph TB
     style PhoneWorker fill:#0078d4,color:#fff
 ```
 
+### JIT Password Migration (works with both modes)
+
+After bulk migration (either mode), users have accounts in External ID but no password yet. On each user's first login, JIT seamlessly migrates their password:
+
+```mermaid
+graph LR
+    User[User Login] -->|First login| ExtID[Entra External ID]
+    ExtID -->|Custom Auth Extension| JIT[Azure Function]
+    JIT -->|Validate password via ROPC| B2C[(Azure AD B2C)]
+    JIT -->|MigratePassword| ExtID
+
+    style JIT fill:#107c10,color:#fff
+```
+
 ---
 
 ## 🔑 Key Features
 
 ### ✅ Currently Available
 
-- **Mode A: Export/Import** — Simple two-step bulk migration via Blob Storage; ideal for smaller tenants without MFA phone migration needs
-- **Mode B: Harvest + Worker Migrate** — Harvest phase enqueues user IDs; N parallel worker-migrate instances fetch full B2C profiles and create users directly in EEID
-- **Async Phone Registration** (Mode B) — MFA phone numbers fetched from B2C and registered in EEID at a throttle-safe rate 
+- **Simple Mode: Export/Import** — Simple two-step bulk migration via Blob Storage; ideal for smaller tenants without MFA phone migration needs
+- **Advanced Mode: Harvest + Worker Migrate** — Harvest phase enqueues user IDs; N parallel worker-migrate instances fetch full B2C profiles and create users directly in EEID
+- **Async Phone Registration** (Advanced Mode) — MFA phone numbers fetched from B2C and registered in EEID at a throttle-safe rate 
 - **Audit Trail** — Every user operation (Created, Duplicate, Failed, PhoneRegistered, PhoneSkipped) written to Azure Table Storage (`migrationAudit`)
 - **JIT Password Migration** via Custom Authentication Extension
 - **UPN Domain Transformation** preserving local-part identifiers as a workaround to enable [sign-in alias](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-sign-in-alias) functionality

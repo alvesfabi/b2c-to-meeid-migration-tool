@@ -6,7 +6,7 @@
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 > **⚠️ PREVIEW/SAMPLE STATUS**  
-> This is a **sample implementation** showcasing the [Just-In-Time password migration public preview](https://learn.microsoft.com/entra/external-id/customers/how-to-migrate-passwords-just-in-time). 
+> This is a **sample implementation** showcasing the [Just-In-Time password migration mechanism](https://learn.microsoft.com/entra/external-id/customers/how-to-migrate-passwords-just-in-time). 
 
 A toolkit for migrating users from Azure AD B2C to Microsoft Entra External ID with minimal downtime and seamless password migration through Just-In-Time (JIT) authentication.
 
@@ -118,7 +118,7 @@ graph LR
 - **Structured Logging** with optional Application Insights telemetry
 - **Local Development Mode** using Azurite emulator (no Azure resources)
   
-> **⚠️ PREVIEW/SAMPLE STATUS**: This toolkit is currently a **sample implementation** to showcase how to implement the [Just-In-Time password migration public preview](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-migrate-passwords-just-in-time?tabs=graph) for bulk migration and JIT password migration. 
+> **⚠️ SAMPLE **: This toolkit is currently a **sample implementation** to showcase how to implement the [Just-In-Time password migration mechanism](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-migrate-passwords-just-in-time?tabs=graph) for bulk migration and JIT password migration. 
 
 ## 📚 Documentation
 

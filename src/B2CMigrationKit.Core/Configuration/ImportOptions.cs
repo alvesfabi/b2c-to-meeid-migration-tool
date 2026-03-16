@@ -3,7 +3,8 @@
 namespace B2CMigrationKit.Core.Configuration;
 
 /// <summary>
-/// Configuration options for import operations.
+/// Configuration options controlling how <c>worker-migrate</c> transforms users
+/// before creating them in Entra External ID.
 /// </summary>
 public class ImportOptions
 {
@@ -25,6 +26,14 @@ public class ImportOptions
     /// Gets or sets the migration-specific attribute configuration.
     /// </summary>
     public MigrationAttributesOptions MigrationAttributes { get; set; } = new();
+
+    /// <summary>
+    /// When true, the worker-migrate phase will not enqueue phone-registration messages.
+    /// Use this to run a dry-run or test migration without populating the phone queue.
+    /// Default: false.
+    /// </summary>
+    public bool SkipPhoneRegistration { get; set; } = false;
+
 }
 
 /// <summary>
@@ -66,3 +75,5 @@ public class MigrationAttributesOptions
     /// </summary>
     public bool OverwriteExtensionAttributes { get; set; } = false;
 }
+
+

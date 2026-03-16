@@ -66,6 +66,10 @@ artifacts/
 
 # Local Development Configuration Files
 **/appsettings.local.json
+
+# Telemetry & audit output files (local run artifacts)
+**/*-telemetry.jsonl
+**/migration-audit-*.jsonl
 **/appsettings.phone-registration*.json
 **/appsettings.master.json
 **/appsettings.worker*.json

@@ -66,6 +66,7 @@ artifacts/
 
 # Local Development Configuration Files
 **/appsettings.local.json
+**/appsettings.json
 
 # Telemetry & audit output files (local run artifacts)
 **/*-telemetry.jsonl

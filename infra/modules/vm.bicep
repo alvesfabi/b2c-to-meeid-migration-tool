@@ -10,16 +10,21 @@ param storageAccountName string
 param tags object
 
 var storageQueueDataContributorRoleDefId = '974c5e8b-45b9-4653-ba55-5f855dd0fb88'
+var storageBlobDataContributorRoleDefId = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
+var storageTableDataContributorRoleDefId = '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3'
 
-// cloud-init: installs .NET 8 runtime on first boot.
+// cloud-init: installs .NET 8 runtime + PowerShell 7 on first boot.
 // Requires outbound HTTPS — provided by the NAT Gateway on the workers subnet.
-// Alternative: bake .NET into a custom VM image to avoid the internet dependency.
 var cloudInit = base64('''#!/bin/bash
 set -e
 wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O /tmp/ms-prod.deb
 dpkg -i /tmp/ms-prod.deb
 apt-get update -y
-apt-get install -y dotnet-runtime-8.0
+apt-get install -y dotnet-runtime-8.0 powershell
+
+# Create telemetry output directory
+mkdir -p /opt/b2c-migration/telemetry
+chmod 775 /opt/b2c-migration/telemetry
 ''')
 
 resource nic 'Microsoft.Network/networkInterfaces@2023-11-01' = {
@@ -27,7 +32,6 @@ resource nic 'Microsoft.Network/networkInterfaces@2023-11-01' = {
   location: location
   tags: tags
   properties: {
-    // No public IP — workers are accessed via Azure Bastion or internal connectivity.
     ipConfigurations: [
       {
         name: 'ipconfig1'
@@ -59,7 +63,6 @@ resource vm 'Microsoft.Compute/virtualMachines@2024-03-01' = {
       osDisk: {
         createOption: 'FromImage'
         managedDisk: { storageAccountType: 'Standard_LRS' }
-        // Delete the OS disk when the VM is deleted to avoid orphaned resources.
         deleteOption: 'Delete'
       }
     }
@@ -93,21 +96,38 @@ resource vm 'Microsoft.Compute/virtualMachines@2024-03-01' = {
   }
 }
 
-// Reference the storage account to scope the role assignment.
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
   name: storageAccountName
 }
 
-// Grant the VM's system-assigned managed identity permission to read/dequeue from the storage queues.
-resource roleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  // Deterministic GUID scoped to: storage account + VM name + role
+// Storage Queue Data Contributor — read/dequeue work items
+resource queueRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(storageAccount.id, vmName, storageQueueDataContributorRoleDefId)
   scope: storageAccount
   properties: {
-    roleDefinitionId: subscriptionResourceId(
-      'Microsoft.Authorization/roleDefinitions',
-      storageQueueDataContributorRoleDefId
-    )
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageQueueDataContributorRoleDefId)
+    principalId: vm.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Storage Blob Data Contributor — read export blobs + upload telemetry JSONL
+resource blobRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(storageAccount.id, vmName, storageBlobDataContributorRoleDefId)
+  scope: storageAccount
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataContributorRoleDefId)
+    principalId: vm.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Storage Table Data Contributor — write audit records (Advanced Mode)
+resource tableRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(storageAccount.id, vmName, storageTableDataContributorRoleDefId)
+  scope: storageAccount
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageTableDataContributorRoleDefId)
     principalId: vm.identity.principalId
     principalType: 'ServicePrincipal'
   }

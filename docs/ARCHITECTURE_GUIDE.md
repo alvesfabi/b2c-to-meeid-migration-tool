@@ -402,13 +402,13 @@ JIT:     user@externalid.com → user@b2c.com  (reverse using same local part)
 
 | Process | Mode | Tenant | Permission | Type |
 |---|---|---|---|---|
-| `export` | A | B2C | `User.Read.All` | Application |
-| `import` | A | EEID | `User.ReadWrite.All` | Application |
-| `harvest` | B | B2C | `User.Read.All` | Application |
-| `worker-migrate` | B | B2C | `User.Read.All` | Application |
-| `worker-migrate` | B | EEID | `User.ReadWrite.All` | Application |
-| `phone-registration` | B | B2C | `UserAuthenticationMethod.Read.All` | Application |
-| `phone-registration` | B | EEID | `UserAuthenticationMethod.ReadWrite.All` | Application |
+| `export` | Simple | B2C | `User.Read.All` | Application |
+| `import` | Simple | EEID | `User.ReadWrite.All` | Application |
+| `harvest` | Advanced | B2C | `User.Read.All` | Application |
+| `worker-migrate` | Advanced | B2C | `User.Read.All` | Application |
+| `worker-migrate` | Advanced | EEID | `User.ReadWrite.All` | Application |
+| `phone-registration` | Advanced | B2C | `UserAuthenticationMethod.Read.All` | Application |
+| `phone-registration` | Advanced | EEID | `UserAuthenticationMethod.ReadWrite.All` | Application |
 | JIT Function | Both | EEID | `User.ReadWrite.All` | Application |
 
 > Admin consent required for all. `Directory.ReadWrite.All` / `Directory.Read.All` are **not required** — least-privilege approach.

@@ -232,10 +232,7 @@ Required roles (Table mode): `Storage Queue Data Contributor`, `Storage Table Da
 ```json
 "Telemetry": {
   "Enabled": true,
-  "UseConsoleLogging": true,
-  "UseApplicationInsights": false,
-  "ConnectionString": "",
-  "SamplingPercentage": 100.0
+  "UseConsoleLogging": true
 }
 ```
 

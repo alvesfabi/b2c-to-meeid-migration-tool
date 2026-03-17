@@ -1,0 +1,179 @@
+name: Build, Deploy & Run Migration
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'Migration operation to run'
+        required: true
+        type: choice
+        options:
+          - harvest
+          - worker-migrate
+          - phone-registration
+      vmCount:
+        description: 'Number of VMs to target (1-4)'
+        required: true
+        default: '4'
+        type: string
+      configProfile:
+        description: 'Config profile name (maps to appsettings.{profile}.json in Key Vault)'
+        required: true
+        default: 'worker'
+        type: string
+      dryRun:
+        description: 'Dry run (log actions but do not mutate)'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  RESOURCE_GROUP: rg-b2c-migration
+  STORAGE_ACCOUNT: ${{ secrets.STORAGE_ACCOUNT_NAME }}
+  APP_CONTAINER: app-deploy
+  DEPLOY_DIR: /opt/b2c-migration/app
+
+jobs:
+  build:
+    name: Build & Publish App
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish self-contained
+        run: |
+          dotnet publish src/B2CMigrationKit.Console/B2CMigrationKit.Console.csproj \
+            -c Release \
+            -r linux-x64 \
+            --self-contained true \
+            -o ./publish
+
+      - name: Create tarball
+        run: tar czf b2c-migration-app.tar.gz -C ./publish .
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Upload to Blob Storage
+        run: |
+          az storage blob upload \
+            --account-name ${{ env.STORAGE_ACCOUNT }} \
+            --container-name ${{ env.APP_CONTAINER }} \
+            --name b2c-migration-app.tar.gz \
+            --file b2c-migration-app.tar.gz \
+            --auth-mode login \
+            --overwrite
+
+  deploy-and-run:
+    name: Deploy & Run on VMs
+    runs-on: ubuntu-latest
+    needs: build
+    environment: migration-infra
+    strategy:
+      matrix:
+        vm-index: [1, 2, 3, 4]
+      max-parallel: 4
+      fail-fast: false
+    steps:
+      - name: Skip if VM index exceeds count
+        if: ${{ matrix.vm-index > fromJson(inputs.vmCount) }}
+        run: echo "Skipping vm-b2c-worker${{ matrix.vm-index }} (vmCount=${{ inputs.vmCount }})" && exit 0
+
+      - uses: azure/login@v2
+        if: ${{ matrix.vm-index <= fromJson(inputs.vmCount) }}
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy app + config to VM
+        if: ${{ matrix.vm-index <= fromJson(inputs.vmCount) }}
+        run: |
+          VM_NAME="vm-b2c-worker${{ matrix.vm-index }}"
+          echo "::group::Deploying to $VM_NAME"
+
+          az vm run-command invoke \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --name "$VM_NAME" \
+            --command-id RunShellScript \
+            --scripts '
+              set -e
+
+              DEPLOY_DIR="/opt/b2c-migration/app"
+              STORAGE_ACCOUNT="${{ env.STORAGE_ACCOUNT }}"
+
+              echo "=== Installing az cli (if not present) ==="
+              if ! command -v az &>/dev/null; then
+                curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+              fi
+
+              echo "=== Authenticating with Managed Identity ==="
+              az login --identity --allow-no-subscriptions
+
+              echo "=== Downloading app artifact ==="
+              mkdir -p $DEPLOY_DIR
+              az storage blob download \
+                --account-name "$STORAGE_ACCOUNT" \
+                --container-name "app-deploy" \
+                --name "b2c-migration-app.tar.gz" \
+                --file /tmp/b2c-migration-app.tar.gz \
+                --auth-mode login
+
+              echo "=== Extracting ==="
+              tar xzf /tmp/b2c-migration-app.tar.gz -C $DEPLOY_DIR
+              chmod +x $DEPLOY_DIR/B2CMigrationKit.Console
+
+              echo "=== Downloading config from Key Vault ==="
+              KV_NAME=$(az keyvault list -g "${{ env.RESOURCE_GROUP }}" --query "[0].name" -o tsv)
+              az keyvault secret show \
+                --vault-name "$KV_NAME" \
+                --name "appsettings-${{ inputs.configProfile }}${{ matrix.vm-index }}" \
+                --query "value" -o tsv > $DEPLOY_DIR/appsettings.json
+
+              echo "=== Deploy complete ==="
+            '
+          echo "::endgroup::"
+
+      - name: Run migration operation
+        if: ${{ matrix.vm-index <= fromJson(inputs.vmCount) }}
+        run: |
+          VM_NAME="vm-b2c-worker${{ matrix.vm-index }}"
+          OPERATION="${{ inputs.operation }}"
+          DRY_RUN_FLAG=""
+          if [ "${{ inputs.dryRun }}" = "true" ]; then
+            DRY_RUN_FLAG="--dry-run"
+          fi
+
+          echo "::group::Running '$OPERATION' on $VM_NAME"
+
+          az vm run-command invoke \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --name "$VM_NAME" \
+            --command-id RunShellScript \
+            --scripts "
+              cd /opt/b2c-migration/app
+              echo \"Starting $OPERATION on \$(hostname) at \$(date -u)\"
+              ./B2CMigrationKit.Console $OPERATION --config appsettings.json $DRY_RUN_FLAG 2>&1
+              echo \"Finished $OPERATION on \$(hostname) at \$(date -u) — exit code: \$?\"
+            "
+          echo "::endgroup::"
+
+      - name: Summary
+        if: ${{ matrix.vm-index <= fromJson(inputs.vmCount) && always() }}
+        run: |
+          echo "## VM ${{ matrix.vm-index }} — ${{ inputs.operation }}" >> $GITHUB_STEP_SUMMARY
+          echo "Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY

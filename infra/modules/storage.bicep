@@ -64,6 +64,14 @@ resource telemetryContainer 'Microsoft.Storage/storageAccounts/blobServices/cont
   }
 }
 
+resource appDeployContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  parent: blobService
+  name: 'app-deploy'
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
 // --- Table service (for audit records in Advanced Mode) ---
 
 resource tableService 'Microsoft.Storage/storageAccounts/tableServices@2023-05-01' = {

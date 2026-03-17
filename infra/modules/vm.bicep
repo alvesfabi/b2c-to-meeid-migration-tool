@@ -10,7 +10,7 @@ param storageAccountName string
 param tags object
 
 var storageQueueDataContributorRoleDefId = '974c5e8b-45b9-4653-ba55-5f855dd0fb88'
-var storageBlobDataContributorRoleDefId = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
+var storageBlobDataReaderRoleDefId = '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1'
 var storageTableDataContributorRoleDefId = '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3'
 
 // cloud-init: installs .NET 8 runtime + PowerShell 7 on first boot.
@@ -21,10 +21,6 @@ wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.
 dpkg -i /tmp/ms-prod.deb
 apt-get update -y
 apt-get install -y dotnet-runtime-8.0 powershell
-
-# Create telemetry output directory
-mkdir -p /opt/b2c-migration/telemetry
-chmod 775 /opt/b2c-migration/telemetry
 ''')
 
 resource nic 'Microsoft.Network/networkInterfaces@2023-11-01' = {
@@ -111,12 +107,12 @@ resource queueRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01
   }
 }
 
-// Storage Blob Data Contributor — read export blobs + upload telemetry JSONL
+// Storage Blob Data Reader — read export blobs (Simple Mode)
 resource blobRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(storageAccount.id, vmName, storageBlobDataContributorRoleDefId)
+  name: guid(storageAccount.id, vmName, storageBlobDataReaderRoleDefId)
   scope: storageAccount
   properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataContributorRoleDefId)
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataReaderRoleDefId)
     principalId: vm.identity.principalId
     principalType: 'ServicePrincipal'
   }

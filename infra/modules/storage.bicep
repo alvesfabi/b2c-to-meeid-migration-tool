@@ -56,14 +56,6 @@ resource exportContainer 'Microsoft.Storage/storageAccounts/blobServices/contain
   }
 }
 
-resource telemetryContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
-  parent: blobService
-  name: 'telemetry'
-  properties: {
-    publicAccess: 'None'
-  }
-}
-
 // --- Table service (for audit records in Advanced Mode) ---
 
 resource tableService 'Microsoft.Storage/storageAccounts/tableServices@2023-05-01' = {

@@ -22,6 +22,9 @@ param adminUsername string = 'azureuser'
 @secure()
 param adminSshPublicKey string
 
+@description('Deploy Azure Bastion for SSH access to VMs (adds ~$5/day). Can be stopped when not needed.')
+param deployBastion bool = true
+
 param tags object = {
   project: 'b2c-migration'
   managedBy: 'bicep'
@@ -52,8 +55,6 @@ module storage 'modules/storage.bicep' = {
   }
 }
 
-// One VM module invocation per worker; modules share the same RG scope so the
-// vm module can reference the storage account via 'existing' to scope role assignments.
 module workers 'modules/vm.bicep' = [for i in range(0, vmCount): {
   scope: rg
   params: {
@@ -68,6 +69,33 @@ module workers 'modules/vm.bicep' = [for i in range(0, vmCount): {
   }
 }]
 
+// Key Vault — stores app registration secrets; VMs access via Managed Identity.
+module keyvault 'modules/keyvault.bicep' = {
+  scope: rg
+  params: {
+    location: location
+    tags: tags
+    peSubnetId: network.outputs.peSubnetId
+    vnetId: network.outputs.vnetId
+    vmPrincipalIds: [for i in range(0, vmCount): workers[i].outputs.vmPrincipalId]
+  }
+}
+
+// Azure Bastion — optional, for SSH access to VMs without public IPs.
+module bastion 'modules/bastion.bicep' = if (deployBastion) {
+  scope: rg
+  params: {
+    location: location
+    tags: tags
+    vnetName: 'vnet-b2c-migration'
+  }
+  dependsOn: [network]
+}
+
 output resourceGroupName string = rg.name
 output storageAccountName string = storage.outputs.storageAccountName
 output storageQueueEndpoint string = storage.outputs.storageQueueEndpoint
+output storageBlobEndpoint string = storage.outputs.storageBlobEndpoint
+output storageTableEndpoint string = storage.outputs.storageTableEndpoint
+output keyVaultName string = keyvault.outputs.keyVaultName
+output keyVaultUri string = keyvault.outputs.keyVaultUri

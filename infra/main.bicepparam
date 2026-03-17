@@ -24,6 +24,9 @@ param adminUsername = 'azureuser'
 @secure()
 param adminSshPublicKey = '<YOUR_SSH_PUBLIC_KEY>'
 
+// Deploy Azure Bastion for SSH access (adds ~$5/day, stop when not needed).
+param deployBastion = true
+
 param tags = {
   project: 'b2c-migration'
   managedBy: 'bicep'

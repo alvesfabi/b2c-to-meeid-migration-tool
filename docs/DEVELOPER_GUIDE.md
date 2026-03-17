@@ -589,7 +589,7 @@ az storage entity query --account-name <acct> --table-name migrationAudit --filt
 
 ## Deployment
 
-### Function Deployment
+### JIT Function Deployment
 
 ```bash
 cd src/B2CMigrationKit.Function
@@ -600,31 +600,40 @@ az functionapp restart --name func-b2c-migration --resource-group rg-b2c-migrati
 
 > Always restart after deployment to load new binaries.
 
+### Bulk Migration Infrastructure
+
+Infrastructure deploys via GitHub Actions. See [`infra/README.md`](../infra/README.md) for the full runbook.
+
+**Quick start**:
+
+1. Configure GitHub secrets: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `VM_SSH_PUBLIC_KEY`, `STORAGE_ACCOUNT_NAME`
+2. Run `Deploy Infrastructure` workflow
+3. Upload worker configs to Key Vault
+4. Run `Build & Deploy Migration App` workflow
+5. Connect via Bastion tunnel: `./scripts/Connect-Worker.ps1 -WorkerIndex 1`
+
 ## Operations & Monitoring
 
-> KQL queries below are reference patterns. Configure App Insights with `Telemetry:UseApplicationInsights: true`.
+### Audit Table
 
-**Migration progress**:
-```kql
-traces | where message contains "RUN SUMMARY"
-| extend Success = toint(extract("Success: ([0-9]+)", 1, message))
-| extend Failed = toint(extract("Failed: ([0-9]+)", 1, message))
-| project timestamp, Success, Failed
+The primary observability source is the `MigrationAudit` table in Azure Table Storage. Each row tracks one user migration with status, timestamps, and error details.
+
+Query via CLI:
+```bash
+az storage entity query --table-name MigrationAudit \
+  --account-name <storage> --auth-mode login \
+  --filter "Status eq 'Failed'"
 ```
 
-**Phone registration**:
-```kql
-customMetrics
-| where name in ("PhoneRegistration.Success", "PhoneRegistration.Failed")
-| summarize Count = sum(value) by bin(timestamp, 5m), name
-| render timechart
-```
+Or use Azure Storage Explorer for visual browsing.
 
-If sustained 429s on phoneMethods, increase `PhoneRegistration.ThrottleDelayMs`.
+### Console Logging
 
-### Scaling Patterns
+Connect to a worker via Bastion SSH to see real-time stdout. Enable `--verbose` for detailed Graph API call logging.
 
-Scale by adding worker instances with dedicated app registrations and distinct IPs. Increase `MaxConcurrency` within a worker for more parallelism per instance. For multiple instances, use separate VMs/ACI/AKS pods to avoid per-IP soft limits. See [Architecture Guide](ARCHITECTURE_GUIDE.md) for architecture details.
+### Scaling
+
+Scale by adding worker VMs (increase `vmCount` in the deploy workflow). Each worker needs a dedicated app registration with distinct IPs to avoid per-IP soft limits. See [Architecture Guide](ARCHITECTURE_GUIDE.md) § 9.
 
 ## Troubleshooting
 

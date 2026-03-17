@@ -252,7 +252,7 @@ Worker N  (App Reg B2C-N / EEID-N)  ──► queue: phone-reg-wN  ──► Pho
 
 ## 3. Design Principles
 
-> **🚧 Note**: Principles describe the **target production architecture**. v1.0 implements core migration for local development. SFI features (Private Endpoints, VNet, Key Vault) are design guidance for future releases.
+> **Note**: Infrastructure (VNet, Private Endpoints, Key Vault) is implemented in `infra/` and deployed via GitHub Actions.
 
 | Principle | Details |
 |-----------|---------|
@@ -440,52 +440,71 @@ Developer Workstation
 └── External ID Test Tenant (Custom Extension → ngrok URL)
 ```
 
-- Fast iteration, full debugging, inline RSA keys, no Key Vault dependency.
+Fast iteration, full debugging, inline RSA keys, no Key Vault dependency.
 
-### Production Environment (🔜 v2.0)
+### Production Environment
 
-- Azure Function App (Linux Premium EP1) with VNet integration + Managed Identity
-- Private Endpoints for Key Vault, Storage (Queue/Table/Blob)
-- Application Insights with dashboards and alert rules
-- Auto-scale 1-20 instances
-
-### Multi-Instance Deployment
+All resources deploy via Bicep (`infra/`) and two GitHub Actions workflows. No public endpoints; all data-plane traffic stays inside the VNet via Private Endpoints.
 
 ```
-Container 1  (App Reg B2C-1/EEID-1, IP: 10.0.1.10)
-Container 2  (App Reg B2C-2/EEID-2, IP: 10.0.1.11)
-...
-Container N  (App Reg B2C-N/EEID-N, IP: 10.0.1.NN)
+┌─ VNet 10.0.0.0/16 ─────────────────────────────────────────────┐
+│                                                                  │
+│  workers (10.0.1.0/24)          private-endpoints (10.0.2.0/24) │
+│  ┌──────────┐ ┌──────────┐     ┌─────────────────────────────┐  │
+│  │ worker-1 │ │ worker-2 │     │ PE: Queue, Blob, Table      │  │
+│  │ worker-3 │ │ worker-4 │     │ PE: Key Vault               │  │
+│  └────┬─────┘ └────┬─────┘     └─────────────────────────────┘  │
+│       │             │                                            │
+│  AzureBastionSubnet (10.0.3.0/26)                               │
+│  ┌────────────────────┐                                          │
+│  │ Bastion (Standard) │ ← SSH tunnel from developer terminal    │
+│  └────────────────────┘                                          │
+│                                                                  │
+│  NAT Gateway ← outbound HTTPS to Graph API                      │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-Options: ACI, AKS (StatefulSet), or separate VMs.
+**Components**:
 
-### Monitoring (Sample KQL)
+- **4× Ubuntu 22.04 VMs** (Standard_B2s) — self-contained .NET 8 console app
+- **Storage Account** — Queue (work items), Table (audit records), Blob (export data + app artifact). All via Private Endpoints.
+- **Key Vault** — stores `appsettings` per worker. RBAC-only, PE access.
+- **Azure Bastion** (Standard, tunneling enabled) — SSH access without public IPs. Optional; can be stopped to save cost.
+- **NAT Gateway** — controlled outbound for Graph API calls.
 
-> These are reference queries. This repo does not deploy App Insights resources.
+**VM Managed Identity roles**: Storage Queue Data Contributor, Storage Blob Data Reader, Storage Table Data Contributor, Key Vault Secrets User.
 
-**Migration progress**:
-```kql
-traces
-| where message contains "RUN SUMMARY"
-| extend TotalUsers = toint(extract("Total: ([0-9]+)", 1, message))
-| extend SuccessCount = toint(extract("Success: ([0-9]+)", 1, message))
-| summarize TotalMigrated = sum(SuccessCount) by bin(timestamp, 1h)
-| render timechart
-```
+### Deployment Workflow
 
-**Throttling events**:
-```kql
-traces
-| where message contains "throttle" or message contains "429"
-| summarize ThrottleCount = count() by cloud_RoleInstance, bin(timestamp, 5m)
-| render timechart
-```
+1. **`Deploy Infrastructure`** (GitHub Action, `workflow_dispatch`) — provisions all Azure resources via Bicep.
+2. **Upload configs** to Key Vault (one-time): `az keyvault secret set --name appsettings-worker1 --file ...`
+3. **`Build & Deploy Migration App`** (GitHub Action) — builds self-contained binary, uploads to blob, provisions VMs via `run-command` (falls back to manual Bastion SSH if blocked).
+4. **Run migration** via Bastion SSH tunnel:
+   ```bash
+   ./scripts/Connect-Worker.ps1 -WorkerIndex 1   # opens tunnel on port 2201
+   ssh -p 2201 azureuser@localhost                # in another terminal
+   cd /opt/b2c-migration/app
+   ./B2CMigrationKit.Console harvest --config appsettings.json
+   ./B2CMigrationKit.Console worker-migrate --config appsettings.json
+   ```
 
-### Alerting
+See [`infra/README.md`](../infra/README.md) for the full runbook.
 
-| Alert | Condition |
-|-------|-----------|
-| JIT failures | >5% error rate in 5-min window |
-| Migration stalled | No RUN SUMMARY in 30 min |
-| Key Vault access failure | >3 unauthorized requests in 5 min |
+### Telemetry
+
+No App Insights dependency. Workers use two telemetry channels:
+
+- **Table Storage** (`MigrationAudit`) — structured audit records per user (status, timestamps, errors). Primary observability source.
+- **Console logging** (`ILogger`) — stdout for real-time debugging via Bastion SSH.
+
+Query audit records via Azure Storage Explorer or `az storage entity query`.
+
+### Cost Estimate
+
+| Resource | Running | Stopped |
+|----------|---------|---------|
+| 4× Standard_B2s VMs | ~$4/day | $0 (deallocated) |
+| Bastion Standard | ~$5/day | $0 (stopped) |
+| NAT Gateway | ~$1/day | $0 (deleted) |
+| Storage | negligible | negligible |
+| **Total** | **~$10/day** | **~$0** |

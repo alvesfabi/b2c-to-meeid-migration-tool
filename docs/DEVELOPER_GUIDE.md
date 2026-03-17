@@ -5,8 +5,8 @@
 - [Overview](#overview)
 - [Configuration Guide](#configuration-guide)
 - [Development Workflow](#development-workflow)
-  - [Running Simple Mode (Export → Import)](#running-mode-a-export--import)
-  - [Running Advanced Mode (Harvest → Worker Migrate → Phone Registration)](#running-mode-b-harvest--worker-migrate--phone-registration)
+  - [Running Simple Mode (Export → Import)](#running-simple-mode-export--import)
+  - [Running Advanced Mode (Harvest → Worker Migrate → Phone Registration)](#running-advanced-mode-harvest--worker-migrate--phone-registration)
 - [JIT Migration Implementation](#jit-migration-implementation)
 - [Attribute Mapping](#attribute-mapping)
 - [Migration Audit Table](#migration-audit-table)
@@ -643,7 +643,7 @@ Scale by adding worker VMs (increase `vmCount` in the deploy workflow). Each wor
 | "User already exists" | Check for duplicates, use `B2CObjectId` to correlate. Handled as `Duplicate` status. |
 | High latency, zero 429s | Soft concurrency ceiling hit. Reduce `MaxConcurrency`. |
 
-**Tips**: Enable `--verbose` logging, check App Insights traces, test with small subsets first, use VS Code breakpoints for local debugging.
+**Tips**: Enable `--verbose` logging, check Table Storage audit records, test with small subsets first, use VS Code breakpoints for local debugging.
 
 ### Resources
 

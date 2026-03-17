@@ -62,10 +62,10 @@ The kit has two independent concerns:
 │  │   (Services, Models, Orchestrators, Abstractions)   │       │
 │  └──────┬───────────┬───────────┬──────────┬──────────┘       │
 │         ▼           ▼           ▼          ▼                   │
-│  ┌──────────┐ ┌─────────┐ ┌──────────┐ ┌──────────┐          │
-│  │ Storage  │ │ Table   │ │Key Vault │ │App       │          │
-│  │Queue/Blob│ │ Storage │ │ *Future  │ │ Insights │          │
-│  └──────────┘ └─────────┘ └──────────┘ └──────────┘          │
+│  ┌──────────┐ ┌─────────┐ ┌──────────┐                        │
+│  │ Storage  │ │ Table   │ │Key Vault │                        │
+│  │Queue/Blob│ │ Storage │ │          │                        │
+│  └──────────┘ └─────────┘ └──────────┘                        │
 └─────────────────────────────────────────────────────────────────┘
          │                           │
          ▼                           ▼
@@ -258,7 +258,7 @@ Worker N  (App Reg B2C-N / EEID-N)  ──► queue: phone-reg-wN  ──► Pho
 |-----------|---------|
 | **Modular Architecture** | Shared Core Library (business logic) + Console (CLI) + Azure Functions (JIT). Zero hosting-specific dependencies in Core. |
 | **Security First** | Target: Private Endpoints, Managed Identity, Key Vault. Current v1.0: client secrets for local dev. Encryption at rest + in transit (TLS 1.2+). Least privilege permissions. |
-| **Observability** | Structured logging (App Insights), run summaries, distributed tracing, custom metrics. |
+| **Observability** | Structured logging (console + Table Storage audit), run summaries, JSONL telemetry files. |
 | **Reliability** | Idempotent operations, graceful degradation, checkpoint/resume via queue visibility timeouts, Polly exponential backoff + jitter on 429s. |
 | **Scalability** | Multi-app parallelization via per-worker-pair queues (see [§2.1](#21-end-to-end-pipeline-narrative)). Each worker pair has dedicated app registrations (B2C + EEID) and a per-pair phone-registration queue. Two scaling axes: add more worker pairs (linear throughput), or increase `MaxConcurrency` within a worker (sweet spot: 8). |
 
@@ -415,7 +415,7 @@ JIT:     user@externalid.com → user@b2c.com  (reverse using same local part)
 
 ### Data Protection
 
-- **At rest**: Azure SSE (Storage), HSM-backed keys (Key Vault Premium), encrypted App Insights logs (90-day retention)
+- **At rest**: Azure SSE (Storage), HSM-backed keys (Key Vault Premium)
 - **In transit**: TLS 1.2+ everywhere, strict certificate validation, HTTPS enforced
 - **Secrets**: Target: Key Vault references (`@Microsoft.KeyVault(SecretUri=...)`). Current: config files (gitignored)
 
@@ -472,7 +472,7 @@ All resources deploy via Bicep (`infra/`) and two GitHub Actions workflows. No p
 - **Azure Bastion** (Standard, tunneling enabled) — SSH access without public IPs. Optional; can be stopped to save cost.
 - **NAT Gateway** — controlled outbound for Graph API calls.
 
-**VM Managed Identity roles**: Storage Queue Data Contributor, Storage Blob Data Reader, Storage Table Data Contributor, Key Vault Secrets User.
+**VM Managed Identity roles**: Storage Queue Data Contributor, Storage Blob Data Contributor, Storage Table Data Contributor, Key Vault Secrets User.
 
 ### Deployment Workflow
 

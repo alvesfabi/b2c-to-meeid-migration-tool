@@ -7,6 +7,7 @@ PowerShell scripts for running bulk migrations, configuring JIT password migrati
 ## Table of Contents
 
 - [Prerequisites](#prerequisites)
+- [Readiness Validation](#readiness-validation)
 - [Simple Mode (Export → Import)](#simple-mode-export--import)
 - [Advanced Mode (Harvest → Workers)](#advanced-mode-harvest--workers)
 - [JIT Password Migration Setup](#jit-password-migration-setup)
@@ -22,6 +23,31 @@ PowerShell scripts for running bulk migrations, configuring JIT password migrati
 3. **Configuration files** — copy the relevant `.example.json` and fill in your tenant credentials (see [Developer Guide](../docs/DEVELOPER_GUIDE.md#configuration-guide))
 
 Additional for JIT testing: **PowerShell 7.0+**, **ngrok**, **Azure Function Core Tools v4**.
+
+---
+
+## Readiness Validation
+
+Run the pre-flight check before starting any migration to verify connectivity, permissions, and storage.
+
+### Validate-MigrationReadiness.ps1
+
+Comprehensive readiness checker that validates Graph API connectivity, required permissions, extension attributes, and storage infrastructure. Prints a PASS/FAIL summary report.
+
+```powershell
+.\scripts\Validate-MigrationReadiness.ps1                                    # default (simple mode)
+.\scripts\Validate-MigrationReadiness.ps1 -Mode worker                       # validate worker mode prerequisites
+.\scripts\Validate-MigrationReadiness.ps1 -ConfigFile "appsettings.worker1.json"  # custom config
+```
+
+| Check | What it validates |
+|---|---|
+| Config | JSON valid, tenant IDs and secrets not placeholders |
+| Graph auth | OAuth2 client_credentials flow to both tenants |
+| Permissions | User.Read and Directory access on each tenant |
+| Extensions | Extension app and properties exist in EEID |
+| Storage | Azurite ports or cloud storage reachable, containers/queues/tables |
+| Tools | .NET SDK installed, PowerShell 7+ |
 
 ---
 

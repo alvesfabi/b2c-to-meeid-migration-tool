@@ -71,3 +71,4 @@ module workers 'modules/vm.bicep' = [for i in range(0, vmCount): {
 output resourceGroupName string = rg.name
 output storageAccountName string = storage.outputs.storageAccountName
 output storageQueueEndpoint string = storage.outputs.storageQueueEndpoint
+output bastionName string = network.outputs.bastionName

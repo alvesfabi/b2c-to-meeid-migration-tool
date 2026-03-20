@@ -14,9 +14,22 @@
     Analyze a single JSONL file instead of aggregating all workers.
     When set, phone registration section is skipped.
 
+.PARAMETER RunIndex
+    Which run to analyze (0 = last/default, 1 = second-to-last, 2 = third-to-last, ...).
+    Use -ListRuns to see all available runs with their indices.
+
+.PARAMETER ListRuns
+    List all detected runs (by WorkerMigrate.Started timestamp) and exit.
+
 .EXAMPLE
-    # Aggregate all 4 workers + 4 phone workers (default)
+    # Aggregate all 4 workers + 4 phone workers (default, last run)
     .\Analyze-Telemetry.ps1
+
+    # List all available runs
+    .\Analyze-Telemetry.ps1 -ListRuns
+
+    # Analyze the second-to-last run
+    .\Analyze-Telemetry.ps1 -RunIndex 1
 
     # Aggregate 8 workers
     .\Analyze-Telemetry.ps1 -WorkerCount 8
@@ -27,7 +40,9 @@
 param(
     [int]$WorkerCount = 4,
     [string]$ConsoleDir = "$PSScriptRoot\..\src\B2CMigrationKit.Console",
-    [string]$TelemetryFile = ""
+    [string]$TelemetryFile = "",
+    [int]$RunIndex = 0,
+    [switch]$ListRuns
 )
 
 # ── Helper: load one or more JSONL files into a flat string array ──────────────
@@ -95,21 +110,57 @@ $userApiMs           = [System.Collections.Generic.List[int]]::new()
 $migrateThrottledB2c  = 0
 $migrateThrottledEeid = 0
 
-# First pass: find the timestamp of the last WorkerMigrate.Started (= last run)
+# First pass: collect all WorkerMigrate.Started timestamps (one per run)
+$allMigrateRunStarts = [System.Collections.Generic.List[datetime]]::new()
 foreach ($l in $migrateLines) {
     if ($l -match '"name":"WorkerMigrate\.Started"' -and $l -match '"ts":"([^"]+)"') {
         $tsRaw = $Matches[1] -replace '\u002B', '+'
-        try { $lastStartedTs = [datetime]$tsRaw } catch {}
+        try { $allMigrateRunStarts.Add([datetime]$tsRaw) } catch {}
     }
 }
+$allMigrateRunStarts = @($allMigrateRunStarts | Sort-Object)
 
-# Second pass: only process events from the last run
+# -ListRuns: show available runs and exit
+if ($ListRuns) {
+    Write-Host ""
+    Write-Host "Available runs (WorkerMigrate.Started):" -ForegroundColor Cyan
+    if ($allMigrateRunStarts.Count -eq 0) {
+        Write-Host "  No runs found in telemetry files." -ForegroundColor Yellow
+    } else {
+        for ($i = 0; $i -lt $allMigrateRunStarts.Count; $i++) {
+            $label = if ($i -eq $allMigrateRunStarts.Count - 1) { "← latest (RunIndex 0)" } `
+                     else { "RunIndex $($allMigrateRunStarts.Count - 1 - $i)" }
+            Write-Host ("  [{0}] {1}  {2}" -f $i, $allMigrateRunStarts[$i], $label)
+        }
+    }
+    Write-Host ""
+    exit 0
+}
+
+# Select run boundary: RunIndex 0 = last, 1 = second-to-last, etc.
+$runCount = $allMigrateRunStarts.Count
+if ($runCount -eq 0) {
+    $lastStartedTs = $null
+    $migrateRunEnd = $null
+} else {
+    $selectedIdx   = $runCount - 1 - $RunIndex
+    if ($selectedIdx -lt 0) { $selectedIdx = 0 }
+    $lastStartedTs = $allMigrateRunStarts[$selectedIdx]
+    $migrateRunEnd = if ($selectedIdx -lt $runCount - 1) { $allMigrateRunStarts[$selectedIdx + 1] } else { $null }
+}
+
+if ($RunIndex -gt 0) {
+    Write-Host ("Run selected    : RunIndex {0} → started {1}" -f $RunIndex, $lastStartedTs) -ForegroundColor Cyan
+}
+
+# Second pass: only process events from the selected run
 foreach ($l in $migrateLines) {
     if ($l -match '"ts":"([^"]+)"') {
         $tsRaw = $Matches[1] -replace '\u002B', '+'
         try {
             $ts = [datetime]$tsRaw
             if ($lastStartedTs -and $ts -lt $lastStartedTs) { continue }
+            if ($migrateRunEnd  -and $ts -ge $migrateRunEnd) { continue }
             $migrateTs.Add($ts)
         } catch {}
     }
@@ -224,21 +275,36 @@ if ($phoneLines.Count -gt 0) {
     # Per-error-code breakdown for failures
     $phErrCodes  = @{}
 
-    # First pass: find the timestamp of the last PhoneRegistration.Started (= last run)
+    # First pass: collect all PhoneRegistration.Started timestamps
+    $allPhoneRunStarts = [System.Collections.Generic.List[datetime]]::new()
     foreach ($l in $phoneLines) {
         if ($l -match '"name":"PhoneRegistration\.Started"' -and $l -match '"ts":"([^"]+)"') {
             $tsRaw = $Matches[1] -replace '\u002B', '+'
-            try { $lastPhoneStartedTs = [datetime]$tsRaw } catch {}
+            try { $allPhoneRunStarts.Add([datetime]$tsRaw) } catch {}
         }
     }
+    $allPhoneRunStarts = @($allPhoneRunStarts | Sort-Object)
 
-    # Second pass: only process events from the last run
+    # Select same run index as migrate
+    $phRunCount = $allPhoneRunStarts.Count
+    if ($phRunCount -eq 0) {
+        $lastPhoneStartedTs = $null
+        $phoneRunEnd = $null
+    } else {
+        $phSelectedIdx      = $phRunCount - 1 - $RunIndex
+        if ($phSelectedIdx -lt 0) { $phSelectedIdx = 0 }
+        $lastPhoneStartedTs = $allPhoneRunStarts[$phSelectedIdx]
+        $phoneRunEnd        = if ($phSelectedIdx -lt $phRunCount - 1) { $allPhoneRunStarts[$phSelectedIdx + 1] } else { $null }
+    }
+
+    # Second pass: only process events from the selected run
     foreach ($l in $phoneLines) {
         if ($l -match '"ts":"([^"]+)"') {
             $tsRaw = $Matches[1] -replace '\u002B', '+'
             try {
                 $ts = [datetime]$tsRaw
                 if ($lastPhoneStartedTs -and $ts -lt $lastPhoneStartedTs) { continue }
+                if ($phoneRunEnd        -and $ts -ge $phoneRunEnd)         { continue }
                 $phoneTs.Add($ts)
             } catch {}
         }

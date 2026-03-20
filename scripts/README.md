@@ -266,3 +266,144 @@ Provisions additional app registrations in B2C and External ID for parallel work
 ### _Common.ps1
 
 Shared helper module dot-sourced by all scripts. Provides Azurite checks, storage initialization, colored output, and the build+run wrapper. Not meant to be run directly.
+
+---
+
+## Azure VM Operations
+
+Scripts for operating on Azure VMs accessed via Bastion tunnels. All scripts assume:
+- You're logged in via `az login`
+- VMs have no public IPs — access is through Azure Bastion
+- The app is deployed to `~/app/` on each VM
+- Default resource group: `rg-b2c-migration`, Bastion: `bas-b2c-migration`
+- SSH key at `$env:USERPROFILE\.ssh\b2c-migration-key`
+
+### Invoke-RemoteCommand.ps1
+
+Internal helper that runs a command on a VM via Bastion SSH tunnel. Dot-sourced by other scripts.
+
+```powershell
+# Direct usage (usually not needed)
+.\scripts\Invoke-RemoteCommand.ps1 -VmName "vm-b2c-worker1" -Command "hostname"
+
+# Dot-source and call the function
+. .\scripts\Invoke-RemoteCommand.ps1
+$output = Invoke-RemoteCommand -VmName "vm-b2c-worker1" -Command "uptime"
+```
+
+### Start-AzureHarvest.ps1
+
+Runs the harvest operation on VM1 (master/producer).
+
+```powershell
+.\scripts\Start-AzureHarvest.ps1
+.\scripts\Start-AzureHarvest.ps1 -ConfigFile appsettings.master.json
+```
+
+### Start-AzureWorkers.ps1
+
+Starts worker processes on all VMs in parallel (each in its own window).
+
+```powershell
+# Start worker-migrate on 2 VMs (default)
+.\scripts\Start-AzureWorkers.ps1
+
+# Start phone-registration on 4 VMs
+.\scripts\Start-AzureWorkers.ps1 -VmCount 4 -Command phone-registration
+```
+
+### Stop-AzureWorkers.ps1
+
+Kills running migration processes on all VMs.
+
+```powershell
+.\scripts\Stop-AzureWorkers.ps1
+.\scripts\Stop-AzureWorkers.ps1 -VmCount 4
+```
+
+### Clear-MigrationQueues.ps1
+
+Purges Azure Storage queues (`user-ids-to-process` and `phone-registration`) via a VM (private endpoint access).
+
+```powershell
+.\scripts\Clear-MigrationQueues.ps1 -StorageAccountName stb2cmigration
+```
+
+### Remove-BulkExternalIdUsers.ps1
+
+Deletes migrated test users from the External ID tenant via Graph API.
+
+```powershell
+# Preview what would be deleted
+.\scripts\Remove-BulkExternalIdUsers.ps1 -WhatIf
+
+# Delete users with RequiresMigration = true
+.\scripts\Remove-BulkExternalIdUsers.ps1 -Force
+
+# Delete all users with the migration attribute (true or false)
+.\scripts\Remove-BulkExternalIdUsers.ps1 -Filter "all" -Force
+```
+
+### Get-AzureTelemetry.ps1
+
+Downloads telemetry JSONL files from all VMs and optionally runs analysis.
+
+```powershell
+# Download only
+.\scripts\Get-AzureTelemetry.ps1
+
+# Download and analyze
+.\scripts\Get-AzureTelemetry.ps1 -Analyze
+
+# Custom VM count and output directory
+.\scripts\Get-AzureTelemetry.ps1 -VmCount 4 -OutputDir C:\telemetry -Analyze
+```
+
+### Get-AzureWorkerStatus.ps1
+
+Quick health check — shows processes, disk, memory, and telemetry files on each VM.
+
+```powershell
+.\scripts\Get-AzureWorkerStatus.ps1
+.\scripts\Get-AzureWorkerStatus.ps1 -VmCount 4
+```
+
+### Common Parameters
+
+All Azure VM scripts share these defaults:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-ResourceGroup` | `rg-b2c-migration` | Azure resource group |
+| `-BastionName` | `bas-b2c-migration` | Azure Bastion resource name |
+| `-VmCount` | `2` | Number of worker VMs |
+| `-SshKeyPath` | `$env:USERPROFILE\.ssh\b2c-migration-key` | SSH private key path |
+
+### Typical Workflow
+
+```powershell
+# 1. Check VM status
+.\scripts\Get-AzureWorkerStatus.ps1
+
+# 2. Clear queues from previous run
+.\scripts\Clear-MigrationQueues.ps1 -StorageAccountName stb2cmigration
+
+# 3. Run harvest (enqueue user IDs)
+.\scripts\Start-AzureHarvest.ps1
+
+# 4. Start workers (opens separate windows)
+.\scripts\Start-AzureWorkers.ps1
+
+# 5. Monitor status
+.\scripts\Get-AzureWorkerStatus.ps1
+
+# 6. When done, download and analyze telemetry
+.\scripts\Get-AzureTelemetry.ps1 -Analyze
+
+# 7. Clean up test users from External ID
+.\scripts\Remove-BulkExternalIdUsers.ps1 -WhatIf
+.\scripts\Remove-BulkExternalIdUsers.ps1 -Force
+
+# 8. Stop workers if needed
+.\scripts\Stop-AzureWorkers.ps1
+```

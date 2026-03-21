@@ -37,6 +37,18 @@ az ad app federated-credential create --id <APP_ID> --parameters '{
 
 ## 2. Deploy Infrastructure
 
+### Option A: Deploy-All.ps1 (Recommended)
+
+The fastest way to deploy everything end-to-end (infra + build + upload + provision VMs):
+
+```powershell
+./scripts/Deploy-All.ps1 -StorageAccountName stb2cmig123
+```
+
+See [scripts/README.md](../scripts/README.md#full-deployment-deploy-all) for all parameters.
+
+### Option B: GitHub Actions
+
 Run the **Deploy Infrastructure** workflow (`workflow_dispatch`). Choose region, VM size, and whether to deploy Bastion.
 
 Creates: Resource Group, VNet, 4 VMs, Storage (Queue/Blob/Table + Private Endpoints), Key Vault, NAT Gateway, Bastion (optional).

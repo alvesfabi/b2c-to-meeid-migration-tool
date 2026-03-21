@@ -6,6 +6,7 @@ PowerShell scripts for running bulk migrations, configuring JIT password migrati
 
 ## Table of Contents
 
+- [Full Deployment (Deploy-All)](#full-deployment-deploy-all)
 - [Prerequisites](#prerequisites)
 - [Readiness Validation](#readiness-validation)
 - [Simple Mode (Export → Import)](#simple-mode-export--import)
@@ -13,6 +14,48 @@ PowerShell scripts for running bulk migrations, configuring JIT password migrati
 - [JIT Password Migration Setup](#jit-password-migration-setup)
 - [Telemetry Analysis](#telemetry-analysis)
 - [Utility Scripts](#utility-scripts)
+
+---
+
+## Full Deployment (Deploy-All)
+
+### Deploy-All.ps1
+
+Single script that orchestrates the complete Azure VM deployment pipeline: infrastructure provisioning, app build, artifact upload, config distribution, and VM setup.
+
+```powershell
+# Full deployment
+.\scripts\Deploy-All.ps1 -StorageAccountName stb2cmig123
+
+# Skip infra (already deployed) and build (already built)
+.\scripts\Deploy-All.ps1 -StorageAccountName stb2cmig123 -SkipInfra -SkipBuild
+
+# Dry run
+.\scripts\Deploy-All.ps1 -StorageAccountName stb2cmig123 -WhatIf
+
+# Custom worker count and location
+.\scripts\Deploy-All.ps1 -StorageAccountName stb2cmig123 -VmCount 8 -Location westus2
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-StorageAccountName` | *(required)* | Globally unique Azure Storage account name |
+| `-ResourceGroup` | `rg-b2c-migration` | Target resource group |
+| `-Location` | `eastus2` | Azure region |
+| `-VmCount` | `4` | Number of worker VMs to provision |
+| `-ConfigProfile` | `worker` | Config file prefix (maps to `appsettings.{profile}N.json`) |
+| `-SkipInfra` | `false` | Skip Bicep infrastructure deployment |
+| `-SkipBuild` | `false` | Skip dotnet publish (reuse existing tarball) |
+| `-WhatIf` | `false` | Dry run — shows what would happen without making changes |
+
+**Pipeline steps:**
+1. Deploy infrastructure via `az deployment sub create` with `infra/main.bicep`
+2. Build self-contained linux-x64 .NET app and create tarball
+3. Upload tarball to Blob Storage (`app-deploy` container)
+4. Upload per-worker `appsettings.{profile}N.json` files to Key Vault as secrets
+5. Provision each VM via `az vm run-command` (falls back to manual Bastion instructions if blocked)
+
+**Prerequisites:** Azure CLI logged in, `appsettings.worker1.json` through `appsettings.workerN.json` in repo root.
 
 ---
 

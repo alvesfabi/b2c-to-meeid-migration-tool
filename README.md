@@ -120,6 +120,10 @@ graph LR
   
 > **⚠️ SAMPLE**: This toolkit is currently a **sample implementation** to showcase how to implement the [Just-In-Time password migration mechanism](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-migrate-passwords-just-in-time?tabs=graph) for bulk migration and JIT password migration.
 
+## ⚡ Quick Start
+
+Want to try it locally in 5 minutes? See **[QUICKSTART.md](QUICKSTART.md)** — local dev setup with Azurite, Simple Mode, and 20 test users.
+
 ## 📚 Documentation
 
 This migration kit includes two comprehensive guides:

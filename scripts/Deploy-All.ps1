@@ -168,13 +168,31 @@ for ($i = 1; $i -le $VmCount; $i++) {
     }
 
     # The script runs on the VM as root via run-command.
-    # cloud-init already installed dotnet-sdk-8.0, git, and created /opt/b2c-migration/app.
+    # It installs prerequisites itself in case cloud-init used an older template.
     $scriptContent = @"
 #!/bin/bash
 set -euo pipefail
 
 DEPLOY_DIR=/opt/b2c-migration/app
 REPO_DIR=/opt/b2c-migration/repo
+
+echo "=== Installing prerequisites ==="
+if ! command -v git &>/dev/null || ! command -v dotnet &>/dev/null || ! dotnet --list-sdks 2>/dev/null | grep -q '^8\.'; then
+    # Ensure Microsoft package repo is registered
+    if [ ! -f /etc/apt/sources.list.d/microsoft-prod.list ]; then
+        wget -q https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O /tmp/ms-prod.deb
+        dpkg -i /tmp/ms-prod.deb
+    fi
+    apt-get update -y
+    apt-get install -y dotnet-sdk-8.0 git
+    echo "Prerequisites installed."
+else
+    echo "Prerequisites already present."
+fi
+
+mkdir -p `$DEPLOY_DIR
+mkdir -p /opt/b2c-migration/telemetry
+chmod 775 `$DEPLOY_DIR /opt/b2c-migration/telemetry
 
 echo "=== Cloning repo ==="
 rm -rf `$REPO_DIR
@@ -188,7 +206,7 @@ dotnet publish `$REPO_DIR/src/B2CMigrationKit.Console/B2CMigrationKit.Console.cs
     --verbosity quiet
 
 chmod +x `$DEPLOY_DIR/B2CMigrationKit.Console 2>/dev/null || true
-chown -R ${AdminUsername}:${AdminUsername} `$DEPLOY_DIR
+chown -R ${AdminUsername}:${AdminUsername} `$DEPLOY_DIR /opt/b2c-migration/telemetry
 
 echo "=== Setup complete for $vmName ==="
 echo "App deployed to `$DEPLOY_DIR"
@@ -197,18 +215,34 @@ echo "App deployed to `$DEPLOY_DIR"
     $tempScript = Join-Path ([System.IO.Path]::GetTempPath()) "setup-$vmName.sh"
     $scriptContent | Set-Content -Path $tempScript -NoNewline
 
-    az vm run-command invoke `
+    $result = az vm run-command invoke `
         --resource-group $ResourceGroup `
         --name $vmName `
         --command-id RunShellScript `
-        --scripts "@$tempScript" 2>&1 | Out-Null
+        --scripts "@$tempScript" 2>&1
 
     if ($LASTEXITCODE -ne 0) {
-        Write-Warn "  ⚠ run-command failed for $vmName (may be blocked by policy)."
+        Write-Warn "  run-command failed for $vmName (may be blocked by policy)."
+        Write-Warn "  $result"
         $failedVms += $vmName
     }
     else {
-        Write-Success "  ✓ $vmName provisioned."
+        # Extract stdout/stderr from the JSON response
+        try {
+            $json = $result | ConvertFrom-Json
+            $msg = $json.value[0].message
+            if ($msg -match '\[stderr\]\s*\S') {
+                Write-Warn "  $vmName completed with warnings:"
+                Write-Host $msg
+                $failedVms += $vmName
+            }
+            else {
+                Write-Success "  $vmName provisioned."
+            }
+        }
+        catch {
+            Write-Success "  $vmName provisioned."
+        }
         $provisionedVms++
     }
 

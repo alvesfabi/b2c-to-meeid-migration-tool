@@ -220,3 +220,322 @@ function Invoke-ConsoleApp {
         Pop-Location
     }
 }
+
+# ─── Well-known Graph resource IDs ─────────────────────────────────────────────
+# Source: https://learn.microsoft.com/en-us/graph/permissions-reference
+
+# Microsoft Graph resource app ID (same in every tenant)
+$GRAPH_APP_ID          = "00000003-0000-0000-c000-000000000000"
+
+# Application permission role IDs (stable Microsoft-assigned GUIDs)
+$PERM_USER_READ_ALL    = "df021288-bdef-4463-88db-98f22de89214"  # User.Read.All (Application)
+$PERM_USER_READWRITE   = "741f803b-c850-494e-b5df-cde7c675a1ca"  # User.ReadWrite.All (Application)
+
+# Public client used for device code authentication (Microsoft Graph Command Line Tools)
+$DEVICE_CODE_CLIENT    = "14d82eec-204b-4c2f-b7e8-296a70dab67e"
+
+# ─── Section header helper ─────────────────────────────────────────────────────
+
+function Write-SectionHeader {
+    param([string]$Title, [ConsoleColor]$Color = [ConsoleColor]::Cyan)
+    $width = 62
+    $line  = "═" * $width
+    Write-Host ""
+    Write-Host $line -ForegroundColor $Color
+    Write-Host "  $Title" -ForegroundColor $Color
+    Write-Host $line -ForegroundColor $Color
+    Write-Host ""
+}
+
+function Write-SubHeader {
+    param([string]$Title, [ConsoleColor]$Color = [ConsoleColor]::Yellow)
+    $width = 62
+    $line  = "─" * $width
+    Write-Host ""
+    Write-Host $line -ForegroundColor $Color
+    Write-Host "  $Title" -ForegroundColor $Color
+    Write-Host $line -ForegroundColor $Color
+    Write-Host ""
+}
+
+# ─── Device code authentication helper ────────────────────────────────────────
+
+function Get-DeviceCodeToken {
+    param(
+        [string]$TenantId,
+        [string]$TenantLabel,
+        [string[]]$Scopes
+    )
+
+    Write-SubHeader "Sign in as ADMIN in: $TenantLabel"
+    Write-Info "Required permission: Application.ReadWrite.All"
+    Write-Host ""
+
+    try {
+        $dcResp = Invoke-RestMethod -Method POST `
+            -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/devicecode" `
+            -Body @{
+                client_id = $DEVICE_CODE_CLIENT
+                scope     = ($Scopes -join ' ')
+            }
+    }
+    catch {
+        Write-Err "Device code request for '$TenantLabel' failed: $_"
+        throw
+    }
+
+    Write-Host $dcResp.message -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Waiting for authentication..." -ForegroundColor Gray
+
+    $deadline = [DateTime]::UtcNow.AddSeconds([int]$dcResp.expires_in)
+    $interval = [int]$dcResp.interval
+
+    while ([DateTime]::UtcNow -lt $deadline) {
+        Start-Sleep -Seconds $interval
+        try {
+            $tok = Invoke-RestMethod -Method POST `
+                -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" `
+                -Body @{
+                    grant_type  = 'urn:ietf:params:oauth:grant-type:device_code'
+                    client_id   = $DEVICE_CODE_CLIENT
+                    device_code = $dcResp.device_code
+                }
+            Write-Success "✓ Authenticated to $TenantLabel"
+            return $tok.access_token
+        }
+        catch {
+            $body = $null
+            if ($_.ErrorDetails.Message) {
+                $body = $_.ErrorDetails.Message | ConvertFrom-Json -ErrorAction SilentlyContinue
+            }
+            switch ($body.error) {
+                "authorization_pending" { continue }
+                "authorization_declined" { throw "Authentication was declined." }
+                "expired_token"          { throw "Device code expired — please re-run the script." }
+                default                  { throw }
+            }
+        }
+    }
+    throw "Authentication timed out after $($dcResp.expires_in)s"
+}
+
+# ─── Graph REST helper ─────────────────────────────────────────────────────────
+
+function Invoke-Graph {
+    param(
+        [string]$Method,
+        [string]$Uri,
+        [hashtable]$Headers,
+        [object]$Body = $null
+    )
+    $params = @{
+        Method      = $Method
+        Uri         = $Uri
+        Headers     = $Headers
+        ContentType = "application/json"
+    }
+    if ($null -ne $Body) {
+        $params.Body = ($Body | ConvertTo-Json -Depth 10)
+    }
+    try {
+        return Invoke-RestMethod @params
+    }
+    catch {
+        $detail = ""
+        if ($_.ErrorDetails.Message) {
+            $ej = $_.ErrorDetails.Message | ConvertFrom-Json -ErrorAction SilentlyContinue
+            if ($ej.error) { $detail = " – [$($ej.error.code)] $($ej.error.message)" }
+        }
+        throw "Graph $Method $Uri failed$detail"
+    }
+}
+
+# Locate the Microsoft Graph service principal object ID in a tenant
+function Get-GraphSpId {
+    param([hashtable]$Headers, [string]$TenantLabel)
+    $res = Invoke-Graph -Method GET `
+        -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq '$GRAPH_APP_ID'&`$select=id" `
+        -Headers $Headers
+    if (-not $res.value -or $res.value.Count -eq 0) {
+        throw "Microsoft Graph service principal not found in $TenantLabel. Cannot grant admin consent."
+    }
+    return $res.value[0].id
+}
+
+# Create an app registration + SP, grant admin consent, and add a client secret.
+# Returns @{ AppObjectId; ClientId; ClientSecret }
+function New-WorkerApp {
+    param(
+        [hashtable]$Headers,
+        [string]$AppDisplayName,
+        [string]$PermissionRoleId,
+        [string]$GraphSpId,
+        [string]$TenantLabel,
+        [int]$WorkerNumber,
+        [int]$SecretExpiryYears = 2
+    )
+
+    Write-Info "  [$TenantLabel] Creating '$AppDisplayName'..."
+
+    # 1. Create app registration with the desired permission declared
+    $app = Invoke-Graph -Method POST `
+        -Uri "https://graph.microsoft.com/v1.0/applications" `
+        -Headers $Headers `
+        -Body @{
+            displayName            = $AppDisplayName
+            signInAudience         = "AzureADMyOrg"
+            requiredResourceAccess = @(
+                @{
+                    resourceAppId  = $GRAPH_APP_ID
+                    resourceAccess = @(
+                        @{ id = $PermissionRoleId; type = "Role" }
+                    )
+                }
+            )
+        }
+    Write-Info "    App object ID : $($app.id)"
+    Write-Info "    Client ID     : $($app.appId)"
+
+    # 2. Create service principal (required for admin consent grant)
+    Start-Sleep -Seconds 3   # wait for app creation to propagate
+    $sp = Invoke-Graph -Method POST `
+        -Uri "https://graph.microsoft.com/v1.0/servicePrincipals" `
+        -Headers $Headers `
+        -Body @{ appId = $app.appId }
+    Write-Info "    Service principal: $($sp.id)"
+
+    # 3. Grant admin consent via app role assignment
+    Invoke-Graph -Method POST `
+        -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$($sp.id)/appRoleAssignments" `
+        -Headers $Headers `
+        -Body @{
+            principalId = $sp.id
+            resourceId  = $GraphSpId
+            appRoleId   = $PermissionRoleId
+        } | Out-Null
+    Write-Info "    Admin consent granted for role $PermissionRoleId"
+
+    # 4. Create client secret
+    $expiry     = [DateTime]::UtcNow.AddYears($SecretExpiryYears).ToString("yyyy-MM-ddTHH:mm:ssZ")
+    $secretResp = Invoke-Graph -Method POST `
+        -Uri "https://graph.microsoft.com/v1.0/applications/$($app.id)/addPassword" `
+        -Headers $Headers `
+        -Body @{
+            passwordCredential = @{
+                displayName = "worker-$WorkerNumber-local-dev"
+                endDateTime = $expiry
+            }
+        }
+    Write-Success "    ✓ Done  (secret expires $expiry)"
+
+    return @{
+        AppObjectId  = $app.id
+        ClientId     = $app.appId
+        ClientSecret = $secretResp.secretText
+    }
+}
+
+# Build the JSON content for appsettings.workerN.json
+function New-WorkerAppSettingsContent {
+    param(
+        [int]   $WorkerN,
+        [string]$B2cTenantId,
+        [string]$B2cTenantDomain,
+        [string]$B2cClientId,
+        [string]$B2cClientSecret,
+        [string]$EeidTenantId,
+        [string]$EeidTenantDomain,
+        [string]$ExtAppId,
+        [string]$EeidClientId,
+        [string]$EeidClientSecret,
+        [string]$StorageConnectionString = "UseDevelopmentStorage=true"
+    )
+
+    return @"
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft": "Warning"
+    }
+  },
+  "Migration": {
+    "B2C": {
+      "TenantId": "$B2cTenantId",
+      "TenantDomain": "$B2cTenantDomain",
+      "AppRegistration": {
+        "ClientId": "$B2cClientId",
+        "ClientSecret": "$B2cClientSecret",
+        "Name": "B2C App Registration (Local - Worker $WorkerN)",
+        "Enabled": true
+      },
+      "Scopes": [
+        "https://graph.microsoft.com/.default"
+      ]
+    },
+    "ExternalId": {
+      "TenantId": "$EeidTenantId",
+      "TenantDomain": "$EeidTenantDomain",
+      "ExtensionAppId": "$ExtAppId",
+      "AppRegistration": {
+        "ClientId": "$EeidClientId",
+        "ClientSecret": "$EeidClientSecret",
+        "Name": "External ID App Registration $WorkerN (Local)",
+        "Enabled": true
+      },
+      "Scopes": [
+        "https://graph.microsoft.com/.default"
+      ]
+    },
+    "Storage": {
+      "ConnectionStringOrUri": "$StorageConnectionString",
+      "AuditTableName": "migrationAudit",
+      "AuditMode": "File",
+      "AuditFilePath": "migration-audit-worker${WorkerN}.jsonl",
+      "UseManagedIdentity": false
+    },
+    "Telemetry": {
+      "ConnectionString": "",
+      "Enabled": true,
+      "UseApplicationInsights": false,
+      "UseConsoleLogging": true,
+      "SamplingPercentage": 100.0,
+      "TrackDependencies": true,
+      "TrackExceptions": true,
+      "LogFilePath": "worker${WorkerN}-telemetry.jsonl"
+    },
+    "Retry": {
+      "MaxRetries": 5,
+      "InitialDelayMs": 1000,
+      "MaxDelayMs": 30000,
+      "BackoffMultiplier": 2.0,
+      "UseRetryAfterHeader": true,
+      "OperationTimeoutSeconds": 120
+    },
+    "Export": {
+      "SelectFields": "id,userPrincipalName,displayName,givenName,surname,mail,mobilePhone,identities",
+      "WorkerBlobPrefix": "w${WorkerN}_"
+    },
+    "Import": {
+      "AttributeMappings": {},
+      "ExcludeFields": [
+        "createdDateTime",
+        "lastPasswordChangeDateTime"
+      ],
+      "MigrationAttributes": {
+        "StoreB2CObjectId": true,
+        "SetRequireMigration": true,
+        "OverwriteExtensionAttributes": false
+      },
+      "SkipPhoneRegistration": false
+    },
+    "BatchSize": 100,
+    "PageSize": 100,
+    "VerboseLogging": true,
+    "BatchDelayMs": 0,
+    "MaxConcurrency": 8
+  }
+}
+"@
+}

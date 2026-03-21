@@ -4,8 +4,11 @@ PowerShell scripts for running bulk migrations, configuring JIT password migrati
 
 **📖 For complete configuration reference, see the [Developer Guide](../docs/DEVELOPER_GUIDE.md)**
 
+> **🚀 New here?** Start with [`Setup-Migration.ps1`](#setup-wizard) — the interactive wizard that walks you through the entire setup end-to-end.
+
 ## Table of Contents
 
+- [Setup Wizard (Recommended First Step)](#setup-wizard)
 - [Full Deployment (Deploy-All)](#full-deployment-deploy-all)
 - [Prerequisites](#prerequisites)
 - [Readiness Validation](#readiness-validation)
@@ -14,6 +17,61 @@ PowerShell scripts for running bulk migrations, configuring JIT password migrati
 - [JIT Password Migration Setup](#jit-password-migration-setup)
 - [Telemetry Analysis](#telemetry-analysis)
 - [Utility Scripts](#utility-scripts)
+
+---
+
+## Setup Wizard
+
+### Setup-Migration.ps1
+
+Interactive wizard that walks through the **entire setup process** end-to-end: tenant configuration, app registration provisioning, config file generation, migration mode selection, and deployment target.
+
+**Run this first** — it replaces the manual steps in the Quick Start guide.
+
+```powershell
+# Fully interactive (recommended for first-time setup)
+.\scripts\Setup-Migration.ps1
+
+# Pre-fill values for faster setup
+.\scripts\Setup-Migration.ps1 `
+    -B2CTenantId "xxxxxxxx-..." -B2CTenantDomain "contosob2c.onmicrosoft.com" `
+    -EeidTenantId "yyyyyyyy-..." -EeidTenantDomain "contosoeeid.onmicrosoft.com" `
+    -ExtensionAppId "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+
+# Non-interactive (CI/automation)
+.\scripts\Setup-Migration.ps1 -NonInteractive `
+    -B2CTenantId "..." -B2CTenantDomain "..." `
+    -EeidTenantId "..." -EeidTenantDomain "..." `
+    -ExtensionAppId "..." -WorkerCount 4 -Mode Advanced -Target Local
+
+# Dry run
+.\scripts\Setup-Migration.ps1 -WhatIf
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-NonInteractive` | `false` | Accept defaults, fail if required values missing |
+| `-B2CTenantId` | — | B2C tenant GUID |
+| `-B2CTenantDomain` | — | B2C `.onmicrosoft.com` domain |
+| `-EeidTenantId` | — | External ID tenant GUID |
+| `-EeidTenantDomain` | — | External ID `.onmicrosoft.com` domain |
+| `-ExtensionAppId` | — | Extension app ID (32 hex chars, no hyphens) |
+| `-WorkerCount` | `4` | Number of parallel workers |
+| `-Mode` | *(prompted)* | `Simple` (Export/Import) or `Advanced` (Harvest/Workers/Phone) |
+| `-Target` | *(prompted)* | `Local` (Azurite) or `Azure` (VM deployment) |
+| `-ResourceGroup` | `rg-b2c-migration` | Azure resource group (when Target=Azure) |
+| `-Location` | `eastus2` | Azure region (when Target=Azure) |
+| `-SecretExpiryYears` | `2` | Client secret validity |
+| `-WhatIf` | `false` | Dry run |
+
+**Wizard steps:**
+1. **Tenant info** — collects and validates B2C/EEID tenant IDs, domains, extension app ID
+2. **App registrations** — creates B2C (User.Read.All) + EEID (User.ReadWrite.All) apps per worker via device code auth, writes `appsettings.workerN.json`
+3. **Migration mode** — Simple (export/import) or Advanced (queue-based workers + phone registration)
+4. **Deployment target** — Local (Azurite) or Azure VMs (invokes Deploy-All.ps1)
+5. **Summary** — prints everything created and the exact commands to run
+
+The wizard detects existing config files and offers to skip already-completed steps.
 
 ---
 

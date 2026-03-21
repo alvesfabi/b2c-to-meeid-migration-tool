@@ -20,7 +20,19 @@ cd b2c-to-meeid-migration-tool
 dotnet build
 ```
 
-## 2. Register App Registrations
+## 2. Run the Setup Wizard (Recommended)
+
+The interactive wizard handles app registration, config generation, and deployment in one step:
+
+```powershell
+./scripts/Setup-Migration.ps1
+```
+
+It will prompt you for tenant IDs, create app registrations via device code auth, generate all config files, and print the exact commands to run. **Skip to step 6** after the wizard completes.
+
+> If you prefer manual setup, continue with steps 3–5 below.
+
+## 3. Register App Registrations (Manual Alternative)
 
 You need **two** app registrations (one per tenant):
 
@@ -31,7 +43,7 @@ You need **two** app registrations (one per tenant):
 - API permissions: `User.ReadWrite.All`, `Directory.ReadWrite.All` (Application) → Grant admin consent
 - Note the **extension app ID** (Entra admin center → App registrations → `b2c-extensions-app` or equivalent)
 
-## 3. Configure
+## 4. Configure (Manual Alternative)
 
 ```bash
 cp src/B2CMigrationKit.Console/appsettings.export-import.example.json \
@@ -50,7 +62,7 @@ Edit `appsettings.json` — fill in:
 
 Storage defaults to `UseDevelopmentStorage=true` (Azurite) — no changes needed.
 
-## 4. Create Test Users (Optional)
+## 5. Create Test Users (Optional)
 
 Seed 20 test users in your B2C tenant:
 
@@ -58,7 +70,7 @@ Seed 20 test users in your B2C tenant:
 ./scripts/New-TestUser.ps1 -ConfigFile src/B2CMigrationKit.Console/appsettings.json -Count 20
 ```
 
-## 5. Validate Setup
+## 6. Validate Setup
 
 ```powershell
 ./scripts/Validate-MigrationReadiness.ps1 -ConfigFile src/B2CMigrationKit.Console/appsettings.json
@@ -66,7 +78,7 @@ Seed 20 test users in your B2C tenant:
 
 All checks should show ✅. Fix any ❌ before proceeding.
 
-## 6. Run Migration
+## 7. Run Migration
 
 ```bash
 # Start Azurite in VS Code (if not already running)
@@ -78,7 +90,7 @@ dotnet run --project src/B2CMigrationKit.Console -- export --config src/B2CMigra
 dotnet run --project src/B2CMigrationKit.Console -- import --config src/B2CMigrationKit.Console/appsettings.json
 ```
 
-## 7. Verify
+## 8. Verify
 
 Check the Entra External ID admin center — your migrated users should appear with:
 - `requiresMigration` extension attribute set to `true`

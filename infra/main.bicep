@@ -37,6 +37,7 @@ resource rg 'Microsoft.Resources/resourceGroups@2023-07-01' = {
 }
 
 module network 'modules/network.bicep' = {
+  name: 'network'
   scope: rg
   params: {
     location: location
@@ -45,6 +46,7 @@ module network 'modules/network.bicep' = {
 }
 
 module storage 'modules/storage.bicep' = {
+  name: 'storage'
   scope: rg
   params: {
     location: location
@@ -56,6 +58,7 @@ module storage 'modules/storage.bicep' = {
 }
 
 module workers 'modules/vm.bicep' = [for i in range(0, vmCount): {
+  name: 'worker-${i}'
   scope: rg
   params: {
     location: location
@@ -71,6 +74,7 @@ module workers 'modules/vm.bicep' = [for i in range(0, vmCount): {
 
 // Key Vault — stores app registration secrets; VMs access via Managed Identity.
 module keyvault 'modules/keyvault.bicep' = {
+  name: 'keyvault'
   scope: rg
   params: {
     location: location
@@ -83,6 +87,7 @@ module keyvault 'modules/keyvault.bicep' = {
 
 // Azure Bastion — optional, for SSH access to VMs without public IPs.
 module bastion 'modules/bastion.bicep' = if (deployBastion) {
+  name: 'bastion'
   scope: rg
   params: {
     location: location

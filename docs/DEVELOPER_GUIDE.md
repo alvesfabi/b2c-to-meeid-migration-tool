@@ -589,7 +589,32 @@ az storage entity query --account-name <acct> --table-name migrationAudit --filt
 
 ## Deployment
 
-### Function Deployment
+### Azure VM Deployment (Bulk Migration)
+
+The bulk migration pipeline runs on Azure VMs accessed via Bastion (no public IPs). The deployment scripts handle infrastructure provisioning, app building, and deployment in one step.
+
+```powershell
+# 1. Create app registrations for workers
+.\scripts\New-WorkerAppRegistrations.ps1 -StartWorker 1 -EndWorker 4
+
+# 2. Deploy infrastructure + app
+.\scripts\Deploy.ps1 -StorageAccountName "stb2cmigration" -VmCount 2
+
+# 3. Run migration
+.\scripts\Start-AzureHarvest.ps1
+.\scripts\Start-AzureWorkers.ps1
+.\scripts\Start-AzureWorkers.ps1 -Command phone-registration
+
+# 4. Monitor
+.\scripts\Get-AzureWorkerStatus.ps1
+.\scripts\Get-AzureTelemetry.ps1 -Analyze
+```
+
+> **Full runbook:** See [infra/README.md](../infra/README.md) for prerequisites, configuration, troubleshooting, and teardown.
+
+**Config template:** `appsettings.azure-deploy.example.json` — copy to `appsettings.json`, fill in tenant credentials. Key difference from local config: `Storage.UseManagedIdentity: true` and `ConnectionStringOrUri` points to the storage queue endpoint.
+
+### Function Deployment (JIT)
 
 ```bash
 cd src/B2CMigrationKit.Function

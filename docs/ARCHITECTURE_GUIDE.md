@@ -441,24 +441,56 @@ Developer Workstation
 ```
 
 - Fast iteration, full debugging, inline RSA keys, no Key Vault dependency.
+- See [scripts/README.md](../scripts/README.md) for local development scripts.
 
-### Production Environment (🔜 v2.0)
+### Azure VM Deployment
+
+The production/staging deployment uses Azure VMs accessed exclusively through Azure Bastion (no public IPs).
+
+```
+Developer Workstation
+├── Deploy.ps1 / deploy.sh
+│   ├── Bicep deploy → VNet, Bastion, Storage (private endpoints), VMs
+│   ├── dotnet publish (local build)
+│   └── SCP via Bastion tunnel → ~/app/ on each VM
+│
+└── Operational scripts (Start-AzureWorkers, Get-AzureWorkerStatus, etc.)
+    └── All access via Bastion SSH tunnels
+
+Azure Infrastructure
+├── VNet
+│   ├── Workers Subnet (vm-b2c-worker1..N)
+│   └── Private Endpoint Subnet (Storage)
+├── Azure Bastion (SSH gateway)
+├── Storage Account (Queues + Tables, private endpoints only)
+└── Worker VMs (Managed Identity → Storage access)
+```
+
+**Key properties:**
+- VMs have no public IPs — all access through Bastion
+- Storage uses private endpoints — queue operations run from VMs
+- Each VM uses Managed Identity for storage access (no connection strings)
+- Deploy scripts build locally and SCP to VMs via Bastion tunnels
+
+> **Full runbook:** See [infra/README.md](../infra/README.md) for step-by-step deployment, operation, and teardown instructions.
+
+### Multi-Instance Scaling
+
+```
+VM 1  (App Reg B2C-1/EEID-1)  ──► worker-migrate + phone-registration
+VM 2  (App Reg B2C-2/EEID-2)  ──► worker-migrate + phone-registration
+...
+VM N  (App Reg B2C-N/EEID-N)  ──► worker-migrate + phone-registration
+```
+
+Each VM gets dedicated app registration pairs for independent Graph API throttle quotas. All VMs share the same `user-ids-to-process` queue (work distribution is automatic via queue visibility timeouts).
+
+### Future: Production Hardening (🔜 v2.0)
 
 - Azure Function App (Linux Premium EP1) with VNet integration + Managed Identity
 - Private Endpoints for Key Vault, Storage (Queue/Table/Blob)
 - Application Insights with dashboards and alert rules
 - Auto-scale 1-20 instances
-
-### Multi-Instance Deployment
-
-```
-Container 1  (App Reg B2C-1/EEID-1, IP: 10.0.1.10)
-Container 2  (App Reg B2C-2/EEID-2, IP: 10.0.1.11)
-...
-Container N  (App Reg B2C-N/EEID-N, IP: 10.0.1.NN)
-```
-
-Options: ACI, AKS (StatefulSet), or separate VMs.
 
 ### Monitoring (Sample KQL)
 

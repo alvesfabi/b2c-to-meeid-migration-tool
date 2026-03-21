@@ -21,11 +21,11 @@
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [string]$ResourceGroup = 'rg-b2c-migration',
+    [Parameter(Mandatory)]
+    [string]$ResourceGroup,
 
     [string]$Location = 'eastus2',
 
-    [Parameter(Mandatory)]
     [string]$StorageAccountName,
 
     [ValidateRange(1, 16)]
@@ -41,6 +41,24 @@ param(
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot "_Common.ps1")
+
+# ─── Auto-generate StorageAccountName if not provided ─────────────────────────
+if (-not $StorageAccountName) {
+    $suffix = -join ((48..57) + (97..122) | Get-Random -Count 6 | ForEach-Object { [char]$_ })
+    $sanitizedRg = ($ResourceGroup -replace '[^a-zA-Z0-9]', '').ToLower()
+    if ($sanitizedRg.Length -gt 14) { $sanitizedRg = $sanitizedRg.Substring(0, 14) }
+    $StorageAccountName = "st${sanitizedRg}${suffix}"
+
+    # Check if it's available
+    $available = az storage account check-name --name $StorageAccountName --query nameAvailable -o tsv 2>$null
+    if ($available -ne 'true') {
+        # Retry with different suffix
+        $suffix = -join ((48..57) + (97..122) | Get-Random -Count 6 | ForEach-Object { [char]$_ })
+        $StorageAccountName = "st${sanitizedRg}${suffix}"
+    }
+
+    Write-Host "Auto-generated storage account name: $StorageAccountName" -ForegroundColor Cyan
+}
 
 $repoRoot   = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $infraDir   = Join-Path $repoRoot "infra"

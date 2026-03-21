@@ -49,6 +49,22 @@ Comprehensive readiness checker that validates Graph API connectivity, required 
 | Storage | Azurite ports or cloud storage reachable, containers/queues/tables |
 | Tools | .NET SDK installed, PowerShell 7+ |
 
+### Watch-Migration.ps1
+
+Live monitoring dashboard that tails JSONL telemetry files and shows running counters (users migrated, phones registered, errors, throttles). Refreshes every few seconds; press Ctrl+C for a final summary.
+
+```powershell
+.\scripts\Watch-Migration.ps1                                # default (4 workers, 3s refresh)
+.\scripts\Watch-Migration.ps1 -WorkerCount 8                 # monitor 8 workers
+.\scripts\Watch-Migration.ps1 -RefreshSeconds 2              # faster refresh
+```
+
+| Parameter | Default | Description |
+|---|---|---|
+| `WorkerCount` | 4 | Number of migrate + phone workers to monitor |
+| `ConsoleDir` | `../src/B2CMigrationKit.Console` | Directory with telemetry JSONL files |
+| `RefreshSeconds` | 3 | Seconds between dashboard refreshes |
+
 ---
 
 ## Simple Mode (Export → Import)

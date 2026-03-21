@@ -81,7 +81,21 @@ bash /dev/stdin stb2cmig123 kv-b2c-mig-xxx appsettings-worker1 < <(curl -sL http
 # Or copy Setup-Worker.sh via scp and run locally
 ```
 
-## 6. Run Migration
+## 6. Validate Before Running
+
+Run the pre-flight checker before starting migration:
+
+```powershell
+# Simple mode (export/import)
+.\scripts\Validate-MigrationReadiness.ps1
+
+# Worker mode (queue-based)
+.\scripts\Validate-MigrationReadiness.ps1 -ConfigFile appsettings.worker1.json -Mode worker
+```
+
+Checks: Graph API connectivity, permissions, extension attributes, storage reachability, queue/table/blob existence.
+
+## 7. Run Migration
 
 On each worker VM:
 
@@ -98,7 +112,7 @@ cd /opt/b2c-migration/app
 ./B2CMigrationKit.Console phone-registration --config appsettings.json
 ```
 
-## 7. Monitor
+## 8. Monitor
 
 Use `Watch-Migration.ps1` locally (via Bastion tunnel) or on a worker VM:
 
@@ -113,7 +127,7 @@ pwsh -File ../scripts/Watch-Migration.ps1
 
 Shows live counters: users migrated, phones registered, errors, throttles. Press `Ctrl+C` for a final summary.
 
-## 8. Analyze Results
+## 9. Analyze Results
 
 After migration completes, generate a full report:
 
@@ -130,20 +144,6 @@ Upload telemetry to blob storage for archival:
 ```powershell
 .\scripts\Upload-Telemetry.ps1
 ```
-
-## 9. Validate Before Running
-
-Run the pre-flight checker before starting migration:
-
-```powershell
-# Simple mode (export/import)
-.\scripts\Validate-MigrationReadiness.ps1
-
-# Worker mode (queue-based)
-.\scripts\Validate-MigrationReadiness.ps1 -ConfigFile appsettings.worker1.json -Mode worker
-```
-
-Checks: Graph API connectivity, permissions, extension attributes, storage reachability, queue/table/blob existence.
 
 ## 10. Teardown
 

@@ -243,7 +243,7 @@ Key metrics: `harvest.users.enqueued`, `WorkerMigrate.UserCreated/Duplicate/Fail
 ### Prerequisites
 
 - .NET 8.0 SDK, Azure Functions Core Tools v4, Azure CLI
-- VS Code with C# Dev Kit (repo includes `.vscode/launch.json` and `tasks.json`)
+- VS Code with C# Dev Kit
 
 ### Local Setup
 

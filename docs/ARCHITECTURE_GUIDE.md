@@ -428,6 +428,46 @@ JIT:     user@externalid.com → user@b2c.com  (reverse using same local part)
 
 ---
 
+## 8. Scalability & Performance
+
+### Throughput Model
+
+Migration throughput scales along two axes:
+
+| Axis | Mechanism | Effect |
+|------|-----------|--------|
+| **More worker pairs** | Add worker-migrate + phone-registration instances with dedicated app registrations | Linear throughput increase (each pair gets its own Graph API throttle budget) |
+| **Higher concurrency** | Increase `MaxConcurrency` within a worker (default: 1, sweet spot: 8) | Sub-linear gains; beyond ~8, latency spikes without throughput improvement |
+
+### Benchmarks (Simple Mode)
+
+| Tenant Size | Duration | Notes |
+|-------------|----------|-------|
+| 1K users | ~2 min | Single process, export + import |
+| 50K users | ~30 min | Single process |
+| 500K users | ~5 hours | Single process; consider Advanced Mode above this |
+
+### Benchmarks (Advanced Mode)
+
+| Workers | MaxConcurrency | Throughput | Notes |
+|---------|---------------|------------|-------|
+| 1 | 1 | ~3 users/sec | Baseline |
+| 1 | 8 | ~15 users/sec | Sweet spot per instance |
+| 4 | 8 | ~55 users/sec | Near-linear scaling |
+| 8 | 8 | ~100 users/sec | Recommended max without dedicated IPs |
+
+### Phone Registration Throughput
+
+The `phoneMethods` API is rate-limited at **30 requests / 10 seconds per app registration** (~3 RPS). Each phone-registration worker with a dedicated app registration adds ~3 RPS. With 4 workers: ~12 RPS → ~1M phones in ~24 hours.
+
+### Rate Limiting Strategy
+
+- **429 responses**: Polly retry with exponential backoff + jitter. Honors `Retry-After` header.
+- **Per-app quotas**: Each worker pair uses independent app registrations to multiply the throttle budget.
+- **Phone throttle**: Fixed `ThrottleDelayMs` (default 400 ms) prevents sustained 429s on the phone API.
+
+---
+
 ## 9. Deployment & Operations
 
 ### Development Environment

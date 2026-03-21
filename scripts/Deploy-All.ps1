@@ -223,6 +223,14 @@ dotnet publish `$REPO_DIR/src/B2CMigrationKit.Console/B2CMigrationKit.Console.cs
     --verbosity quiet
 
 chmod +x `$DEPLOY_DIR/B2CMigrationKit.Console 2>/dev/null || true
+
+# Copy example config as starting point
+EXAMPLE_CFG=`$REPO_DIR/src/B2CMigrationKit.Console/appsettings.${ConfigProfile}1.example.json
+if [ -f "`$EXAMPLE_CFG" ]; then
+    cp `$EXAMPLE_CFG `$DEPLOY_DIR/appsettings.json
+    echo "Example config copied to appsettings.json"
+fi
+
 chown -R ${AdminUsername}:${AdminUsername} `$DEPLOY_DIR /opt/b2c-migration/telemetry
 
 echo "=== Setup complete for $vmName ==="
@@ -248,8 +256,20 @@ echo "App deployed to `$DEPLOY_DIR"
         try {
             $json = $result | ConvertFrom-Json
             $msg = $json.value[0].message
-            if ($msg -match '\[stderr\]\s*\S') {
-                Write-Warn "  $vmName completed with warnings:"
+            # Check for real errors in stderr (ignore benign git/dpkg messages)
+            $stderr = if ($msg -match '\[stderr\]\s*(.+)') { $Matches[1].Trim() } else { '' }
+            $stderr = ($stderr -split "`n" | Where-Object {
+                $_ -notmatch '^\s*$' -and
+                $_ -notmatch 'Cloning into' -and
+                $_ -notmatch 'debconf:' -and
+                $_ -notmatch 'dpkg-preconfigure:'
+            }) -join "`n"
+
+            if ($msg -match 'Setup complete for') {
+                Write-Success "  $vmName provisioned."
+            }
+            elseif ($stderr) {
+                Write-Warn "  $vmName completed with errors:"
                 Write-Host $msg
                 $failedVms += $vmName
             }
@@ -279,6 +299,7 @@ if (-not $WhatIfPreference) {
     }
 }
 
+
 # ─── Summary ──────────────────────────────────────────────────────────────────
 
 Write-Host ""
@@ -301,20 +322,19 @@ else {
 
 Write-Host ""
 Write-Info "Next steps:"
-Write-Info "  1. Connect via Bastion:"
-Write-Info "       ./scripts/Connect-Worker.ps1 -WorkerIndex 1"
-Write-Info "       ssh -p 2201 $AdminUsername@localhost"
+Write-Info "  1. Connect to each VM via Bastion and edit the config:"
+Write-Info "       ./scripts/Connect-Worker.ps1 -WorkerIndex <N>"
+Write-Info "       ssh -p 220<N> $AdminUsername@localhost"
+Write-Info "       nano /opt/b2c-migration/app/appsettings.json"
+Write-Info "     (example config from the repo is already in place)"
 Write-Host ""
-Write-Info "  2. Copy your worker config to the VM:"
-Write-Info "       scp -P 2201 appsettings.worker1.json ${AdminUsername}@localhost:/opt/b2c-migration/app/appsettings.json"
-Write-Host ""
-Write-Info "  3. Run migration on each VM:"
+Write-Info "  2. Run migration:"
 Write-Info "       cd /opt/b2c-migration/app"
 Write-Info "       ./B2CMigrationKit.Console harvest --config appsettings.json        # ONE worker only"
 Write-Info "       ./B2CMigrationKit.Console worker-migrate --config appsettings.json # ALL workers"
 Write-Info "       ./B2CMigrationKit.Console phone-registration --config appsettings.json"
 Write-Host ""
-Write-Info "  4. Monitor from local machine:"
+Write-Info "  3. Monitor from local machine:"
 Write-Info "       ./scripts/Watch-Migration.ps1 -WorkerCount $VmCount"
 Write-Host ""
 Write-Success "Done!"

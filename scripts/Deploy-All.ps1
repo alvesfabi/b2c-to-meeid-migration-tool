@@ -5,19 +5,17 @@
 .DESCRIPTION
     Orchestrates the complete deployment pipeline:
       1. Deploy infrastructure via Bicep
-      2. Build the .NET console app (self-contained linux-x64)
-      3. Upload app tarball to Blob Storage
-      4. Upload per-worker configs to Key Vault
-      5. Provision each VM via az vm run-command (or print Bastion instructions)
+      2. Provision each VM: git clone → dotnet publish → config from Key Vault
+      VMs build the app themselves (no blob upload needed).
 
 .EXAMPLE
-    ./Deploy-All.ps1 -StorageAccountName stb2cmig123
+    ./Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -SshPublicKeyFile .\b2c-mig-deploy.pub
 
 .EXAMPLE
-    ./Deploy-All.ps1 -StorageAccountName stb2cmig123 -SkipInfra -SkipBuild -VmCount 2
+    ./Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -SkipInfra -VmCount 2
 
 .EXAMPLE
-    ./Deploy-All.ps1 -StorageAccountName stb2cmig123 -WhatIf
+    ./Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -WhatIf
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -31,11 +29,21 @@ param(
     [ValidateRange(1, 16)]
     [int]$VmCount = 4,
 
+    [string]$VmSize = 'Standard_B2s',
+
+    [string]$AdminUsername = 'azureuser',
+
+    [string]$SshPublicKeyFile = "$HOME/.ssh/id_ed25519.pub",
+
+    [bool]$DeployBastion = $true,
+
+    [string]$GitRepo = 'https://github.com/microsoft/b2c-to-meeid-migration-tool.git',
+
+    [string]$GitBranch = 'main',
+
     [string]$ConfigProfile = 'worker',
 
-    [switch]$SkipInfra,
-
-    [switch]$SkipBuild
+    [switch]$SkipInfra
 )
 
 $ErrorActionPreference = 'Stop'
@@ -62,9 +70,6 @@ if (-not $StorageAccountName) {
 
 $repoRoot   = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $infraDir   = Join-Path $repoRoot "infra"
-$consoleDir = Join-Path $repoRoot "src" "B2CMigrationKit.Console"
-$publishDir = Join-Path $consoleDir "bin" "publish"
-$tarball    = Join-Path $publishDir "b2c-migration-app.tar.gz"
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -105,14 +110,31 @@ if ($SkipInfra) {
     Write-Warn "Skipping infrastructure deployment (-SkipInfra)."
 }
 elseif ($WhatIfPreference) {
-    Write-Info "[WhatIf] Would run: az deployment sub create --location $Location --template-file infra/main.bicep --parameters infra/main.bicepparam"
+    Write-Info "[WhatIf] Would run: az deployment sub create --location $Location --template-file infra/main.bicep"
 }
 else {
+    # Read SSH public key
+    if (-not (Test-Path $SshPublicKeyFile)) {
+        Write-Err "SSH public key not found at $SshPublicKeyFile"
+        Write-Err "Generate one: ssh-keygen -t ed25519 -C 'b2c-migration'"
+        Write-Err "Or pass -SshPublicKeyFile <path>"
+        exit 1
+    }
+    $sshKey = (Get-Content $SshPublicKeyFile -Raw).Trim()
+
     Write-Info "Deploying Bicep template (this may take 10-20 minutes)..."
     az deployment sub create `
         --location $Location `
         --template-file (Join-Path $infraDir "main.bicep") `
-        --parameters (Join-Path $infraDir "main.bicepparam") `
+        --parameters `
+            resourceGroupName=$ResourceGroup `
+            location=$Location `
+            storageAccountName=$StorageAccountName `
+            vmCount=$VmCount `
+            vmSize=$VmSize `
+            adminUsername=$AdminUsername `
+            adminSshPublicKey=$sshKey `
+            deployBastion=$DeployBastion `
         --name "b2c-migration-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 
     if ($LASTEXITCODE -ne 0) {
@@ -123,157 +145,53 @@ else {
     }
 }
 
-# ─── Step 2: Build Console App ───────────────────────────────────────────────
+# ─── Step 2: Provision VMs (git clone + build on each VM) ────────────────────
 
-Write-Step 2 "Build Console App"
+Write-Step 2 "Provision Worker VMs"
 
-if ($SkipBuild) {
-    Write-Warn "Skipping build (-SkipBuild)."
-    if (-not (Test-Path $tarball)) {
-        Write-Err "Tarball not found at $tarball — cannot skip build."
-        exit 1
-    }
-}
-elseif ($WhatIfPreference) {
-    Write-Info "[WhatIf] Would run: dotnet publish (linux-x64 self-contained) + tar"
-}
-else {
-    Write-Info "Publishing self-contained linux-x64 build..."
-    dotnet publish $consoleDir `
-        --configuration Release `
-        --runtime linux-x64 `
-        --self-contained true `
-        --output $publishDir `
-        --nologo `
-        --verbosity quiet
-
-    if ($LASTEXITCODE -ne 0) {
-        Confirm-Continue "dotnet publish failed."
-    }
-    else {
-        Write-Success "✓ Build complete."
-    }
-
-    Write-Info "Creating tarball..."
-    Push-Location $publishDir
-    try {
-        tar czf "b2c-migration-app.tar.gz" -C $publishDir --exclude "b2c-migration-app.tar.gz" .
-    }
-    finally {
-        Pop-Location
-    }
-
-    if (-not (Test-Path $tarball)) {
-        Write-Err "Tarball creation failed."
-        exit 1
-    }
-
-    $sizeMb = [math]::Round((Get-Item $tarball).Length / 1MB, 1)
-    Write-Success "✓ Tarball created: $tarball ($sizeMb MB)"
-}
-
-# ─── Step 3: Upload Tarball to Blob Storage ──────────────────────────────────
-
-Write-Step 3 "Upload App to Blob Storage"
-
-if ($WhatIfPreference) {
-    Write-Info "[WhatIf] Would upload $tarball to blob container 'app-deploy'."
-}
-else {
-    Write-Info "Uploading tarball to storage account '$StorageAccountName'..."
-    az storage blob upload `
-        --account-name $StorageAccountName `
-        --container-name "app-deploy" `
-        --name "b2c-migration-app.tar.gz" `
-        --file $tarball `
-        --auth-mode login `
-        --overwrite
-
-    if ($LASTEXITCODE -ne 0) {
-        Confirm-Continue "Blob upload failed."
-    }
-    else {
-        Write-Success "✓ Tarball uploaded to blob storage."
-    }
-}
-
-# ─── Step 4: Upload Configs to Key Vault ─────────────────────────────────────
-
-Write-Step 4 "Upload Worker Configs to Key Vault"
-
-$kvName = az keyvault list -g $ResourceGroup --query "[0].name" -o tsv 2>$null
-if (-not $kvName) {
-    Write-Warn "Could not find Key Vault in resource group '$ResourceGroup'."
-    Write-Warn "Skipping config upload. Upload manually after Key Vault is available."
-}
-else {
-    Write-Info "Key Vault: $kvName"
-
-    $configsUploaded = 0
-    for ($i = 1; $i -le $VmCount; $i++) {
-        $configFile = Join-Path $repoRoot "appsettings.${ConfigProfile}${i}.json"
-        $secretName = "appsettings-${ConfigProfile}${i}"
-
-        if (-not (Test-Path $configFile)) {
-            Write-Warn "  Config file not found: $configFile — skipping."
-            continue
-        }
-
-        if ($WhatIfPreference) {
-            Write-Info "  [WhatIf] Would upload $configFile as secret '$secretName'."
-        }
-        else {
-            Write-Info "  Uploading $configFile → $secretName ..."
-            az keyvault secret set `
-                --vault-name $kvName `
-                --name $secretName `
-                --file $configFile `
-                --only-show-errors | Out-Null
-
-            if ($LASTEXITCODE -ne 0) {
-                Write-Warn "  ⚠ Failed to upload $secretName."
-            }
-            else {
-                $configsUploaded++
-            }
-        }
-    }
-
-    if (-not $WhatIfPreference) {
-        Write-Success "✓ $configsUploaded / $VmCount configs uploaded to Key Vault."
-    }
-}
-
-# ─── Step 5: Provision VMs ───────────────────────────────────────────────────
-
-Write-Step 5 "Provision Worker VMs"
+Write-Info "Strategy: Each VM clones the repo from GitHub and builds locally."
+Write-Info "Repo:     $GitRepo"
+Write-Info "Branch:   $GitBranch"
+Write-Host ""
 
 $provisionedVms = 0
 $failedVms = @()
 
 for ($i = 1; $i -le $VmCount; $i++) {
-    $vmName    = "vm-b2c-worker$i"
-    $secretName = "appsettings-${ConfigProfile}${i}"
+    $vmName = "vm-b2c-worker$i"
 
     Write-Info "Provisioning $vmName ..."
 
     if ($WhatIfPreference) {
-        Write-Info "  [WhatIf] Would run Setup-Worker.sh on $vmName via az vm run-command."
+        Write-Info "  [WhatIf] Would run git clone + dotnet publish on $vmName via az vm run-command."
         continue
     }
 
+    # The script runs on the VM as root via run-command.
+    # cloud-init already installed dotnet-sdk-8.0, git, and created /opt/b2c-migration/app.
     $scriptContent = @"
 #!/bin/bash
 set -euo pipefail
-az login --identity --allow-no-subscriptions
+
 DEPLOY_DIR=/opt/b2c-migration/app
-sudo mkdir -p `$DEPLOY_DIR
-sudo chown `$(whoami) `$DEPLOY_DIR
-az storage blob download --account-name $StorageAccountName --container-name app-deploy --name b2c-migration-app.tar.gz --file /tmp/b2c-migration-app.tar.gz --auth-mode login
-tar xzf /tmp/b2c-migration-app.tar.gz -C `$DEPLOY_DIR
-chmod +x `$DEPLOY_DIR/B2CMigrationKit.Console
-az keyvault secret show --vault-name $kvName --name $secretName --query value -o tsv > `$DEPLOY_DIR/appsettings.json
-echo "Setup complete for $vmName"
+REPO_DIR=/opt/b2c-migration/repo
+
+echo "=== Cloning repo ==="
+rm -rf `$REPO_DIR
+git clone --depth 1 --branch $GitBranch $GitRepo `$REPO_DIR
+
+echo "=== Building ==="
+dotnet publish `$REPO_DIR/src/B2CMigrationKit.Console/B2CMigrationKit.Console.csproj \
+    --configuration Release \
+    --output `$DEPLOY_DIR \
+    --nologo \
+    --verbosity quiet
+
+chmod +x `$DEPLOY_DIR/B2CMigrationKit.Console 2>/dev/null || true
+chown -R ${AdminUsername}:${AdminUsername} `$DEPLOY_DIR
+
+echo "=== Setup complete for $vmName ==="
+echo "App deployed to `$DEPLOY_DIR"
 "@
 
     $tempScript = Join-Path ([System.IO.Path]::GetTempPath()) "setup-$vmName.sh"
@@ -306,7 +224,7 @@ if (-not $WhatIfPreference) {
         Write-Info "Manual steps per VM:"
         Write-Info "  1. Open tunnel:  ./scripts/Connect-Worker.ps1 -WorkerIndex <N>"
         Write-Info "  2. SSH:          ssh -p 220<N> azureuser@localhost"
-        Write-Info "  3. Run:          bash Setup-Worker.sh $StorageAccountName $kvName appsettings-<profile><N>"
+        Write-Info "  3. Run:          bash /opt/b2c-migration/repo/scripts/Setup-Worker.sh"
     }
 }
 
@@ -324,7 +242,6 @@ if ($WhatIfPreference) {
 else {
     Write-Info "Resource Group:    $ResourceGroup"
     Write-Info "Storage Account:   $StorageAccountName"
-    Write-Info "Key Vault:         $($kvName ?? '(not found)')"
     Write-Info "VMs Provisioned:   $provisionedVms / $VmCount"
     if ($failedVms.Count -gt 0) {
         Write-Warn "VMs Pending:       $($failedVms -join ', ')"
@@ -335,15 +252,18 @@ Write-Host ""
 Write-Info "Next steps:"
 Write-Info "  1. Connect via Bastion:"
 Write-Info "       ./scripts/Connect-Worker.ps1 -WorkerIndex 1"
-Write-Info "       ssh -p 2201 azureuser@localhost"
+Write-Info "       ssh -p 2201 $AdminUsername@localhost"
 Write-Host ""
-Write-Info "  2. Run migration on each VM:"
+Write-Info "  2. Copy your worker config to the VM:"
+Write-Info "       scp -P 2201 appsettings.worker1.json ${AdminUsername}@localhost:/opt/b2c-migration/app/appsettings.json"
+Write-Host ""
+Write-Info "  3. Run migration on each VM:"
 Write-Info "       cd /opt/b2c-migration/app"
 Write-Info "       ./B2CMigrationKit.Console harvest --config appsettings.json        # ONE worker only"
 Write-Info "       ./B2CMigrationKit.Console worker-migrate --config appsettings.json # ALL workers"
 Write-Info "       ./B2CMigrationKit.Console phone-registration --config appsettings.json"
 Write-Host ""
-Write-Info "  3. Monitor from local machine:"
+Write-Info "  4. Monitor from local machine:"
 Write-Info "       ./scripts/Watch-Migration.ps1 -WorkerCount $VmCount"
 Write-Host ""
 Write-Success "Done!"

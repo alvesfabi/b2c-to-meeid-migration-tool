@@ -20,10 +20,12 @@ set -e
 wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O /tmp/ms-prod.deb
 dpkg -i /tmp/ms-prod.deb
 apt-get update -y
-apt-get install -y dotnet-runtime-8.0 powershell
+apt-get install -y dotnet-sdk-8.0 powershell git
 
-# Create telemetry output directory
+# Create app + telemetry output directories
+mkdir -p /opt/b2c-migration/app
 mkdir -p /opt/b2c-migration/telemetry
+chmod 775 /opt/b2c-migration/app
 chmod 775 /opt/b2c-migration/telemetry
 ''')
 

@@ -37,9 +37,9 @@ param(
 
     [bool]$DeployBastion = $true,
 
-    [string]$GitRepo = 'https://github.com/microsoft/b2c-to-meeid-migration-tool.git',
+    [string]$GitRepo = '',
 
-    [string]$GitBranch = 'main',
+    [string]$GitBranch = '',
 
     [string]$ConfigProfile = 'worker',
 
@@ -47,6 +47,20 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Auto-detect repo URL and branch from the local git repo if not specified
+if (-not $GitRepo) {
+    $GitRepo = git remote get-url origin 2>$null
+    if (-not $GitRepo) {
+        $GitRepo = 'https://github.com/microsoft/b2c-to-meeid-migration-tool.git'
+    }
+}
+if (-not $GitBranch) {
+    $GitBranch = git rev-parse --abbrev-ref HEAD 2>$null
+    if (-not $GitBranch) {
+        $GitBranch = 'main'
+    }
+}
 
 . (Join-Path $PSScriptRoot "_Common.ps1")
 
@@ -172,6 +186,9 @@ for ($i = 1; $i -le $VmCount; $i++) {
     $scriptContent = @"
 #!/bin/bash
 set -euo pipefail
+
+export HOME=/root
+export DOTNET_CLI_HOME=/root
 
 DEPLOY_DIR=/opt/b2c-migration/app
 REPO_DIR=/opt/b2c-migration/repo

@@ -98,7 +98,54 @@ cd /opt/b2c-migration/app
 ./B2CMigrationKit.Console phone-registration --config appsettings.json
 ```
 
-## 7. Teardown
+## 7. Monitor
+
+Use `Watch-Migration.ps1` locally (via Bastion tunnel) or on a worker VM:
+
+```powershell
+# From your local machine (with telemetry files copied/synced)
+.\scripts\Watch-Migration.ps1 -WorkerCount 4 -RefreshSeconds 3
+
+# On the VM directly
+cd /opt/b2c-migration/app
+pwsh -File ../scripts/Watch-Migration.ps1
+```
+
+Shows live counters: users migrated, phones registered, errors, throttles. Press `Ctrl+C` for a final summary.
+
+## 8. Analyze Results
+
+After migration completes, generate a full report:
+
+```powershell
+# Aggregate all workers
+.\scripts\Analyze-Telemetry.ps1 -WorkerCount 4
+
+# Single worker file
+.\scripts\Analyze-Telemetry.ps1 -TelemetryFile worker2-telemetry.jsonl
+```
+
+Upload telemetry to blob storage for archival:
+
+```powershell
+.\scripts\Upload-Telemetry.ps1
+```
+
+## 9. Validate Before Running
+
+Run the pre-flight checker before starting migration:
+
+```powershell
+# Simple mode (export/import)
+.\scripts\Validate-MigrationReadiness.ps1
+
+# Worker mode (queue-based)
+.\scripts\Validate-MigrationReadiness.ps1 -ConfigFile appsettings.worker1.json -Mode worker
+```
+
+Checks: Graph API connectivity, permissions, extension attributes, storage reachability, queue/table/blob existence.
+
+## 10. Teardown
 
 Deallocate VMs and stop Bastion to stop billing:
 
@@ -114,6 +161,20 @@ az network bastion delete -g rg-b2c-migration -n bastion-b2c-migration
 # Full cleanup (deletes everything)
 az group delete -n rg-b2c-migration --yes --no-wait
 ```
+
+## Troubleshooting
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| `403 Insufficient privileges` on Graph | App registration missing permissions | Grant `User.ReadWrite.All`, `Directory.ReadWrite.All`; run `Validate-MigrationReadiness.ps1` to verify |
+| `AuthenticationFailedException` | Wrong tenant ID or expired secret | Check `appsettings.json` credentials; rotate client secret in Entra |
+| Bastion tunnel hangs | NSG blocking port 22, or Bastion not running | Verify NSG allows SSH from Bastion subnet; check `az network bastion show` |
+| `run-command` times out | Azure policy blocks RunCommand extension | Deploy manually via Bastion (step 5) using `Setup-Worker.sh` |
+| `QueueNotFound` / `TableNotFound` | Storage containers not created | Run `Validate-MigrationReadiness.ps1 -Mode worker`; or create manually: `az storage queue create` |
+| Throttling (429 responses) | Too many workers hitting Graph simultaneously | Reduce worker count or increase `ThrottleDelayMs` in config |
+| Phone registration failures | Temporary Auth Session API limits | Retry with fewer concurrent workers; check telemetry for specific error codes |
+| VM can't reach storage | Private Endpoint DNS not resolving | Verify Private DNS Zone linked to VNet; `nslookup <account>.queue.core.windows.net` from VM |
+| Telemetry files empty | App crashed on start | SSH into VM, check `journalctl` or `~/.b2c-migration/logs/` |
 
 ## Architecture
 

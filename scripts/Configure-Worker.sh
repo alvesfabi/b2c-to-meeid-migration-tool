@@ -51,12 +51,14 @@ prompt_secret() {
     local label="$2"
     local value
 
-    printf "${color_cyan}  %s${color_reset}: " "$label"
+    printf "${color_cyan}  %s${color_reset} (paste + Enter, input hidden): " "$label"
     # Use stty instead of read -s for better paste compatibility (Bastion SSH)
     stty -echo 2>/dev/null
     read -r value
     stty echo 2>/dev/null
+    local len=${#value}
     echo ""
+    echo -e "    → received ${len} characters"
 
     if [ -z "$value" ]; then
         echo "    ⚠  Value required. Aborting." >&2

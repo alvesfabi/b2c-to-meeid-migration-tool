@@ -90,7 +90,7 @@ Accept the host key fingerprint, enter the passphrase if your key has one.
 On each VM, run the interactive configuration script — it asks for each value one by one and generates the appsettings.json automatically:
 
 ```bash
-bash ~/b2c-to-meeid-migration-tool/scripts/Configure-Worker.sh
+bash /opt/b2c-migration/repo/scripts/Configure-Worker.sh
 ```
 
 The script will:
@@ -104,7 +104,7 @@ The script will:
 You can also pass `--role worker` or `--role master` to skip the role prompt:
 
 ```bash
-bash ~/b2c-to-meeid-migration-tool/scripts/Configure-Worker.sh --role worker --worker-id 2
+bash /opt/b2c-migration/repo/scripts/Configure-Worker.sh --role worker --worker-id 2
 ```
 
 > **Manual editing:** If you prefer to edit manually, run `nano /opt/b2c-migration/app/appsettings.json` instead. See `appsettings.worker1.example.json` for the full structure.
@@ -285,7 +285,7 @@ az group delete -n rg-b2c-eeid-mig-test1 --yes --no-wait
 | Re-provision VMs | `.\scripts\Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -SshPublicKeyFile .\scripts\b2c-mig-deploy.pub -SkipInfra` |
 | Open Bastion tunnel | `.\scripts\Connect-Worker.ps1 -WorkerIndex <N>` |
 | SSH to worker | `ssh -p 220<N> -i .\scripts\b2c-mig-deploy azureuser@localhost` |
-| Configure worker | `bash ~/b2c-to-meeid-migration-tool/scripts/Configure-Worker.sh` |
+| Configure worker | `bash /opt/b2c-migration/repo/scripts/Configure-Worker.sh` |
 | Validate connectivity | `./B2CMigrationKit.Console validate --config appsettings.json` |
 | Run harvest | `./B2CMigrationKit.Console harvest --config appsettings.json` |
 | Run worker-migrate | `./B2CMigrationKit.Console worker-migrate --config appsettings.json` |

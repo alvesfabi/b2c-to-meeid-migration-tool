@@ -43,7 +43,7 @@ prompt() {
         exit 1
     fi
 
-    eval "$varname='$value'"
+    printf -v "$varname" '%s' "$value"
 }
 
 prompt_secret() {
@@ -52,7 +52,10 @@ prompt_secret() {
     local value
 
     printf "${color_cyan}  %s${color_reset}: " "$label"
-    read -rs value
+    # Use stty instead of read -s for better paste compatibility (Bastion SSH)
+    stty -echo 2>/dev/null
+    read -r value
+    stty echo 2>/dev/null
     echo ""
 
     if [ -z "$value" ]; then
@@ -60,7 +63,7 @@ prompt_secret() {
         exit 1
     fi
 
-    eval "$varname='$value'"
+    printf -v "$varname" '%s' "$value"
 }
 
 prompt_optional() {
@@ -77,7 +80,7 @@ prompt_optional() {
     read -r value
     value="${value:-$default}"
 
-    eval "$varname='$value'"
+    printf -v "$varname" '%s' "$value"
 }
 
 # ───────────────────────────────────────────

@@ -37,6 +37,7 @@ The script auto-detects your Git remote URL and current branch. Override with `-
 |-----------|---------|-------------|
 | `-ResourceGroup` | *(required)* | Target Azure resource group |
 | `-Location` | `eastus2` | Azure region |
+| `-StorageAccountName` | *(auto-generated)* | Storage account name. Auto-generated from resource group name if not provided. |
 | `-VmCount` | `4` | Number of worker VMs (1–16) |
 | `-VmSize` | `Standard_B2s` | VM SKU |
 | `-AdminUsername` | `azureuser` | VM admin user |

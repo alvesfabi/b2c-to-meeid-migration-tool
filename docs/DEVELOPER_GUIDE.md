@@ -135,7 +135,7 @@ Admin consent required. `Directory.ReadWrite.All` is **NOT** required. `Extensio
 |---------|---------|-------|
 | `SelectFields` | *(all standard)* | Comma-separated Graph `$select` fields. Include custom extension attributes here. |
 | `MaxUsers` | 0 (unlimited) | Cap for smoke tests (e.g., `20`). `0` = export all. |
-| `FilterPattern` | *(empty)* | OData `$filter` expression to subset users. |
+| `FilterPattern` | *(empty)* | Client-side substring filter on `displayName`/`userPrincipalName`. Not an OData filter. |
 
 Storage sections used by export: `ExportContainerName`, `ErrorContainerName`, `ExportBlobPrefix`.
 
@@ -172,9 +172,18 @@ Storage sections used by import: `ExportContainerName` (reads from), `ImportAudi
   "QueueName": "user-ids-to-process",
   "IdsPerMessage": 20,
   "PageSize": 999,
+  "MaxUsers": 0,
   "MessageVisibilityTimeout": "00:30:00"
 }
 ```
+
+| Setting | Default | Notes |
+|---------|---------|-------|
+| `QueueName` | `user-ids-to-process` | Azure Queue name for harvest output |
+| `IdsPerMessage` | 20 | IDs per queue message (maps to Graph `$batch` size) |
+| `PageSize` | 999 | Graph API page size for `$select=id` query |
+| `MaxUsers` | 0 (unlimited) | Cap for smoke tests (e.g., `20`). `0` = harvest all. |
+| `MessageVisibilityTimeout` | `00:30:00` | Queue message visibility timeout |
 
 ### Phone Registration Configuration
 

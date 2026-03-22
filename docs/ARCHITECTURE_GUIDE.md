@@ -77,7 +77,7 @@ The kit has two independent concerns:
 
 ### Data Flow
 
-The kit supports two migration pipelines. Choose based on your scenario (see [Choose Your Migration Mode](#choose-your-migration-mode)).
+The kit supports two migration pipelines. Choose based on your scenario (see [Choose Your Bulk Migration Mode](#choose-your-bulk-migration-mode)).
 
 ---
 

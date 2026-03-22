@@ -49,7 +49,10 @@ param(
 
     [int]$PhoneWorkerCount = 2,
 
-    [switch]$SkipInfra
+    [switch]$SkipInfra,
+
+    [Parameter(HelpMessage = 'Set to $false when redeploying to existing VMs to avoid customData conflict.')]
+    [bool]$IncludeCustomData = $true
 )
 
 $ErrorActionPreference = 'Stop'
@@ -182,6 +185,7 @@ else {
             adminUsername=$AdminUsername `
             adminSshPublicKey=$sshKey `
             deployBastion=$DeployBastion `
+            includeCustomData=$IncludeCustomData `
         --name "b2c-migration-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 
     if ($LASTEXITCODE -ne 0) {

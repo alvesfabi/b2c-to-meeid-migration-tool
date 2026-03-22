@@ -22,6 +22,9 @@ param adminUsername string = 'azureuser'
 @secure()
 param adminSshPublicKey string
 
+@description('Include cloud-init customData on VMs. Set to false when redeploying to existing VMs (Azure rejects customData changes).')
+param includeCustomData bool = true
+
 @description('Deploy Azure Bastion for SSH access to VMs (adds ~$5/day). Can be stopped when not needed.')
 param deployBastion bool = true
 
@@ -68,6 +71,7 @@ module workers 'modules/vm.bicep' = [for i in range(0, vmCount): {
     adminSshPublicKey: adminSshPublicKey
     workersSubnetId: network.outputs.workersSubnetId
     storageAccountName: storage.outputs.storageAccountName
+    includeCustomData: includeCustomData
     tags: tags
   }
 }]

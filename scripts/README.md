@@ -79,41 +79,69 @@ The wizard detects existing config files and offers to skip already-completed st
 
 ### Deploy-All.ps1
 
-Single script that orchestrates the complete Azure VM deployment pipeline: infrastructure provisioning, app build, artifact upload, config distribution, and VM setup.
+Single script that orchestrates the complete Azure VM deployment: infrastructure provisioning via Bicep, and VM setup via `az vm run-command` (git clone → dotnet publish → example config copy).
+
+VMs build the app themselves from source — no blob upload needed.
 
 ```powershell
-# Full deployment
-.\scripts\Deploy-All.ps1 -StorageAccountName stb2cmig123
+# Full deployment (infra + VM provisioning)
+.\scripts\Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -SshPublicKeyFile .\scripts\b2c-mig-deploy.pub
 
-# Skip infra (already deployed) and build (already built)
-.\scripts\Deploy-All.ps1 -StorageAccountName stb2cmig123 -SkipInfra -SkipBuild
+# Re-provision VMs only (infra already deployed)
+.\scripts\Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -SshPublicKeyFile .\scripts\b2c-mig-deploy.pub -SkipInfra
 
 # Dry run
-.\scripts\Deploy-All.ps1 -StorageAccountName stb2cmig123 -WhatIf
+.\scripts\Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -WhatIf
 
 # Custom worker count and location
-.\scripts\Deploy-All.ps1 -StorageAccountName stb2cmig123 -VmCount 8 -Location westus2
+.\scripts\Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -SshPublicKeyFile .\scripts\b2c-mig-deploy.pub -VmCount 8 -Location westus2
 ```
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `-StorageAccountName` | *(required)* | Globally unique Azure Storage account name |
-| `-ResourceGroup` | `rg-b2c-migration` | Target resource group |
+| `-ResourceGroup` | *(required)* | Target Azure resource group |
 | `-Location` | `eastus2` | Azure region |
-| `-VmCount` | `4` | Number of worker VMs to provision |
-| `-ConfigProfile` | `worker` | Config file prefix (maps to `appsettings.{profile}N.json`) |
-| `-SkipInfra` | `false` | Skip Bicep infrastructure deployment |
-| `-SkipBuild` | `false` | Skip dotnet publish (reuse existing tarball) |
+| `-VmCount` | `4` | Number of worker VMs (1–16) |
+| `-VmSize` | `Standard_B2s` | VM SKU |
+| `-AdminUsername` | `azureuser` | VM admin user |
+| `-SshPublicKeyFile` | `~/.ssh/id_ed25519.pub` | Path to SSH public key |
+| `-DeployBastion` | `true` | Whether to deploy Azure Bastion |
+| `-GitRepo` | *(auto-detected from git remote)* | Git repo URL for VMs to clone |
+| `-GitBranch` | *(auto-detected from current branch)* | Git branch to checkout on VMs |
+| `-ConfigProfile` | `worker` | Config file prefix (for example config copy) |
+| `-SkipInfra` | `false` | Skip Bicep deployment, only re-provision VMs |
 | `-WhatIf` | `false` | Dry run — shows what would happen without making changes |
 
 **Pipeline steps:**
 1. Deploy infrastructure via `az deployment sub create` with `infra/main.bicep`
-2. Build self-contained linux-x64 .NET app and create tarball
-3. Upload tarball to Blob Storage (`app-deploy` container)
-4. Upload per-worker `appsettings.{profile}N.json` files to Key Vault as secrets
-5. Provision each VM via `az vm run-command` (falls back to manual Bastion instructions if blocked)
+2. Provision each VM via `az vm run-command invoke`:
+   - Install .NET SDK 8.0 + git if not present
+   - Git clone the repo (auto-detected from your local remote/branch)
+   - `dotnet publish` to `/opt/b2c-migration/app/`
+   - Copy `appsettings.worker1.example.json` as `appsettings.json` (starting point)
+3. After deployment, connect via Bastion and edit `appsettings.json` on each VM with actual credentials
 
-**Prerequisites:** Azure CLI logged in, `appsettings.worker1.json` through `appsettings.workerN.json` in repo root.
+**Prerequisites:** Azure CLI logged in (`az login`), SSH key pair generated, config changes committed and pushed to your repo.
+
+### Connect-Worker.ps1
+
+Opens a Bastion SSH tunnel to a worker VM for secure access.
+
+```powershell
+# Terminal 1: Open tunnel
+.\scripts\Connect-Worker.ps1 -WorkerIndex 1
+
+# Terminal 2: SSH through tunnel
+ssh -p 2201 -i .\scripts\b2c-mig-deploy azureuser@localhost
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-WorkerIndex` | `1` | Worker number (1–16). Maps to port 2200+N |
+| `-ResourceGroup` | `rg-b2c-eeid-mig-test1` | Resource group name |
+| `-SshPrivateKeyFile` | `scripts/b2c-mig-deploy` | Path to SSH private key |
+
+The script auto-installs the Azure CLI bastion extension if not present.
 
 ---
 

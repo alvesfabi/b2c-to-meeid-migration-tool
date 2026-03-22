@@ -599,15 +599,17 @@ az functionapp restart --name func-b2c-migration --resource-group rg-b2c-migrati
 
 ### Bulk Migration Infrastructure
 
-Infrastructure deploys via GitHub Actions. See [`infra/README.md`](../infra/README.md) for the full runbook.
+Infrastructure deploys via `Deploy-All.ps1`. See [`infra/README.md`](../infra/README.md) for full details and [`docs/RUNBOOK.md`](RUNBOOK.md) for a step-by-step operations guide.
 
 **Quick start**:
 
-1. Configure GitHub secrets: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `VM_SSH_PUBLIC_KEY`, `STORAGE_ACCOUNT_NAME`
-2. Run `Deploy Infrastructure` workflow
-3. Upload worker configs to Key Vault
-4. Run `Build & Deploy Migration App` workflow
-5. Connect via Bastion tunnel: `./scripts/Connect-Worker.ps1 -WorkerIndex 1`
+1. Generate SSH key: `ssh-keygen -t ed25519 -f scripts/b2c-mig-deploy -C "b2c-migration"`
+2. Create app registrations per worker: `.\scripts\Setup-Migration.ps1` (or manually)
+3. Deploy infra + VMs: `.\scripts\Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -SshPublicKeyFile .\scripts\b2c-mig-deploy.pub`
+4. Connect via Bastion: `.\scripts\Connect-Worker.ps1 -WorkerIndex 1`
+5. SSH: `ssh -p 2201 -i .\scripts\b2c-mig-deploy azureuser@localhost`
+6. Edit config on each VM: `nano /opt/b2c-migration/app/appsettings.json`
+7. Run migration (see [Runbook](RUNBOOK.md))
 
 ## Operations & Monitoring
 

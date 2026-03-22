@@ -1,113 +1,92 @@
-# Infrastructure Runbook
+# Infrastructure Guide
 
 ## Prerequisites
 
-- Azure subscription with Contributor access
-- GitHub repo secrets configured (see below)
-- SSH key pair: `ssh-keygen -t ed25519 -C "b2c-migration"`
-- Azure CLI (`az`) installed locally for Bastion tunnel
+- Azure subscription with **Contributor** access
+- SSH key pair for VM access: `ssh-keygen -t ed25519 -f scripts/b2c-mig-deploy -C "b2c-migration"`
+- Azure CLI (`az`) installed and logged in (`az login`)
+- PowerShell 7+
 
-## 1. Configure GitHub Secrets
+## Architecture
 
-In **Settings → Secrets → Actions**, add:
+Deploy-All.ps1 creates the following resources:
 
-| Secret | Value |
-|--------|-------|
-| `AZURE_CLIENT_ID` | Service Principal app ID |
-| `AZURE_TENANT_ID` | Azure AD tenant ID |
-| `AZURE_SUBSCRIPTION_ID` | Target subscription |
-| `VM_SSH_PUBLIC_KEY` | Contents of `~/.ssh/id_ed25519.pub` |
-| `STORAGE_ACCOUNT_NAME` | Globally unique name (e.g. `stb2cmig<suffix>`) |
+- **Resource Group** with VNet, NAT Gateway, NSGs
+- **Worker VMs** (Ubuntu 22.04, configurable count 1–16) with managed identity
+- **Storage Account** with Queue, Blob, and Table Storage (private endpoints)
+- **Key Vault** (deployed but not used for config currently)
+- **Bastion** for secure SSH access (no public IPs on VMs)
 
-### OIDC Setup (recommended over client secret)
+VMs clone the repo from GitHub, build the .NET app locally, and copy the example config as a starting point.
 
-```bash
-# Create SP
-az ad sp create-for-rbac --name sp-github-b2c-migration \
-  --role Contributor --scopes /subscriptions/<SUB_ID>
-
-# Add federated credential
-az ad app federated-credential create --id <APP_ID> --parameters '{
-  "name": "github-deploy",
-  "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:<owner>/<repo>:ref:refs/heads/infra/azure-vm-deploy",
-  "audiences": ["api://AzureADTokenExchange"]
-}'
-```
-
-## 2. Deploy Infrastructure
-
-### Option A: Deploy-All.ps1 (Recommended)
-
-The fastest way to deploy everything end-to-end (infra + build + upload + provision VMs):
+## Quick Start
 
 ```powershell
-./scripts/Deploy-All.ps1 -StorageAccountName stb2cmig123
+# Full deployment (infra + VM provisioning)
+./scripts/Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -SshPublicKeyFile ./scripts/b2c-mig-deploy.pub
+
+# Re-provision VMs only (infra already exists)
+./scripts/Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -SshPublicKeyFile ./scripts/b2c-mig-deploy.pub -SkipInfra
 ```
 
-See [scripts/README.md](../scripts/README.md#full-deployment-deploy-all) for all parameters.
+The script auto-detects your Git remote URL and current branch. Override with `-GitRepo` and `-GitBranch` if needed.
 
-### Option B: GitHub Actions
+## Deploy-All.ps1 Parameters
 
-Run the **Deploy Infrastructure** workflow (`workflow_dispatch`). Choose region, VM size, and whether to deploy Bastion.
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-ResourceGroup` | *(required)* | Target Azure resource group |
+| `-Location` | `eastus2` | Azure region |
+| `-VmCount` | `4` | Number of worker VMs (1–16) |
+| `-VmSize` | `Standard_B2s` | VM SKU |
+| `-AdminUsername` | `azureuser` | VM admin user |
+| `-SshPublicKeyFile` | `~/.ssh/id_ed25519.pub` | Path to SSH public key |
+| `-DeployBastion` | `true` | Whether to deploy Azure Bastion |
+| `-GitRepo` | *(auto-detected)* | Git repo URL for VMs to clone |
+| `-GitBranch` | *(auto-detected)* | Git branch to checkout on VMs |
+| `-ConfigProfile` | `worker` | Config file prefix (for example config copy) |
+| `-SkipInfra` | `false` | Skip Bicep deployment, only re-provision VMs |
+| `-WhatIf` | `false` | Dry run |
 
-Creates: Resource Group, VNet, 4 VMs, Storage (Queue/Blob/Table + Private Endpoints), Key Vault, NAT Gateway, Bastion (optional).
+## Pipeline Steps
 
-## 3. Upload Worker Configs to Key Vault
+1. **Deploy infrastructure** via `az deployment sub create` (Bicep modules: network, storage, vm, keyvault, bastion)
+2. **Provision each VM** via `az vm run-command invoke`:
+   - Install .NET SDK 8.0 + git (if not present)
+   - Clone the repo from GitHub
+   - `dotnet publish` the console app to `/opt/b2c-migration/app/`
+   - Copy `appsettings.worker1.example.json` as `appsettings.json`
 
-Each VM needs its own `appsettings.json` with its app registration credentials. Store them as Key Vault secrets:
+## Connect via Bastion
 
-```bash
-KV_NAME=$(az keyvault list -g rg-b2c-migration --query "[0].name" -o tsv)
-
-az keyvault secret set --vault-name $KV_NAME \
-  --name appsettings-worker1 --file appsettings.worker1.json
-az keyvault secret set --vault-name $KV_NAME \
-  --name appsettings-worker2 --file appsettings.worker2.json
-az keyvault secret set --vault-name $KV_NAME \
-  --name appsettings-worker3 --file appsettings.worker3.json
-az keyvault secret set --vault-name $KV_NAME \
-  --name appsettings-worker4 --file appsettings.worker4.json
-```
-
-## 4. Build & Deploy App
-
-Run the **Build & Deploy Migration App** workflow. It builds the .NET console app, uploads to blob storage, and attempts to provision each VM via `az vm run-command`.
-
-If `run-command` is blocked by policy, deploy manually per VM via Bastion (step 5).
-
-## 5. Connect via Bastion
+SSH to VMs through Azure Bastion tunnel (no public IPs):
 
 ```powershell
 # Terminal 1: open tunnel to worker 1 (port 2201)
 ./scripts/Connect-Worker.ps1 -WorkerIndex 1
 
 # Terminal 2: SSH through tunnel
-ssh -p 2201 azureuser@localhost
+ssh -p 2201 -i ./scripts/b2c-mig-deploy azureuser@localhost
 ```
 
-If the app wasn't deployed automatically, run the setup script on the VM:
+Each VM maps to port `2200 + WorkerIndex` (2201, 2202, 2203, 2204, ...).
+
+## Configure Workers
+
+After connecting via SSH, edit the config with your actual tenant credentials and secrets:
 
 ```bash
-bash /dev/stdin stb2cmig123 kv-b2c-mig-xxx appsettings-worker1 < <(curl -sL https://raw.githubusercontent.com/<owner>/<repo>/infra/azure-vm-deploy/scripts/Setup-Worker.sh)
-# Or copy Setup-Worker.sh via scp and run locally
+nano /opt/b2c-migration/app/appsettings.json
 ```
 
-## 6. Validate Before Running
+The example config is already in place with placeholder values. Fill in:
+- B2C tenant ID, domain, and app registration credentials
+- External ID tenant ID, domain, and app registration credentials
+- Storage account connection settings (VMs use managed identity)
 
-Run the pre-flight checker before starting migration:
+**Important**: Each worker needs a **dedicated app registration** on a dedicated IP for independent Graph API throttle quotas.
 
-```powershell
-# Simple mode (export/import)
-.\scripts\Validate-MigrationReadiness.ps1
-
-# Worker mode (queue-based)
-.\scripts\Validate-MigrationReadiness.ps1 -ConfigFile appsettings.worker1.json -Mode worker
-```
-
-Checks: Graph API connectivity, permissions, extension attributes, storage reachability, queue/table/blob existence.
-
-## 7. Run Migration
+## Run Migration
 
 On each worker VM:
 
@@ -124,54 +103,25 @@ cd /opt/b2c-migration/app
 ./B2CMigrationKit.Console phone-registration --config appsettings.json
 ```
 
-## 8. Monitor
-
-Use `Watch-Migration.ps1` locally (via Bastion tunnel) or on a worker VM:
+## Monitor
 
 ```powershell
-# From your local machine (with telemetry files copied/synced)
 .\scripts\Watch-Migration.ps1 -WorkerCount 4 -RefreshSeconds 3
-
-# On the VM directly
-cd /opt/b2c-migration/app
-pwsh -File ../scripts/Watch-Migration.ps1
 ```
 
-Shows live counters: users migrated, phones registered, errors, throttles. Press `Ctrl+C` for a final summary.
-
-## 9. Analyze Results
-
-After migration completes, generate a full report:
-
-```powershell
-# Aggregate all workers
-.\scripts\Analyze-Telemetry.ps1 -WorkerCount 4
-
-# Single worker file
-.\scripts\Analyze-Telemetry.ps1 -TelemetryFile worker2-telemetry.jsonl
-```
-
-Upload telemetry to blob storage for archival:
-
-```powershell
-.\scripts\Upload-Telemetry.ps1
-```
-
-## 10. Teardown
-
-Deallocate VMs and stop Bastion to stop billing:
+## Teardown
 
 ```bash
 # Stop VMs (keeps disks, $0 compute)
 for i in 1 2 3 4; do
-  az vm deallocate -g rg-b2c-migration -n vm-b2c-worker$i --no-wait
+  az vm deallocate -g rg-b2c-eeid-mig-test1 -n vm-b2c-worker$i --no-wait
 done
 
 # Stop Bastion
-az network bastion delete -g rg-b2c-migration -n bastion-b2c-migration
+az network bastion delete -g rg-b2c-eeid-mig-test1 -n bastion-b2c-migration
 
 # Full cleanup (deletes everything)
-az group delete -n rg-b2c-migration --yes --no-wait
+az group delete -n rg-b2c-eeid-mig-test1 --yes --no-wait
 ```
 
 ## Troubleshooting

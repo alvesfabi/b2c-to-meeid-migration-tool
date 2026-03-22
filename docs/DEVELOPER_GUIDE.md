@@ -22,7 +22,7 @@
 
 ```
 B2CMigrationKit.Core/       # Business logic, models, abstractions, DI registration
-B2CMigrationKit.Console/    # CLI for bulk operations (5 commands across 2 modes)
+B2CMigrationKit.Console/    # CLI for bulk operations (6 commands across 2 modes + utilities)
 B2CMigrationKit.Function/   # Azure Function for JIT authentication
 ```
 
@@ -42,6 +42,12 @@ The CLI supports two migration modes:
 | `HarvestOrchestrator` | `harvest` | Pages B2C user IDs, enqueues batches to migrate queue |
 | `WorkerMigrateOrchestrator` | `worker-migrate` | Dequeues IDs, fetches from B2C, creates in EEID, enqueues phone tasks |
 | `PhoneRegistrationWorker` | `phone-registration` | Fetches MFA phone from B2C, registers in EEID (throttled) |
+
+**Utilities:**
+
+| Orchestrator | Command | Description |
+|---|---|---|
+| `ValidateOrchestrator` | `validate` | Checks connectivity to B2C, EEID, Queue Storage, and Blob Storage |
 
 **Both modes**: `JitMigrationService` *(Azure Function)* — Validates B2C credentials on first login, returns `MigratePassword` action.
 

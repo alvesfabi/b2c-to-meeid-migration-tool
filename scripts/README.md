@@ -119,7 +119,7 @@ VMs build the app themselves from source — no blob upload needed.
    - Git clone the repo (auto-detected from your local remote/branch)
    - `dotnet publish` to `/opt/b2c-migration/app/`
    - Copy `appsettings.worker1.example.json` as `appsettings.json` (starting point)
-3. After deployment, connect via Bastion and edit `appsettings.json` on each VM with actual credentials
+3. After deployment, connect via Bastion and run `Configure-Worker.sh` on each VM (or edit `appsettings.json` manually)
 
 **Prerequisites:** Azure CLI logged in (`az login`), SSH key pair generated, config changes committed and pushed to your repo.
 

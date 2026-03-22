@@ -135,8 +135,6 @@ Key values to fill in:
 
 **Important**: Each worker VM must have a **dedicated app registration** with its own client ID/secret for independent Graph API throttle quotas.
 
-Save with `Ctrl+O`, exit with `Ctrl+X`.
-
 Repeat for each worker VM (connect via different `WorkerIndex`).
 
 ---
@@ -148,8 +146,8 @@ Repeat for each worker VM (connect via different `WorkerIndex`).
 SSH into any worker VM and run:
 
 ```bash
-cd ~/b2c-to-meeid-migration-tool/src/B2CMigrationKit.Console
-dotnet run -- validate --config appsettings.json
+cd /opt/b2c-migration/app
+./B2CMigrationKit.Console validate --config appsettings.json
 ```
 
 This checks connectivity to B2C Graph API, Entra External ID Graph API, Azure Queue Storage, and Azure Blob Storage. All four checks must pass (✓) before starting migration.
@@ -287,7 +285,8 @@ az group delete -n rg-b2c-eeid-mig-test1 --yes --no-wait
 | Re-provision VMs | `.\scripts\Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -SshPublicKeyFile .\scripts\b2c-mig-deploy.pub -SkipInfra` |
 | Open Bastion tunnel | `.\scripts\Connect-Worker.ps1 -WorkerIndex <N>` |
 | SSH to worker | `ssh -p 220<N> -i .\scripts\b2c-mig-deploy azureuser@localhost` |
-| Edit config on VM | `nano /opt/b2c-migration/app/appsettings.json` |
+| Configure worker | `bash ~/b2c-to-meeid-migration-tool/scripts/Configure-Worker.sh` |
+| Validate connectivity | `./B2CMigrationKit.Console validate --config appsettings.json` |
 | Run harvest | `./B2CMigrationKit.Console harvest --config appsettings.json` |
 | Run worker-migrate | `./B2CMigrationKit.Console worker-migrate --config appsettings.json` |
 | Run phone-registration | `./B2CMigrationKit.Console phone-registration --config appsettings.json` |

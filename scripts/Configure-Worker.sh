@@ -209,6 +209,16 @@ prompt_optional TELEMETRY_LOG_FILE "Telemetry log file" "$TELEMETRY_LOG"
 echo ""
 
 # ───────────────────────────────────────────
+# Phone-worker options
+# ───────────────────────────────────────────
+USE_FAKE_PHONE="false"
+if [ "$ROLE" = "phone-worker" ]; then
+    echo -e "${color_green}── Phone Registration Options ──${color_reset}"
+    prompt_optional USE_FAKE_PHONE "Use fake phone numbers when missing in B2C? (true/false)" "false"
+    echo ""
+fi
+
+# ───────────────────────────────────────────
 # Generate JSON
 # ───────────────────────────────────────────
 echo -e "${color_green}── Generating config ──${color_reset}"
@@ -396,7 +406,7 @@ else
       "MessageVisibilityTimeoutSeconds": 120,
       "EmptyQueuePollDelayMs": 5000,
       "MaxEmptyPolls": 3,
-      "UseFakePhoneWhenMissing": false
+      "UseFakePhoneWhenMissing": $USE_FAKE_PHONE
     },
     "BatchDelayMs": 0,
     "MaxConcurrency": 8

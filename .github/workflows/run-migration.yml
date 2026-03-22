@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       vmCount:
-        description: 'Number of VMs to provision app on (1-4)'
+        description: 'Number of VMs to provision app on (1-5)'
         required: true
-        default: '4'
+        default: '5'
         type: string
       configProfile:
         description: 'Config profile prefix (maps to appsettings-{profile}N secrets in Key Vault)'

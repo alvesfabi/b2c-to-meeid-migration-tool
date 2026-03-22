@@ -3,7 +3,7 @@
     Analyzes worker + phone-registration telemetry JSONL files.
 
 .PARAMETER WorkerCount
-    Number of migrate workers to aggregate (default: 4).
+    Number of migrate workers to aggregate (default: 5).
     Loads worker1..N-telemetry.jsonl + phone-registration1..N-telemetry.jsonl.
 
 .PARAMETER ConsoleDir
@@ -15,7 +15,7 @@
     When set, phone registration section is skipped.
 
 .EXAMPLE
-    # Aggregate all 4 workers + 4 phone workers (default)
+    # Aggregate all 5 workers + phone workers (default)
     .\Analyze-Telemetry.ps1
 
     # Aggregate 8 workers
@@ -25,7 +25,7 @@
     .\Analyze-Telemetry.ps1 -TelemetryFile ..\src\B2CMigrationKit.Console\worker2-telemetry.jsonl
 #>
 param(
-    [int]$WorkerCount = 4,
+    [int]$WorkerCount = 5,
     [string]$ConsoleDir = "$PSScriptRoot\..\src\B2CMigrationKit.Console",
     [string]$TelemetryFile = ""
 )

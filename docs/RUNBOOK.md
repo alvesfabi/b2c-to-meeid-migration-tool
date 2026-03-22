@@ -50,12 +50,18 @@ git add -A && git commit -m "update" && git push origin <branch>
 **Expected output:**
 ```
 Step 2: Provision VMs
-Provisioning vm-b2c-worker1 ...
+VM Role Map:
+  vm-b2c-worker1 → master
+  vm-b2c-worker2 → user-worker 1
+  vm-b2c-worker3 → user-worker 2
+  vm-b2c-worker4 → phone-worker 1
+  vm-b2c-worker5 → phone-worker 2
+Provisioning vm-b2c-worker1 (master) ...
   vm-b2c-worker1 provisioned.
-Provisioning vm-b2c-worker2 ...
+Provisioning vm-b2c-worker2 (user-worker 1) ...
   vm-b2c-worker2 provisioned.
 ...
-VMs Provisioned:   4 / 4
+VMs Provisioned:   5 / 5
 ```
 
 ---
@@ -94,9 +100,9 @@ bash /opt/b2c-migration/repo/scripts/Configure-Worker.sh
 ```
 
 The script will:
-1. Ask whether this VM is a **master** (harvest only) or **worker** (migrate + phone-registration)
+1. Ask whether this VM is a **master** (harvest only), **user-worker** (worker-migrate), or **phone-worker** (phone-registration)
 2. Prompt for B2C tenant ID, domain, client ID, client secret
-3. Prompt for External ID tenant ID, domain, client ID, client secret, extension app ID
+3. For user-worker and phone-worker: prompt for External ID tenant ID, domain, client ID, client secret, extension app ID (master skips EEID — not needed for harvest)
 4. Prompt for the storage account name (just the name — it builds the URI automatically)
 5. Write `/opt/b2c-migration/app/appsettings.json` with permissions `600`
 6. Run `validate` to verify all connections work
@@ -104,10 +110,10 @@ The script will:
 You can also pass `--role worker` or `--role master` to skip the role prompt:
 
 ```bash
-bash /opt/b2c-migration/repo/scripts/Configure-Worker.sh --role worker --worker-id 2
+bash /opt/b2c-migration/repo/scripts/Configure-Worker.sh --role user-worker --worker-id 2
 ```
 
-> **Manual editing:** If you prefer to edit manually, run `nano /opt/b2c-migration/app/appsettings.json` instead. See `appsettings.worker1.example.json` for the full structure.
+> **Manual editing:** If you prefer to edit manually, run `nano /opt/b2c-migration/app/appsettings.json` instead. See `appsettings.user-worker.example.json` for the full structure.
 
 Key values to fill in:
 
@@ -115,8 +121,8 @@ Key values to fill in:
 |---------|---------|-------|
 | `Migration.B2C` | `TenantId`, `TenantDomain` | Your B2C tenant |
 | `Migration.B2C.AppRegistration` | `ClientId`, `ClientSecret` | B2C app reg for this worker |
-| `Migration.ExternalId` | `TenantId`, `TenantDomain`, `ExtensionAppId` | Your External ID tenant |
-| `Migration.ExternalId.AppRegistration` | `ClientId`, `ClientSecret` | EEID app reg for this worker |
+| `Migration.ExternalId` | `TenantId`, `TenantDomain`, `ExtensionAppId` | Your External ID tenant (not needed for master) |
+| `Migration.ExternalId.AppRegistration` | `ClientId`, `ClientSecret` | EEID app reg (not needed for master) |
 | `Migration.Storage` | `ConnectionStringOrUri` | `https://<STORAGE_ACCOUNT>.blob.core.windows.net` |
 | `Migration.Storage` | `UseManagedIdentity` | `true` (VMs have RBAC on the storage account) |
 
@@ -150,12 +156,12 @@ cd /opt/b2c-migration/app
 ./B2CMigrationKit.Console validate --config appsettings.json
 ```
 
-This checks connectivity to B2C Graph API, Entra External ID Graph API, Azure Queue Storage, and Azure Blob Storage. All four checks must pass (✓) before starting migration.
+This checks connectivity to B2C Graph API, Entra External ID Graph API, Azure Queue Storage, and Azure Blob Storage. All four checks must pass (✓) before starting migration. Master VMs (harvest) will show EEID as skipped since it's not configured.
 
 ### Option B: From your local machine
 
 ```powershell
-.\scripts\Validate-MigrationReadiness.ps1 -ConfigFile src\B2CMigrationKit.Console\appsettings.worker1.json -Mode worker
+.\scripts\Validate-MigrationReadiness.ps1 -ConfigFile src\B2CMigrationKit.Console\appsettings.user-worker.example.json -Mode worker
 ```
 
 This checks: Graph API connectivity, permissions, extension attributes, storage reachability, queue/table existence.
@@ -164,9 +170,9 @@ This checks: Graph API connectivity, permissions, extension attributes, storage 
 
 ## Step 5: Run Migration
 
-### 5a. Harvest (ONE worker only)
+### 5a. Harvest (master VM only)
 
-SSH into **worker 1** and run:
+SSH into **VM 1 (master)** and run:
 
 ```bash
 cd /opt/b2c-migration/app
@@ -175,9 +181,9 @@ cd /opt/b2c-migration/app
 
 This pages all B2C user IDs and enqueues them to the migration queue. Wait for it to complete before starting workers.
 
-### 5b. Worker Migrate (ALL workers in parallel)
+### 5b. Worker Migrate (user-worker VMs in parallel)
 
-SSH into **each worker** and run:
+SSH into **VM 2 and VM 3 (user-workers)** and run:
 
 ```bash
 cd /opt/b2c-migration/app
@@ -191,7 +197,7 @@ Workers dequeue ID batches, fetch full profiles from B2C, and create users in Ex
 > nohup ./B2CMigrationKit.Console worker-migrate --config appsettings.json > migrate.log 2>&1 &
 > ```
 
-### 5c. Phone Registration (ALL workers, after worker-migrate completes)
+### 5c. Phone Registration (phone-worker VMs, after worker-migrate completes)
 
 ```bash
 cd /opt/b2c-migration/app
@@ -207,7 +213,7 @@ Reads MFA phone numbers from B2C and registers them in External ID. Throttled to
 From your local machine:
 
 ```powershell
-.\scripts\Watch-Migration.ps1 -WorkerCount 4 -RefreshSeconds 3
+.\scripts\Watch-Migration.ps1 -WorkerCount 5 -RefreshSeconds 3
 ```
 
 Shows live counters: users migrated, phones registered, errors, throttles. Press `Ctrl+C` for a final summary.
@@ -227,7 +233,7 @@ az storage entity query --table-name migrationAudit \
 After migration completes:
 
 ```powershell
-.\scripts\Analyze-Telemetry.ps1 -WorkerCount 4
+.\scripts\Analyze-Telemetry.ps1 -WorkerCount 5
 ```
 
 Upload telemetry to blob storage for archival:
@@ -243,7 +249,7 @@ Upload telemetry to blob storage for archival:
 ### Stop VMs (keeps disks, $0 compute cost)
 
 ```bash
-for i in 1 2 3 4; do
+for i in 1 2 3 4 5; do
   az vm deallocate -g rg-b2c-eeid-mig-test1 -n vm-b2c-worker$i --no-wait
 done
 ```
@@ -270,7 +276,7 @@ az group delete -n rg-b2c-eeid-mig-test1 --yes --no-wait
 | Bastion extension not installed | First time using `az network bastion` | Script auto-installs it; or run `az extension add --name bastion --yes` |
 | `run-command` fails or times out | Azure policy blocks RunCommand | Connect via Bastion manually and run `bash /opt/b2c-migration/repo/scripts/Setup-Worker.sh` |
 | App not found in `/opt/b2c-migration/app/` | Provisioning failed silently | Re-run `Deploy-All.ps1 -SkipInfra` or manually: clone repo, `dotnet publish` |
-| `403 Insufficient privileges` on Graph | App registration missing permissions | Grant `User.ReadWrite.All` (EEID) / `User.Read.All` (B2C), admin consent |
+| `403 Insufficient privileges` on Graph | App registration missing permissions | Master: `User.Read.All` (B2C). User-worker: `User.Read.All` (B2C) + `User.ReadWrite.All` (EEID). Phone-worker: `UserAuthenticationMethod.Read.All` (B2C) + `UserAuthenticationMethod.ReadWrite.All` (EEID). Admin consent required. |
 | HTTP 429 (throttle) | Too many concurrent requests | Reduce `MaxConcurrency`, increase `ThrottleDelayMs`, or add workers with separate app regs |
 | VM can't reach storage | Private endpoint DNS not resolving | SSH into VM, run `nslookup <account>.queue.core.windows.net` — should resolve to private IP |
 | `QueueNotFound` / `TableNotFound` | Storage containers not created | Run the app once with `harvest` — it auto-creates queues/tables |
@@ -290,7 +296,7 @@ az group delete -n rg-b2c-eeid-mig-test1 --yes --no-wait
 | Run harvest | `./B2CMigrationKit.Console harvest --config appsettings.json` |
 | Run worker-migrate | `./B2CMigrationKit.Console worker-migrate --config appsettings.json` |
 | Run phone-registration | `./B2CMigrationKit.Console phone-registration --config appsettings.json` |
-| Monitor progress | `.\scripts\Watch-Migration.ps1 -WorkerCount 4` |
-| Analyze results | `.\scripts\Analyze-Telemetry.ps1 -WorkerCount 4` |
+| Monitor progress | `.\scripts\Watch-Migration.ps1 -WorkerCount 5` |
+| Analyze results | `.\scripts\Analyze-Telemetry.ps1 -WorkerCount 5` |
 | Stop VMs | `az vm deallocate -g rg-b2c-eeid-mig-test1 -n vm-b2c-worker<N> --no-wait` |
 | Full cleanup | `az group delete -n rg-b2c-eeid-mig-test1 --yes --no-wait` |

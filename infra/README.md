@@ -37,14 +37,17 @@ The script auto-detects your Git remote URL and current branch. Override with `-
 |-----------|---------|-------------|
 | `-ResourceGroup` | *(required)* | Target Azure resource group |
 | `-Location` | `eastus2` | Azure region |
-| `-VmCount` | `4` | Number of worker VMs (1–16) |
+| `-VmCount` | `5` | Number of worker VMs (1–16). Derived from role counts. |
 | `-VmSize` | `Standard_B2s` | VM SKU |
 | `-AdminUsername` | `azureuser` | VM admin user |
 | `-SshPublicKeyFile` | `~/.ssh/id_ed25519.pub` | Path to SSH public key |
 | `-DeployBastion` | `true` | Whether to deploy Azure Bastion |
 | `-GitRepo` | *(auto-detected)* | Git repo URL for VMs to clone |
 | `-GitBranch` | *(auto-detected)* | Git branch to checkout on VMs |
-| `-ConfigProfile` | `worker` | Config file prefix (for example config copy) |
+| `-MasterCount` | `1` | Number of master VMs (harvest) |
+| `-UserWorkerCount` | `2` | Number of user-worker VMs (worker-migrate) |
+| `-PhoneWorkerCount` | `2` | Number of phone-worker VMs (phone-registration) |
+| `-ConfigProfile` | *N/A* | Removed — role-appropriate config is auto-selected per VM |
 | `-SkipInfra` | `false` | Skip Bicep deployment, only re-provision VMs |
 | `-WhatIf` | `false` | Dry run |
 
@@ -55,7 +58,10 @@ The script auto-detects your Git remote URL and current branch. Override with `-
    - Install .NET SDK 8.0 + git (if not present)
    - Clone the repo from GitHub
    - `dotnet publish` the console app to `/opt/b2c-migration/app/`
-   - Copy `appsettings.worker1.example.json` as `appsettings.json`
+   - Copy role-appropriate example config as `appsettings.json`:
+     - VM 1: `appsettings.master.example.json` (harvest)
+     - VM 2–3: `appsettings.user-worker.example.json` (worker-migrate)
+     - VM 4–5: `appsettings.phone-worker.example.json` (phone-registration)
 
 ## Connect via Bastion
 
@@ -69,7 +75,17 @@ SSH to VMs through Azure Bastion tunnel (no public IPs):
 ssh -p 2201 -i ./scripts/b2c-mig-deploy azureuser@localhost
 ```
 
-Each VM maps to port `2200 + WorkerIndex` (2201, 2202, 2203, 2204, ...).
+Each VM maps to port `2200 + WorkerIndex` (2201, 2202, 2203, 2204, 2205, ...).
+
+## VM Role Map (Default)
+
+| VM | Index | Role | Command | B2C Permission | EEID Permission |
+|----|-------|------|---------|---------------|----------------|
+| vm-b2c-worker1 | 1 | master | `harvest` | `User.Read.All` | *not needed* |
+| vm-b2c-worker2 | 2 | user-worker | `worker-migrate` | `User.Read.All` | `User.ReadWrite.All` |
+| vm-b2c-worker3 | 3 | user-worker | `worker-migrate` | `User.Read.All` | `User.ReadWrite.All` |
+| vm-b2c-worker4 | 4 | phone-worker | `phone-registration` | `UserAuthenticationMethod.Read.All` | `UserAuthenticationMethod.ReadWrite.All` |
+| vm-b2c-worker5 | 5 | phone-worker | `phone-registration` | `UserAuthenticationMethod.Read.All` | `UserAuthenticationMethod.ReadWrite.All` |
 
 ## Configure Workers
 
@@ -88,32 +104,44 @@ The example config is already in place with placeholder values. Fill in:
 
 ## Run Migration
 
-On each worker VM:
+On the master VM (VM 1):
 
 ```bash
 cd /opt/b2c-migration/app
 
-# Step 1: Harvest (run on ONE worker only — populates the queue)
+# Step 1: Harvest (master only — populates the queue)
 ./B2CMigrationKit.Console harvest --config appsettings.json
+```
 
-# Step 2: Worker migrate (run on ALL workers in parallel)
+On each user-worker VM (VM 2, VM 3):
+
+```bash
+cd /opt/b2c-migration/app
+
+# Step 2: Worker migrate (run on all user-workers in parallel)
 ./B2CMigrationKit.Console worker-migrate --config appsettings.json
+```
 
-# Step 3: Phone registration (run on ALL workers after step 2 completes)
+On each phone-worker VM (VM 4, VM 5), after worker-migrate completes:
+
+```bash
+cd /opt/b2c-migration/app
+
+# Step 3: Phone registration (run on all phone-workers in parallel)
 ./B2CMigrationKit.Console phone-registration --config appsettings.json
 ```
 
 ## Monitor
 
 ```powershell
-.\scripts\Watch-Migration.ps1 -WorkerCount 4 -RefreshSeconds 3
+.\scripts\Watch-Migration.ps1 -WorkerCount 5 -RefreshSeconds 3
 ```
 
 ## Teardown
 
 ```bash
 # Stop VMs (keeps disks, $0 compute)
-for i in 1 2 3 4; do
+for i in 1 2 3 4 5; do
   az vm deallocate -g rg-b2c-eeid-mig-test1 -n vm-b2c-worker$i --no-wait
 done
 

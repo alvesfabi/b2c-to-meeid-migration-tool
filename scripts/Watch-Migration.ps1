@@ -8,7 +8,7 @@
     stop and print a final summary.
 
 .PARAMETER WorkerCount
-    Number of migrate workers to monitor (default: 4).
+    Number of migrate workers to monitor (default: 5).
     Looks for worker1..N-telemetry.jsonl + phone-registration1..N-telemetry.jsonl.
 
 .PARAMETER ConsoleDir
@@ -19,14 +19,14 @@
     Seconds between dashboard refreshes (default: 3).
 
 .EXAMPLE
-    # Monitor 4 workers, refresh every 3s
+    # Monitor 5 workers, refresh every 3s
     .\Watch-Migration.ps1
 
     # Monitor 8 workers, refresh every 2s
     .\Watch-Migration.ps1 -WorkerCount 8 -RefreshSeconds 2
 #>
 param(
-    [int]$WorkerCount     = 4,
+    [int]$WorkerCount     = 5,
     [string]$ConsoleDir   = "$PSScriptRoot\..\src\B2CMigrationKit.Console",
     [int]$RefreshSeconds  = 3
 )

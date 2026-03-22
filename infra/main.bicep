@@ -9,8 +9,8 @@ param resourceGroupName string = 'rg-b2c-migration'
 @description('Storage account name (3-24 lowercase alphanumeric, globally unique).')
 param storageAccountName string
 
-@description('Number of worker VMs to deploy.')
-param vmCount int = 4
+@description('Number of worker VMs to deploy (default: 5 — 1 master + 2 user-workers + 2 phone-workers).')
+param vmCount int = 5
 
 @description('VM size for each worker node. Standard_B2s (2 vCPU / 4 GB) is sufficient for HTTP-bound workloads.')
 param vmSize string = 'Standard_B2s'

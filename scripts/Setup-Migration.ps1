@@ -44,7 +44,7 @@ param(
     [string]$ExtensionAppId,
 
     [ValidateRange(1, 16)]
-    [int]$WorkerCount = 4,
+    [int]$WorkerCount = 5,
 
     [ValidateSet("Simple", "Advanced")]
     [string]$Mode,

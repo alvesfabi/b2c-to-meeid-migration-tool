@@ -1,7 +1,7 @@
 # Infrastructure Plan: Azure VM Deploy
 
 **Branch:** `infra/azure-vm-deploy`
-**Goal:** GitHub Action to deploy 4 VMs in a VNet with private endpoints to Storage, so migration runs in Azure (not locally).
+**Goal:** GitHub Action to deploy 5 VMs (1 master + 2 user-workers + 2 phone-workers) in a VNet with private endpoints to Storage, so migration runs in Azure (not locally).
 
 ## Current State
 

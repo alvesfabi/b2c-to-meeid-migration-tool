@@ -10,8 +10,8 @@ param resourceGroupName = 'rg-b2c-migration'
 // Run: az storage account check-name --name <name>
 param storageAccountName = 'stb2cmig<SUFFIX>'
 
-// 4 workers, one per VM. Reduce for testing.
-param vmCount = 4
+// 5 VMs: 1 master (harvest) + 2 user-workers (worker-migrate) + 2 phone-workers (phone-registration).
+param vmCount = 5
 
 // Standard_B2s: 2 vCPU / 4 GB — suitable for HTTP-bound migration workloads.
 // Upgrade to Standard_D2s_v5 if you observe CPU saturation.

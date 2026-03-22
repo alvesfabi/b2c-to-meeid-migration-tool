@@ -28,9 +28,9 @@ on:
           - Standard_B2ms
           - Standard_D2s_v5
       vmCount:
-        description: 'Number of worker VMs'
+        description: 'Number of worker VMs (default: 5 = 1 master + 2 user-workers + 2 phone-workers)'
         required: true
-        default: '4'
+        default: '5'
         type: string
       deployBastion:
         description: 'Deploy Azure Bastion (adds ~$5/day)'

@@ -458,7 +458,7 @@ Migration throughput scales along two axes:
 
 ### Phone Registration Throughput
 
-The `phoneMethods` API is rate-limited at **30 requests / 10 seconds per app registration** (~3 RPS). Each phone-registration worker with a dedicated app registration adds ~3 RPS. With 4 workers: ~12 RPS → ~1M phones in ~24 hours.
+The `phoneMethods` API is rate-limited at **30 requests / 10 seconds per app registration** (~3 RPS). Each phone-registration worker with a dedicated app registration adds ~3 RPS. With 2 phone-workers: ~6 RPS → ~500K phones in ~24 hours. Scale by adding more phone-worker VMs.
 
 ### Rate Limiting Strategy
 
@@ -506,7 +506,7 @@ All resources deploy via Bicep (`infra/`) and two GitHub Actions workflows. No p
 
 **Components**:
 
-- **4× Ubuntu 22.04 VMs** (Standard_B2s) — self-contained .NET 8 console app
+- **5× Ubuntu 22.04 VMs** (Standard_B2s) — 1 master (harvest) + 2 user-workers (worker-migrate) + 2 phone-workers (phone-registration)
 - **Storage Account** — Queue (work items), Table (audit records), Blob (export data + app artifact). All via Private Endpoints.
 - **Key Vault** — stores `appsettings` per worker. RBAC-only, PE access.
 - **Azure Bastion** (Standard, tunneling enabled) — SSH access without public IPs. Optional; can be stopped to save cost.

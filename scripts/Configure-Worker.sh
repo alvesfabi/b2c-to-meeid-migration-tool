@@ -3,9 +3,10 @@
 # Run this AFTER Setup-Worker.sh has cloned and built the app.
 #
 # Usage:
-#   bash Configure-Worker.sh                     # interactive
-#   bash Configure-Worker.sh --role worker        # skip role prompt
-#   bash Configure-Worker.sh --role master
+#   bash Configure-Worker.sh                          # interactive
+#   bash Configure-Worker.sh --role master             # harvest (B2C only)
+#   bash Configure-Worker.sh --role user-worker        # worker-migrate (B2C + EEID)
+#   bash Configure-Worker.sh --role phone-worker       # phone-registration (B2C + EEID auth methods)
 #
 # The script asks for credentials one by one and writes the config
 # to the console app directory. Much easier than editing with nano.
@@ -112,20 +113,26 @@ echo ""
 # ───────────────────────────────────────────
 if [ -z "$ROLE" ]; then
     echo "Select the role for this VM:"
-    echo "  1) master   — runs 'harvest' only (enqueues user IDs)"
-    echo "  2) worker   — runs 'worker-migrate' + 'phone-registration'"
+    echo "  1) master       — runs 'harvest' (B2C read-only, no EEID needed)"
+    echo "  2) user-worker  — runs 'worker-migrate' (B2C read + EEID write)"
+    echo "  3) phone-worker — runs 'phone-registration' (B2C + EEID auth methods)"
     echo ""
-    printf "  Enter 1 or 2: "
+    printf "  Enter 1, 2, or 3: "
     read -r role_choice
     case "$role_choice" in
-        1|master)  ROLE="master" ;;
-        2|worker)  ROLE="worker" ;;
-        *)         echo "Invalid choice"; exit 1 ;;
+        1|master)        ROLE="master" ;;
+        2|user-worker)   ROLE="user-worker" ;;
+        3|phone-worker)  ROLE="phone-worker" ;;
+        *)               echo "Invalid choice"; exit 1 ;;
     esac
 fi
 
-if [ "$ROLE" = "worker" ] && [ -z "$WORKER_ID" ]; then
-    prompt WORKER_ID "Worker ID (e.g. 1, 2, 3)" "1"
+if [ "$ROLE" = "user-worker" ] && [ -z "$WORKER_ID" ]; then
+    prompt WORKER_ID "User Worker ID (e.g. 1, 2)" "1"
+fi
+
+if [ "$ROLE" = "phone-worker" ] && [ -z "$WORKER_ID" ]; then
+    prompt WORKER_ID "Phone Worker ID (e.g. 1, 2)" "1"
 fi
 
 echo ""
@@ -136,6 +143,13 @@ echo ""
 # B2C Tenant
 # ───────────────────────────────────────────
 echo -e "${color_green}── Azure AD B2C ──${color_reset}"
+if [ "$ROLE" = "master" ]; then
+    echo -e "  ${color_yellow}Permissions needed: User.Read.All (Application)${color_reset}"
+elif [ "$ROLE" = "user-worker" ]; then
+    echo -e "  ${color_yellow}Permissions needed: User.Read.All (Application)${color_reset}"
+else
+    echo -e "  ${color_yellow}Permissions needed: UserAuthenticationMethod.Read.All (Application)${color_reset}"
+fi
 prompt B2C_TENANT_ID       "B2C Tenant ID (GUID)"
 prompt B2C_TENANT_DOMAIN   "B2C Tenant Domain (e.g. contoso.onmicrosoft.com)"
 prompt B2C_CLIENT_ID       "B2C App Registration Client ID"
@@ -143,15 +157,30 @@ prompt_secret B2C_CLIENT_SECRET  "B2C App Registration Client Secret"
 echo ""
 
 # ───────────────────────────────────────────
-# External ID Tenant
+# External ID Tenant (not needed for master/harvest)
 # ───────────────────────────────────────────
-echo -e "${color_green}── Entra External ID ──${color_reset}"
-prompt EEID_TENANT_ID       "External ID Tenant ID (GUID)"
-prompt EEID_TENANT_DOMAIN   "External ID Tenant Domain (e.g. contoso.onmicrosoft.com)"
-prompt EEID_CLIENT_ID       "External ID App Registration Client ID"
-prompt_secret EEID_CLIENT_SECRET  "External ID App Registration Client Secret"
-prompt EEID_EXTENSION_APP_ID "Extension App ID (no hyphens)"
-echo ""
+if [ "$ROLE" = "master" ]; then
+    echo -e "${color_yellow}── Skipping External ID (not needed for harvest) ──${color_reset}"
+    EEID_TENANT_ID=""
+    EEID_TENANT_DOMAIN=""
+    EEID_CLIENT_ID=""
+    EEID_CLIENT_SECRET=""
+    EEID_EXTENSION_APP_ID=""
+    echo ""
+else
+    echo -e "${color_green}── Entra External ID ──${color_reset}"
+    if [ "$ROLE" = "user-worker" ]; then
+        echo -e "  ${color_yellow}Permissions needed: User.ReadWrite.All (Application)${color_reset}"
+    else
+        echo -e "  ${color_yellow}Permissions needed: UserAuthenticationMethod.ReadWrite.All (Application)${color_reset}"
+    fi
+    prompt EEID_TENANT_ID       "External ID Tenant ID (GUID)"
+    prompt EEID_TENANT_DOMAIN   "External ID Tenant Domain (e.g. contoso.onmicrosoft.com)"
+    prompt EEID_CLIENT_ID       "External ID App Registration Client ID"
+    prompt_secret EEID_CLIENT_SECRET  "External ID App Registration Client Secret"
+    prompt EEID_EXTENSION_APP_ID "Extension App ID (no hyphens)"
+    echo ""
+fi
 
 # ───────────────────────────────────────────
 # Storage
@@ -169,10 +198,12 @@ echo ""
 # Telemetry
 # ───────────────────────────────────────────
 echo -e "${color_green}── Telemetry ──${color_reset}"
-if [ "$ROLE" = "worker" ]; then
-    TELEMETRY_LOG="worker${WORKER_ID}-telemetry.jsonl"
-else
+if [ "$ROLE" = "master" ]; then
     TELEMETRY_LOG="master-telemetry.jsonl"
+elif [ "$ROLE" = "user-worker" ]; then
+    TELEMETRY_LOG="user-worker${WORKER_ID}-telemetry.jsonl"
+else
+    TELEMETRY_LOG="phone-worker${WORKER_ID}-telemetry.jsonl"
 fi
 prompt_optional TELEMETRY_LOG_FILE "Telemetry log file" "$TELEMETRY_LOG"
 echo ""
@@ -188,9 +219,10 @@ escape_json() {
 }
 
 B2C_SECRET_ESC=$(escape_json "$B2C_CLIENT_SECRET")
-EEID_SECRET_ESC=$(escape_json "$EEID_CLIENT_SECRET")
 
-cat > "$CONFIG_FILE" <<JSONEOF
+if [ "$ROLE" = "master" ]; then
+    # Master (harvest) — B2C only, no EEID needed
+    cat > "$CONFIG_FILE" <<JSONEOF
 {
   "Logging": {
     "LogLevel": {
@@ -205,7 +237,94 @@ cat > "$CONFIG_FILE" <<JSONEOF
       "AppRegistration": {
         "ClientId": "$B2C_CLIENT_ID",
         "ClientSecret": $B2C_SECRET_ESC,
-        "Name": "B2C App Registration",
+        "Name": "B2C App Registration (Master)",
+        "Enabled": true
+      },
+      "Scopes": ["https://graph.microsoft.com/.default"]
+    },
+    "ExternalId": {
+      "TenantId": "",
+      "TenantDomain": "",
+      "ExtensionAppId": "",
+      "AppRegistration": {
+        "ClientId": "",
+        "ClientSecret": "",
+        "Name": "Not used by harvest",
+        "Enabled": false
+      },
+      "Scopes": ["https://graph.microsoft.com/.default"]
+    },
+    "Storage": {
+      "ConnectionStringOrUri": "$STORAGE_URI",
+      "ExportContainerName": "user-exports",
+      "ErrorContainerName": "migration-errors",
+      "ImportAuditContainerName": "import-audit",
+      "ExportBlobPrefix": "users_",
+      "AuditTableName": "migrationAudit",
+      "AuditMode": "$AUDIT_MODE",
+      "UseManagedIdentity": true
+    },
+    "Telemetry": {
+      "ConnectionString": "",
+      "Enabled": true,
+      "UseApplicationInsights": false,
+      "UseConsoleLogging": true,
+      "SamplingPercentage": 100.0,
+      "TrackDependencies": true,
+      "TrackExceptions": true,
+      "LogFilePath": "$TELEMETRY_LOG_FILE"
+    },
+    "Retry": {
+      "MaxRetries": 5,
+      "InitialDelayMs": 1000,
+      "MaxDelayMs": 30000,
+      "BackoffMultiplier": 2.0,
+      "UseRetryAfterHeader": true,
+      "OperationTimeoutSeconds": 120
+    },
+    "Export": {
+      "SelectFields": "id,userPrincipalName,displayName,givenName,surname,mail,mobilePhone,identities"
+    },
+    "Harvest": {
+      "QueueName": "user-ids-to-process",
+      "IdsPerMessage": 20,
+      "PageSize": 999,
+      "MessageVisibilityTimeout": "00:05:00",
+      "MaxUsers": 0
+    },
+    "BatchDelayMs": 0,
+    "MaxConcurrency": 8
+  }
+}
+JSONEOF
+else
+    # user-worker or phone-worker — both tenants needed
+    EEID_SECRET_ESC=$(escape_json "$EEID_CLIENT_SECRET")
+
+    if [ "$ROLE" = "user-worker" ]; then
+        APP_REG_NAME="User Worker ${WORKER_ID}"
+        AUDIT_FILE="migration-audit-user-worker${WORKER_ID}.jsonl"
+    else
+        APP_REG_NAME="Phone Worker ${WORKER_ID}"
+        AUDIT_FILE="migration-audit-phone-worker${WORKER_ID}.jsonl"
+    fi
+
+    cat > "$CONFIG_FILE" <<JSONEOF
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft": "Warning"
+    }
+  },
+  "Migration": {
+    "B2C": {
+      "TenantId": "$B2C_TENANT_ID",
+      "TenantDomain": "$B2C_TENANT_DOMAIN",
+      "AppRegistration": {
+        "ClientId": "$B2C_CLIENT_ID",
+        "ClientSecret": $B2C_SECRET_ESC,
+        "Name": "B2C App Registration (${APP_REG_NAME})",
         "Enabled": true
       },
       "Scopes": ["https://graph.microsoft.com/.default"]
@@ -217,7 +336,7 @@ cat > "$CONFIG_FILE" <<JSONEOF
       "AppRegistration": {
         "ClientId": "$EEID_CLIENT_ID",
         "ClientSecret": $EEID_SECRET_ESC,
-        "Name": "External ID App Registration",
+        "Name": "External ID App Registration (${APP_REG_NAME})",
         "Enabled": true
       },
       "Scopes": ["https://graph.microsoft.com/.default"]
@@ -230,6 +349,7 @@ cat > "$CONFIG_FILE" <<JSONEOF
       "ExportBlobPrefix": "users_",
       "AuditTableName": "migrationAudit",
       "AuditMode": "$AUDIT_MODE",
+      "AuditFilePath": "$AUDIT_FILE",
       "UseManagedIdentity": true
     },
     "Telemetry": {
@@ -283,6 +403,7 @@ cat > "$CONFIG_FILE" <<JSONEOF
   }
 }
 JSONEOF
+fi
 
 chmod 600 "$CONFIG_FILE"
 
@@ -312,9 +433,11 @@ echo -e "${color_green}── Next steps ──${color_reset}"
 if [ "$ROLE" = "master" ]; then
     echo "  cd $APP_DIR"
     echo "  ./B2CMigrationKit.Console harvest --config appsettings.json"
-else
+elif [ "$ROLE" = "user-worker" ]; then
     echo "  cd $APP_DIR"
     echo "  ./B2CMigrationKit.Console worker-migrate --config appsettings.json"
+else
+    echo "  cd $APP_DIR"
     echo "  ./B2CMigrationKit.Console phone-registration --config appsettings.json"
 fi
 echo ""

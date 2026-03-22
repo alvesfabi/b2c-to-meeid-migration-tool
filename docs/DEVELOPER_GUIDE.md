@@ -264,8 +264,8 @@ cp appsettings.export-import.example.json appsettings.export-import.json
 ```bash
 cd src/B2CMigrationKit.Console
 cp appsettings.master.example.json appsettings.master.json
-cp appsettings.worker1.example.json appsettings.worker1.json
-cp appsettings.phone-registration.example.json appsettings.phone-registration.json
+cp appsettings.user-worker.example.json appsettings.user-worker.json
+cp appsettings.phone-worker.example.json appsettings.phone-worker.json
 # Edit each file with your tenant credentials
 ```
 
@@ -301,11 +301,10 @@ Three-stage pipeline with Azure Queues. Best for large tenants and MFA phone mig
 **2. Worker Migrate** — fetches profiles, creates EEID users, enqueues phone tasks.
 ```powershell
 # Single instance (smoke test)
-.\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker1.json -VerboseLogging
+.\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.user-worker.json -VerboseLogging
 
 # Parallel (separate terminal per instance, each with different app registrations)
-.\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker1.json
-.\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker2.json
+.\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.user-worker.json
 ```
 
 Workers auto-exit when queue is empty. Existing users recorded as `Duplicate` (phone task still enqueued).

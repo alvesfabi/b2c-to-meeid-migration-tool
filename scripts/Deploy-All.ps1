@@ -4,15 +4,20 @@
 
 .DESCRIPTION
     Orchestrates the complete deployment pipeline:
-      1. Deploy infrastructure via Bicep
-      2. Provision each VM: git clone → dotnet publish → copy example config
+      1. Deploy infrastructure via Bicep (5 VMs: 1 master + 2 user-workers + 2 phone-workers)
+      2. Provision each VM: git clone → dotnet publish → copy role-appropriate example config
       VMs build the app themselves (no blob upload needed).
+
+    Default VM roles:
+      VM 1          — master        (harvest: B2C read-only)
+      VM 2, VM 3    — user-worker   (worker-migrate: B2C read + EEID write)
+      VM 4, VM 5    — phone-worker  (phone-registration: B2C + EEID auth methods)
 
 .EXAMPLE
     ./Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -SshPublicKeyFile .\b2c-mig-deploy.pub
 
 .EXAMPLE
-    ./Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -SkipInfra -VmCount 2
+    ./Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -SkipInfra
 
 .EXAMPLE
     ./Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -WhatIf
@@ -26,9 +31,6 @@ param(
 
     [string]$StorageAccountName,
 
-    [ValidateRange(1, 16)]
-    [int]$VmCount = 4,
-
     [string]$VmSize = 'Standard_B2s',
 
     [string]$AdminUsername = 'azureuser',
@@ -41,12 +43,35 @@ param(
 
     [string]$GitBranch = '',
 
-    [string]$ConfigProfile = 'worker',
+    [int]$MasterCount = 1,
+
+    [int]$UserWorkerCount = 2,
+
+    [int]$PhoneWorkerCount = 2,
 
     [switch]$SkipInfra
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Derive VmCount from role counts
+$VmCount = $MasterCount + $UserWorkerCount + $PhoneWorkerCount
+
+# Build role map: VM index (1-based) → role + example config
+$vmRoles = @{}
+$idx = 1
+for ($m = 0; $m -lt $MasterCount; $m++) {
+    $vmRoles[$idx] = @{ Role = 'master'; ExampleConfig = 'appsettings.master.example.json'; Label = "master" }
+    $idx++
+}
+for ($u = 1; $u -le $UserWorkerCount; $u++) {
+    $vmRoles[$idx] = @{ Role = 'user-worker'; ExampleConfig = 'appsettings.user-worker.example.json'; Label = "user-worker $u" }
+    $idx++
+}
+for ($p = 1; $p -le $PhoneWorkerCount; $p++) {
+    $vmRoles[$idx] = @{ Role = 'phone-worker'; ExampleConfig = 'appsettings.phone-worker.example.json'; Label = "phone-worker $p" }
+    $idx++
+}
 
 # Auto-detect repo URL and branch from the local git repo if not specified
 if (-not $GitRepo) {
@@ -175,14 +200,21 @@ Write-Info "Strategy: Each VM clones the repo from GitHub and builds locally."
 Write-Info "Repo:     $GitRepo"
 Write-Info "Branch:   $GitBranch"
 Write-Host ""
+Write-Info "VM Role Map:"
+foreach ($key in ($vmRoles.Keys | Sort-Object)) {
+    Write-Info "  vm-b2c-worker$key → $($vmRoles[$key].Label)"
+}
+Write-Host ""
 
 $provisionedVms = 0
 $failedVms = @()
 
 for ($i = 1; $i -le $VmCount; $i++) {
     $vmName = "vm-b2c-worker$i"
+    $roleInfo = $vmRoles[$i]
+    $exampleConfig = $roleInfo.ExampleConfig
 
-    Write-Info "Provisioning $vmName ..."
+    Write-Info "Provisioning $vmName ($($roleInfo.Label)) ..."
 
     if ($WhatIfPreference) {
         Write-Info "  [WhatIf] Would run git clone + dotnet publish on $vmName via az vm run-command."
@@ -232,11 +264,11 @@ dotnet publish `$REPO_DIR/src/B2CMigrationKit.Console/B2CMigrationKit.Console.cs
 
 chmod +x `$DEPLOY_DIR/B2CMigrationKit.Console 2>/dev/null || true
 
-# Copy example config as starting point
-EXAMPLE_CFG=`$REPO_DIR/src/B2CMigrationKit.Console/appsettings.${ConfigProfile}1.example.json
+# Copy role-appropriate example config as starting point
+EXAMPLE_CFG=`$REPO_DIR/src/B2CMigrationKit.Console/${exampleConfig}
 if [ -f "`$EXAMPLE_CFG" ]; then
     cp `$EXAMPLE_CFG `$DEPLOY_DIR/appsettings.json
-    echo "Example config copied to appsettings.json"
+    echo "Example config (${exampleConfig}) copied to appsettings.json"
 fi
 
 chown -R ${AdminUsername}:${AdminUsername} `$DEPLOY_DIR /opt/b2c-migration/telemetry
@@ -320,9 +352,12 @@ if ($WhatIfPreference) {
     Write-Info "[WhatIf] Dry run complete — no changes were made."
 }
 else {
-    Write-Info "Resource Group:    $ResourceGroup"
-    Write-Info "Storage Account:   $StorageAccountName"
-    Write-Info "VMs Provisioned:   $provisionedVms / $VmCount"
+    Write-Info "Resource Group:     $ResourceGroup"
+    Write-Info "Storage Account:    $StorageAccountName"
+    Write-Info "VMs Provisioned:    $provisionedVms / $VmCount"
+    Write-Info "  Master:           $MasterCount  (harvest)"
+    Write-Info "  User Workers:     $UserWorkerCount  (worker-migrate)"
+    Write-Info "  Phone Workers:    $PhoneWorkerCount  (phone-registration)"
     if ($failedVms.Count -gt 0) {
         Write-Warn "VMs Pending:       $($failedVms -join ', ')"
     }

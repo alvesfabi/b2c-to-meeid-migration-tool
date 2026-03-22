@@ -101,14 +101,17 @@ VMs build the app themselves from source — no blob upload needed.
 |-----------|---------|-------------|
 | `-ResourceGroup` | *(required)* | Target Azure resource group |
 | `-Location` | `eastus2` | Azure region |
-| `-VmCount` | `4` | Number of worker VMs (1–16) |
+| `-VmCount` | `5` | Total number of VMs (derived from role counts) |
+| `-MasterCount` | `1` | Number of master VMs (harvest) |
+| `-UserWorkerCount` | `2` | Number of user-worker VMs (worker-migrate) |
+| `-PhoneWorkerCount` | `2` | Number of phone-worker VMs (phone-registration) |
 | `-VmSize` | `Standard_B2s` | VM SKU |
 | `-AdminUsername` | `azureuser` | VM admin user |
 | `-SshPublicKeyFile` | `~/.ssh/id_ed25519.pub` | Path to SSH public key |
 | `-DeployBastion` | `true` | Whether to deploy Azure Bastion |
 | `-GitRepo` | *(auto-detected from git remote)* | Git repo URL for VMs to clone |
 | `-GitBranch` | *(auto-detected from current branch)* | Git branch to checkout on VMs |
-| `-ConfigProfile` | `worker` | Config file prefix (for example config copy) |
+| `-ConfigProfile` | *N/A* | Removed — role-appropriate config is auto-selected per VM |
 | `-SkipInfra` | `false` | Skip Bicep deployment, only re-provision VMs |
 | `-WhatIf` | `false` | Dry run — shows what would happen without making changes |
 
@@ -118,7 +121,10 @@ VMs build the app themselves from source — no blob upload needed.
    - Install .NET SDK 8.0 + git if not present
    - Git clone the repo (auto-detected from your local remote/branch)
    - `dotnet publish` to `/opt/b2c-migration/app/`
-   - Copy `appsettings.worker1.example.json` as `appsettings.json` (starting point)
+   - Copy role-appropriate example config as `appsettings.json`:
+     - VM 1: `appsettings.master.example.json`
+     - VM 2–3: `appsettings.user-worker.example.json`
+     - VM 4–5: `appsettings.phone-worker.example.json`
 3. After deployment, connect via Bastion and run `Configure-Worker.sh` on each VM (or edit `appsettings.json` manually)
 
 **Prerequisites:** Azure CLI logged in (`az login`), SSH key pair generated, config changes committed and pushed to your repo.
@@ -197,7 +203,7 @@ Comprehensive readiness checker that validates Graph API connectivity, required 
 Live monitoring dashboard that tails JSONL telemetry files and shows running counters (users migrated, phones registered, errors, throttles). Refreshes every few seconds; press Ctrl+C for a final summary.
 
 ```powershell
-.\scripts\Watch-Migration.ps1                                # default (4 workers, 3s refresh)
+.\scripts\Watch-Migration.ps1                                # default (5 workers, 3s refresh)
 .\scripts\Watch-Migration.ps1 -WorkerCount 8                 # monitor 8 workers
 .\scripts\Watch-Migration.ps1 -RefreshSeconds 2              # faster refresh
 ```
@@ -374,7 +380,7 @@ Test the JIT flow via Azure Portal → User flows → Run user flow.
 Aggregates and analyzes JSONL telemetry files produced by migration workers.
 
 ```powershell
-# Aggregate all 4 workers (default)
+# Aggregate all 5 workers (default)
 .\scripts\Analyze-Telemetry.ps1
 
 # Aggregate 8 workers

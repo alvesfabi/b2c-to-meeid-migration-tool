@@ -11,7 +11,7 @@
     Worker number (1-4). Default: 1
 
 .PARAMETER ResourceGroup
-    Resource group name. Default: rg-b2c-migration
+    Resource group name. Default: rg-b2c-eeid-mig-test1
 
 .PARAMETER SubscriptionId
     Azure subscription ID. If not specified, uses current az account.

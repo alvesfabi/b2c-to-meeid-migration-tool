@@ -5,7 +5,7 @@
 .DESCRIPTION
     Orchestrates the complete deployment pipeline:
       1. Deploy infrastructure via Bicep
-      2. Provision each VM: git clone → dotnet publish → config from Key Vault
+      2. Provision each VM: git clone → dotnet publish → copy example config
       VMs build the app themselves (no blob upload needed).
 
 .EXAMPLE

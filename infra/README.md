@@ -14,7 +14,7 @@ Deploy-All.ps1 creates the following resources:
 - **Resource Group** with VNet, NAT Gateway, NSGs
 - **Worker VMs** (Ubuntu 22.04, configurable count 1–16) with managed identity
 - **Storage Account** with Queue, Blob, and Table Storage (private endpoints)
-- **Key Vault** (deployed but not used for config currently)
+- **Key Vault** for storing per-worker `appsettings` secrets (used by the GitHub Actions deployment workflow; manual Deploy-All.ps1 path copies example configs instead)
 - **Bastion** for secure SSH access (no public IPs on VMs)
 
 VMs clone the repo from GitHub, build the .NET app locally, and copy the example config as a starting point.
@@ -128,7 +128,7 @@ az group delete -n rg-b2c-eeid-mig-test1 --yes --no-wait
 
 | Problem | Cause | Fix |
 |---------|-------|-----|
-| `403 Insufficient privileges` on Graph | App registration missing permissions | Grant `User.ReadWrite.All`, `Directory.ReadWrite.All`; run `Validate-MigrationReadiness.ps1` to verify |
+| `403 Insufficient privileges` on Graph | App registration missing permissions | Grant `User.ReadWrite.All` (EEID) / `User.Read.All` (B2C); admin consent required. `Directory.ReadWrite.All` is NOT needed. Run `Validate-MigrationReadiness.ps1` to verify |
 | `AuthenticationFailedException` | Wrong tenant ID or expired secret | Check `appsettings.json` credentials; rotate client secret in Entra |
 | Bastion tunnel hangs | NSG blocking port 22, or Bastion not running | Verify NSG allows SSH from Bastion subnet; check `az network bastion show` |
 | `run-command` times out | Azure policy blocks RunCommand extension | Deploy manually via Bastion (step 5) using `Setup-Worker.sh` |

@@ -87,22 +87,51 @@ Accept the host key fingerprint, enter the passphrase if your key has one.
 
 ## Step 3: Configure Each Worker
 
-On each VM, edit the config file with your actual credentials:
+On each VM, run the interactive configuration script — it asks for each value one by one and generates the appsettings.json automatically:
 
 ```bash
-nano /opt/b2c-migration/app/appsettings.json
+bash ~/b2c-to-meeid-migration-tool/scripts/Configure-Worker.sh
 ```
 
-Key values to fill in (see `appsettings.worker1.example.json` for the full structure):
+The script will:
+1. Ask whether this VM is a **master** (harvest only) or **worker** (migrate + phone-registration)
+2. Prompt for B2C tenant ID, domain, client ID, client secret
+3. Prompt for External ID tenant ID, domain, client ID, client secret, extension app ID
+4. Prompt for the storage account name (just the name — it builds the URI automatically)
+5. Write `/opt/b2c-migration/app/appsettings.json` with permissions `600`
+6. Run `validate` to verify all connections work
 
-| Section | Setting | Description |
-|---------|---------|-------------|
+You can also pass `--role worker` or `--role master` to skip the role prompt:
+
+```bash
+bash ~/b2c-to-meeid-migration-tool/scripts/Configure-Worker.sh --role worker --worker-id 2
+```
+
+> **Manual editing:** If you prefer to edit manually, run `nano /opt/b2c-migration/app/appsettings.json` instead. See `appsettings.worker1.example.json` for the full structure.
+
+Key values to fill in:
+
+| Section | Setting | Value |
+|---------|---------|-------|
 | `Migration.B2C` | `TenantId`, `TenantDomain` | Your B2C tenant |
-| `Migration.B2C.AppRegistration` | `ClientId`, `ClientSecretName` | B2C app reg for this worker |
+| `Migration.B2C.AppRegistration` | `ClientId`, `ClientSecret` | B2C app reg for this worker |
 | `Migration.ExternalId` | `TenantId`, `TenantDomain`, `ExtensionAppId` | Your External ID tenant |
-| `Migration.ExternalId.AppRegistration` | `ClientId`, `ClientSecretName` | EEID app reg for this worker |
-| `Migration.Storage` | `AccountName` | Storage account deployed by Bicep |
-| `SecretStore` | Secrets section | Client secrets for both tenants |
+| `Migration.ExternalId.AppRegistration` | `ClientId`, `ClientSecret` | EEID app reg for this worker |
+| `Migration.Storage` | `ConnectionStringOrUri` | `https://<STORAGE_ACCOUNT>.blob.core.windows.net` |
+| `Migration.Storage` | `UseManagedIdentity` | `true` (VMs have RBAC on the storage account) |
+
+**Storage config example** — the VMs already have managed identity with Blob/Queue/Table Contributor roles:
+
+```json
+"Storage": {
+  "ConnectionStringOrUri": "https://strgb2ceeidmigtewkpji0.blob.core.windows.net",
+  "UseManagedIdentity": true,
+  "AuditTableName": "migrationAudit",
+  "AuditMode": "Table"
+}
+```
+
+> Replace `strgb2ceeidmigtewkpji0` with your actual storage account name (check the Deploy-All output or run `az storage account list -g <RG> --query "[].name" -o tsv`).
 
 **Important**: Each worker VM must have a **dedicated app registration** with its own client ID/secret for independent Graph API throttle quotas.
 
@@ -112,19 +141,23 @@ Repeat for each worker VM (connect via different `WorkerIndex`).
 
 ---
 
-## Step 4: Validate Readiness (Optional)
+## Step 4: Validate Readiness
 
-On the VM, run the pre-flight check:
+### Option A: From the VM (recommended)
+
+SSH into any worker VM and run:
 
 ```bash
-cd /opt/b2c-migration/app
-./B2CMigrationKit.Console validate --config appsettings.json
+cd ~/b2c-to-meeid-migration-tool/src/B2CMigrationKit.Console
+dotnet run -- validate --config appsettings.json
 ```
 
-Or from your local machine:
+This checks connectivity to B2C Graph API, Entra External ID Graph API, Azure Queue Storage, and Azure Blob Storage. All four checks must pass (✓) before starting migration.
+
+### Option B: From your local machine
 
 ```powershell
-.\scripts\Validate-MigrationReadiness.ps1 -ConfigFile appsettings.worker1.json -Mode worker
+.\scripts\Validate-MigrationReadiness.ps1 -ConfigFile src\B2CMigrationKit.Console\appsettings.worker1.json -Mode worker
 ```
 
 This checks: Graph API connectivity, permissions, extension attributes, storage reachability, queue/table existence.

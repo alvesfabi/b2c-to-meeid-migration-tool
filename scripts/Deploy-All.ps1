@@ -64,22 +64,30 @@ if (-not $GitBranch) {
 
 . (Join-Path $PSScriptRoot "_Common.ps1")
 
-# ─── Auto-generate StorageAccountName if not provided ─────────────────────────
+# ─── Resolve StorageAccountName ───────────────────────────────────────────────
 if (-not $StorageAccountName) {
-    $suffix = -join ((48..57) + (97..122) | Get-Random -Count 6 | ForEach-Object { [char]$_ })
-    $sanitizedRg = ($ResourceGroup -replace '[^a-zA-Z0-9]', '').ToLower()
-    if ($sanitizedRg.Length -gt 14) { $sanitizedRg = $sanitizedRg.Substring(0, 14) }
-    $StorageAccountName = "st${sanitizedRg}${suffix}"
-
-    # Check if it's available
-    $available = az storage account check-name --name $StorageAccountName --query nameAvailable -o tsv 2>$null
-    if ($available -ne 'true') {
-        # Retry with different suffix
+    # Check if a storage account already exists in the resource group
+    $existing = az storage account list --resource-group $ResourceGroup --query "[].name" -o tsv 2>$null
+    if ($existing) {
+        # Use the first existing storage account (handles single or multiple results)
+        $StorageAccountName = ($existing -split "`n")[0].Trim()
+        Write-Host "Reusing existing storage account: $StorageAccountName" -ForegroundColor Cyan
+    }
+    else {
+        # No existing storage account — generate a new unique name
+        $sanitizedRg = ($ResourceGroup -replace '[^a-zA-Z0-9]', '').ToLower()
+        if ($sanitizedRg.Length -gt 14) { $sanitizedRg = $sanitizedRg.Substring(0, 14) }
         $suffix = -join ((48..57) + (97..122) | Get-Random -Count 6 | ForEach-Object { [char]$_ })
         $StorageAccountName = "st${sanitizedRg}${suffix}"
-    }
 
-    Write-Host "Auto-generated storage account name: $StorageAccountName" -ForegroundColor Cyan
+        $available = az storage account check-name --name $StorageAccountName --query nameAvailable -o tsv 2>$null
+        if ($available -ne 'true') {
+            $suffix = -join ((48..57) + (97..122) | Get-Random -Count 6 | ForEach-Object { [char]$_ })
+            $StorageAccountName = "st${sanitizedRg}${suffix}"
+        }
+
+        Write-Host "Auto-generated storage account name: $StorageAccountName" -ForegroundColor Cyan
+    }
 }
 
 $repoRoot   = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path

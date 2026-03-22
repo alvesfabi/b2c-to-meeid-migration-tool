@@ -143,6 +143,20 @@ ssh -p 2201 -i .\scripts\b2c-mig-deploy azureuser@localhost
 
 The script auto-installs the Azure CLI bastion extension if not present.
 
+### Configure-Worker.sh
+
+Interactive script that runs **on the VM** to generate `appsettings.json` without manual editing.
+
+```bash
+# On the VM via SSH:
+bash ~/b2c-to-meeid-migration-tool/scripts/Configure-Worker.sh
+
+# Or skip the role prompt:
+bash ~/b2c-to-meeid-migration-tool/scripts/Configure-Worker.sh --role worker --worker-id 2
+```
+
+The script prompts for B2C credentials, External ID credentials, and storage account name, then writes the config with `chmod 600` and runs `validate` automatically.
+
 ---
 
 ## Prerequisites

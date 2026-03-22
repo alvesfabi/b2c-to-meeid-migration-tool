@@ -48,6 +48,8 @@ class Program
                 "harvest"              => await RunHarvestAsync(host),
                 "worker-migrate"       => await RunWorkerMigrateAsync(host),
                 "phone-registration"   => await RunPhoneRegistrationAsync(host),
+                // Utilities
+                "validate"             => await RunValidateAsync(host),
                 _ => ShowError($"Unknown operation: {operation}")
             };
 
@@ -271,6 +273,17 @@ class Program
         }
     }
 
+    static async Task<int> RunValidateAsync(IHost host)
+    {
+        System.Console.WriteLine("Validating connectivity to all external dependencies...");
+        System.Console.WriteLine();
+
+        var orchestrator = host.Services.GetRequiredService<ValidateOrchestrator>();
+        var result = await orchestrator.ExecuteAsync();
+
+        return result.Success ? 0 : 1;
+    }
+
     static void ShowHelp()
     {
         System.Console.WriteLine("B2C Migration Kit - Console Runner");
@@ -288,6 +301,9 @@ class Program
         System.Console.WriteLine("    harvest             Fetch all user IDs from B2C and enqueue batches");
         System.Console.WriteLine("    worker-migrate      Dequeue batches, create users in EEID, enqueue phone tasks");
         System.Console.WriteLine("    phone-registration  Dequeue phone tasks, register MFA phones in EEID");
+        System.Console.WriteLine();
+        System.Console.WriteLine("  Utilities:");
+        System.Console.WriteLine("    validate            Check connectivity to B2C, EEID, and Azure Storage");
         System.Console.WriteLine();
         System.Console.WriteLine("  help                  Show this help message");
         System.Console.WriteLine();
@@ -314,8 +330,6 @@ class Program
         System.Console.WriteLine("  Step 2b – (run simultaneously with 2a) M workers run 'phone-registration':");
         System.Console.WriteLine("    B2CMigrationKit.Console phone-registration --config appsettings.worker1.json");
         System.Console.WriteLine("    B2CMigrationKit.Console phone-registration --config appsettings.worker2.json");
-        System.Console.WriteLine("    Note: phone-registration is throttled to 0.5 RPS per app-registration.");
-        System.Console.WriteLine("          3 workers = 1.5 RPS ≈ 138K MFA phones registered per 26 hours.");
     }
 
     static int ShowError(string message)

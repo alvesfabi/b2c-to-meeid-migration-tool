@@ -244,6 +244,33 @@ public static class ServiceCollectionExtensions
                 telemetry, Options.Create(options), workerLogger);
         });
 
+        // ValidateOrchestrator: B2C Graph client + EEID Graph client + queue + blob
+        services.AddScoped<ValidateOrchestrator>(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<MigrationOptions>>().Value;
+            var credManagers = sp.GetRequiredService<IEnumerable<ICredentialManager>>().ToList();
+            var telemetry = sp.GetRequiredService<ITelemetryService>();
+            var factoryLogger = sp.GetRequiredService<ILogger<GraphClientFactory>>();
+            var clientLogger = sp.GetRequiredService<ILogger<GraphClient>>();
+            var retryOptions = sp.GetRequiredService<IOptions<RetryOptions>>();
+            var queueClient = sp.GetRequiredService<IQueueClient>();
+            var blobClient = sp.GetRequiredService<IBlobStorageClient>();
+            var orchestratorLogger = sp.GetRequiredService<ILogger<ValidateOrchestrator>>();
+
+            // B2C Graph client (first credential manager)
+            var b2cFactory = new GraphClientFactory(credManagers.First(), factoryLogger, telemetry);
+            var b2cServiceClient = b2cFactory.CreateClient(options.B2C.Scopes);
+            var b2cClient = new GraphClient(b2cServiceClient, retryOptions, clientLogger, telemetry, "B2C");
+
+            // EEID Graph client (second credential manager)
+            var eeidFactory = new GraphClientFactory(credManagers.Last(), factoryLogger, telemetry);
+            var eeidServiceClient = eeidFactory.CreateClient(options.ExternalId.Scopes);
+            var eeidClient = new GraphClient(eeidServiceClient, retryOptions, clientLogger, telemetry, "EEID");
+
+            return new ValidateOrchestrator(b2cClient, eeidClient, queueClient, blobClient,
+                Options.Create(options), orchestratorLogger);
+        });
+
         // Register JitMigrationService with External ID Graph client
         services.AddScoped<JitMigrationService>(sp =>
         {

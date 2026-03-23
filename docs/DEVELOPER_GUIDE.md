@@ -65,7 +65,7 @@ See [Architecture Guide](ARCHITECTURE_GUIDE.md) for detailed mode comparison and
     "Storage": { ... },
     "Telemetry": { ... },
     "Retry": { ... },
-    "MaxConcurrency": 1
+    "MaxConcurrency": 8
   }
 }
 ```

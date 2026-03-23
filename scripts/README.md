@@ -54,7 +54,7 @@ Interactive wizard that walks through the **entire setup process** end-to-end: t
 | `-EeidTenantId` | — | External ID tenant GUID |
 | `-EeidTenantDomain` | — | External ID `.onmicrosoft.com` domain |
 | `-ExtensionAppId` | — | Extension app ID (32 hex chars, no hyphens) |
-| `-WorkerCount` | `4` | Number of parallel workers |
+| `-WorkerCount` | `5` | Number of parallel workers |
 | `-Mode` | *(prompted)* | `Simple` (Export/Import) or `Advanced` (Harvest/Workers/Phone) |
 | `-Target` | *(prompted)* | `Local` (Azurite) or `Azure` (VM deployment) |
 | `-ResourceGroup` | `rg-b2c-migration` | Azure resource group (when Target=Azure) |

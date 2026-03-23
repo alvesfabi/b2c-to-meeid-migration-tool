@@ -166,6 +166,14 @@ public class ImportOrchestrator : IOrchestrator<ExecutionResult>
                                         // Update the issuerAssignedId domain to External ID tenant
                                         identity.IssuerAssignedId = TransformUpnForExternalId(identity.IssuerAssignedId);
                                     }
+                                    else if (!string.IsNullOrEmpty(_options.Import.UpnSuffix) &&
+                                             identity.SignInType?.ToLower() == "emailaddress" &&
+                                             !string.IsNullOrEmpty(identity.IssuerAssignedId))
+                                    {
+                                        var emailAt = identity.IssuerAssignedId.IndexOf('@');
+                                        if (emailAt > 0)
+                                            identity.IssuerAssignedId = identity.IssuerAssignedId[..emailAt] + _options.Import.UpnSuffix + identity.IssuerAssignedId[emailAt..];
+                                    }
                                 }
 
                                 if (_options.VerboseLogging)
@@ -542,6 +550,12 @@ public class ImportOrchestrator : IOrchestrator<ExecutionResult>
             localPart = Guid.NewGuid().ToString("N").Substring(0, 8); // Use first 8 chars of GUID
         }
 
+        // Append UpnSuffix to avoid collisions with users from previous migrations
+        if (!string.IsNullOrEmpty(_options.Import.UpnSuffix))
+        {
+            localPart += _options.Import.UpnSuffix;
+        }
+
         // Replace domain with External ID tenant domain
         var newUpn = $"{localPart}@{_options.ExternalId.TenantDomain}";
 
@@ -577,6 +591,14 @@ public class ImportOrchestrator : IOrchestrator<ExecutionResult>
                     _logger.LogWarning("User {UPN} has no email in 'mail' field. Using userPrincipalName as email fallback.", 
                         user.UserPrincipalName);
                 }
+            }
+
+            // Apply UpnSuffix to email identity to avoid collisions with previous migrations
+            if (!string.IsNullOrEmpty(_options.Import.UpnSuffix) && !string.IsNullOrEmpty(email))
+            {
+                var emailAt = email.IndexOf('@');
+                if (emailAt > 0)
+                    email = email[..emailAt] + _options.Import.UpnSuffix + email[emailAt..];
             }
 
             // Add emailAddress identity for Email + Password (with JIT migration)

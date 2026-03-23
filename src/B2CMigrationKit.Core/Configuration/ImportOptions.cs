@@ -34,6 +34,15 @@ public class ImportOptions
     /// </summary>
     public bool SkipPhoneRegistration { get; set; } = false;
 
+    /// <summary>
+    /// Optional suffix appended to the local part of UPN, email identities, and displayName
+    /// when creating users in External ID. Useful for running multiple migration tests
+    /// against the same tenant without collisions with previously migrated users.
+    /// Example: "-test2" would transform "user@domain.com" → "user-test2@domain.com"
+    /// Default: null (no suffix).
+    /// </summary>
+    public string? UpnSuffix { get; set; }
+
 }
 
 /// <summary>

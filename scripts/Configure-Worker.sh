@@ -219,6 +219,16 @@ if [ "$ROLE" = "phone-worker" ]; then
 fi
 
 # ───────────────────────────────────────────
+# Import suffix (user-worker & phone-worker)
+# ───────────────────────────────────────────
+UPN_SUFFIX=""
+if [ "$ROLE" = "user-worker" ] || [ "$ROLE" = "phone-worker" ]; then
+    echo -e "${color_green}── Import Options ──${color_reset}"
+    prompt_optional UPN_SUFFIX "UPN suffix to avoid collisions with existing users (e.g. -test2), leave blank for none" ""
+    echo ""
+fi
+
+# ───────────────────────────────────────────
 # Generate JSON
 # ───────────────────────────────────────────
 echo -e "${color_green}── Generating config ──${color_reset}"
@@ -398,7 +408,8 @@ else
         "SetRequireMigration": true,
         "OverwriteExtensionAttributes": false
       },
-      "SkipPhoneRegistration": false
+      "SkipPhoneRegistration": false$([ -n "$UPN_SUFFIX" ] && echo "," || echo "")
+$([ -n "$UPN_SUFFIX" ] && echo "      \"UpnSuffix\": \"$UPN_SUFFIX\"" || echo -n "")
     },
     "PhoneRegistration": {
       "QueueName": "phone-registration",

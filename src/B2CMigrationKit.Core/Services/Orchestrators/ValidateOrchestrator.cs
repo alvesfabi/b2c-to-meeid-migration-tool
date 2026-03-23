@@ -16,7 +16,7 @@ namespace B2CMigrationKit.Core.Services.Orchestrators;
 public class ValidateOrchestrator : IOrchestrator<ExecutionResult>
 {
     private readonly IGraphClient _b2cGraphClient;
-    private readonly IGraphClient _eeidGraphClient;
+    private readonly IGraphClient? _eeidGraphClient;
     private readonly IQueueClient _queueClient;
     private readonly IBlobStorageClient _blobClient;
     private readonly ILogger<ValidateOrchestrator> _logger;
@@ -24,14 +24,14 @@ public class ValidateOrchestrator : IOrchestrator<ExecutionResult>
 
     public ValidateOrchestrator(
         IGraphClient b2cGraphClient,
-        IGraphClient eeidGraphClient,
+        IGraphClient? eeidGraphClient,
         IQueueClient queueClient,
         IBlobStorageClient blobClient,
         IOptions<MigrationOptions> options,
         ILogger<ValidateOrchestrator> logger)
     {
         _b2cGraphClient = b2cGraphClient ?? throw new ArgumentNullException(nameof(b2cGraphClient));
-        _eeidGraphClient = eeidGraphClient ?? throw new ArgumentNullException(nameof(eeidGraphClient));
+        _eeidGraphClient = eeidGraphClient;
         _queueClient = queueClient ?? throw new ArgumentNullException(nameof(queueClient));
         _blobClient = blobClient ?? throw new ArgumentNullException(nameof(blobClient));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -46,8 +46,15 @@ public class ValidateOrchestrator : IOrchestrator<ExecutionResult>
         // 1. B2C Graph API
         checks.Add(await CheckB2CGraphAsync(cancellationToken));
 
-        // 2. Entra External ID Graph API
-        checks.Add(await CheckEeidGraphAsync(cancellationToken));
+        // 2. Entra External ID Graph API (skip if disabled — master/harvest role)
+        if (_eeidGraphClient != null)
+        {
+            checks.Add(await CheckEeidGraphAsync(cancellationToken));
+        }
+        else
+        {
+            checks.Add(("Entra External ID Graph API", true, "SKIPPED — disabled for this role"));
+        }
 
         // 3. Azure Queue Storage
         checks.Add(await CheckQueueStorageAsync(cancellationToken));

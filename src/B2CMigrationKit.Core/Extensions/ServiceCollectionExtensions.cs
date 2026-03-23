@@ -93,11 +93,18 @@ public static class ServiceCollectionExtensions
                 logger);
         });
 
-        // Register External ID Credential Manager
+        // Register External ID Credential Manager (skip if disabled — e.g. master/harvest role)
         services.AddSingleton<ICredentialManager>(sp =>
         {
             var options = sp.GetRequiredService<IOptions<MigrationOptions>>().Value;
             var logger = sp.GetRequiredService<ILogger<CredentialManager>>();
+
+            if (!options.ExternalId.AppRegistration.Enabled)
+            {
+                logger.LogInformation("External ID app registration is disabled — skipping credential setup (master/harvest role).");
+                return new NullCredentialManager();
+            }
+
             var secretProvider = sp.GetService<ISecretProvider>();
 
             return new CredentialManager(
@@ -262,10 +269,14 @@ public static class ServiceCollectionExtensions
             var b2cServiceClient = b2cFactory.CreateClient(options.B2C.Scopes);
             var b2cClient = new GraphClient(b2cServiceClient, retryOptions, clientLogger, telemetry, "B2C");
 
-            // EEID Graph client (second credential manager)
-            var eeidFactory = new GraphClientFactory(credManagers.Last(), factoryLogger, telemetry);
-            var eeidServiceClient = eeidFactory.CreateClient(options.ExternalId.Scopes);
-            var eeidClient = new GraphClient(eeidServiceClient, retryOptions, clientLogger, telemetry, "EEID");
+            // EEID Graph client (second credential manager — null if disabled)
+            IGraphClient? eeidClient = null;
+            if (options.ExternalId.AppRegistration.Enabled)
+            {
+                var eeidFactory = new GraphClientFactory(credManagers.Last(), factoryLogger, telemetry);
+                var eeidServiceClient = eeidFactory.CreateClient(options.ExternalId.Scopes);
+                eeidClient = new GraphClient(eeidServiceClient, retryOptions, clientLogger, telemetry, "EEID");
+            }
 
             return new ValidateOrchestrator(b2cClient, eeidClient, queueClient, blobClient,
                 Options.Create(options), orchestratorLogger);

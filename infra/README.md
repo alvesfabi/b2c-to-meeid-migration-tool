@@ -37,7 +37,7 @@ The script auto-detects your Git remote URL and current branch. Override with `-
 |-----------|---------|-------------|
 | `-ResourceGroup` | *(required)* | Target Azure resource group |
 | `-Location` | `eastus2` | Azure region |
-| `-VmCount` | `5` | Number of worker VMs (1–16). Derived from role counts. |
+| `-StorageAccountName` | *(auto-generated)* | Storage account name (reuses existing or generates unique name) |
 | `-VmSize` | `Standard_B2s` | VM SKU |
 | `-AdminUsername` | `azureuser` | VM admin user |
 | `-SshPublicKeyFile` | `~/.ssh/id_ed25519.pub` | Path to SSH public key |
@@ -47,9 +47,9 @@ The script auto-detects your Git remote URL and current branch. Override with `-
 | `-MasterCount` | `1` | Number of master VMs (harvest) |
 | `-UserWorkerCount` | `2` | Number of user-worker VMs (worker-migrate) |
 | `-PhoneWorkerCount` | `2` | Number of phone-worker VMs (phone-registration) |
-| `-ConfigProfile` | *N/A* | Removed — role-appropriate config is auto-selected per VM |
 | `-SkipInfra` | `false` | Skip Bicep deployment, only re-provision VMs |
-| `-WhatIf` | `false` | Dry run |
+
+**Note:** Total VM count is automatically derived as `MasterCount + UserWorkerCount + PhoneWorkerCount` (default: 5 VMs).
 
 ## Pipeline Steps
 

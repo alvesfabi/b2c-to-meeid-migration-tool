@@ -92,14 +92,14 @@ VMs build the app themselves from source — no blob upload needed.
 .\scripts\Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -WhatIf
 
 # Custom worker count and location
-.\scripts\Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -SshPublicKeyFile .\scripts\b2c-mig-deploy.pub -VmCount 8 -Location westus2
+.\scripts\Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -SshPublicKeyFile .\scripts\b2c-mig-deploy.pub -MasterCount 1 -UserWorkerCount 4 -PhoneWorkerCount 3 -Location westus2
 ```
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `-ResourceGroup` | *(required)* | Target Azure resource group |
 | `-Location` | `eastus2` | Azure region |
-| `-VmCount` | `5` | Total number of VMs (derived from role counts) |
+| `-StorageAccountName` | *(auto-generated)* | Storage account name (reuses existing or generates unique name) |
 | `-MasterCount` | `1` | Number of master VMs (harvest) |
 | `-UserWorkerCount` | `2` | Number of user-worker VMs (worker-migrate) |
 | `-PhoneWorkerCount` | `2` | Number of phone-worker VMs (phone-registration) |
@@ -109,9 +109,10 @@ VMs build the app themselves from source — no blob upload needed.
 | `-DeployBastion` | `true` | Whether to deploy Azure Bastion |
 | `-GitRepo` | *(auto-detected from git remote)* | Git repo URL for VMs to clone |
 | `-GitBranch` | *(auto-detected from current branch)* | Git branch to checkout on VMs |
-| `-ConfigProfile` | *N/A* | Removed — role-appropriate config is auto-selected per VM |
 | `-SkipInfra` | `false` | Skip Bicep deployment, only re-provision VMs |
 | `-WhatIf` | `false` | Dry run — shows what would happen without making changes |
+
+**Note:** Total VM count is automatically derived as `MasterCount + UserWorkerCount + PhoneWorkerCount` (default: 5 VMs).
 
 **Pipeline steps:**
 1. Deploy infrastructure via `az deployment sub create` with `infra/main.bicep`

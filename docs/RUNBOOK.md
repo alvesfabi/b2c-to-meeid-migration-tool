@@ -188,7 +188,7 @@ cd /opt/b2c-migration/app
 ./B2CMigrationKit.Console harvest --config appsettings.json
 ```
 
-This pages all B2C user IDs and enqueues them to the migration queue. Wait for it to complete before starting workers.
+This pages all B2C user IDs and enqueues them to the migration queue. Workers can be started while harvest is still running — they will pick up messages as they appear in the queue.
 
 ### 5b. Worker Migrate (user-worker VMs in parallel)
 

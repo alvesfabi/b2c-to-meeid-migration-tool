@@ -325,6 +325,29 @@ Test the JIT flow via Azure Portal → User flows → Run user flow.
 
 ## Telemetry Analysis
 
+### Download-Telemetry.ps1
+
+Downloads audit and telemetry JSONL files from all worker VMs via Bastion tunnels. Run this from your local machine after migration completes — the storage account has no public endpoint, so files must be pulled from the VMs directly.
+
+```powershell
+# Download from all 5 workers (default)
+.\scripts\Download-Telemetry.ps1
+
+# Download from 3 workers to a custom directory
+.\scripts\Download-Telemetry.ps1 -WorkerCount 3 -OutputDir ./my-telemetry
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `WorkerCount` | `5` | Number of worker VMs to download from |
+| `ResourceGroup` | `rg-b2c-eeid-mig-test1` | Azure resource group |
+| `SshPrivateKeyFile` | `./scripts/b2c-mig-deploy` | SSH private key used during deployment |
+| `OutputDir` | `./telemetry-download` | Local directory for downloaded files |
+| `AppDir` | `/opt/b2c-migration/app` | Remote directory containing .jsonl files |
+| `AdminUsername` | `azureuser` | SSH username on the VMs |
+
+Files are prefixed with the VM name (e.g., `vm-b2c-worker1_migration-audit.jsonl`) to avoid collisions.
+
 ### Analyze-Telemetry.ps1
 
 Aggregates and analyzes JSONL telemetry files produced by migration workers.

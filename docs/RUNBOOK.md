@@ -227,29 +227,21 @@ From your local machine:
 
 Shows live counters: users migrated, phones registered, errors, throttles. Press `Ctrl+C` for a final summary.
 
-You can also check the audit table directly:
-
-```bash
-az storage entity query --table-name migrationAudit \
-    --account-name <storage-account> --auth-mode login \
-    --filter "Status eq 'Failed'" --output table
-```
-
 ---
 
-## Step 7: Analyze Results
+## Step 7: Download Telemetry & Analyze Results
 
-After migration completes:
-
-```powershell
-.\scripts\Analyze-Telemetry.ps1 -WorkerCount 5
-```
-
-Upload telemetry to blob storage for archival:
+Each worker VM writes audit and telemetry JSONL files locally. Since the storage account has no public endpoint, download the files to your local machine via Bastion tunnels:
 
 ```powershell
-.\scripts\Upload-Telemetry.ps1
+# Download all .jsonl files from every worker VM
+.\scripts\Download-Telemetry.ps1
+
+# Analyze locally
+.\scripts\Analyze-Telemetry.ps1 -ConsoleDir ./telemetry-download
 ```
+
+The script opens a Bastion tunnel to each VM, SCPs the `.jsonl` files, and closes the tunnel. Files are saved to `telemetry-download/` prefixed by VM name.
 
 ---
 
@@ -306,6 +298,7 @@ az group delete -n rg-b2c-eeid-mig-test1 --yes --no-wait
 | Run worker-migrate | `./B2CMigrationKit.Console worker-migrate --config appsettings.json` |
 | Run phone-registration | `./B2CMigrationKit.Console phone-registration --config appsettings.json` |
 | Monitor progress | `.\scripts\Watch-Migration.ps1 -WorkerCount 5` |
-| Analyze results | `.\scripts\Analyze-Telemetry.ps1 -WorkerCount 5` |
+| Download telemetry | `.\scripts\Download-Telemetry.ps1` |
+| Analyze results | `.\scripts\Analyze-Telemetry.ps1 -ConsoleDir ./telemetry-download` |
 | Stop VMs | `az vm deallocate -g rg-b2c-eeid-mig-test1 -n vm-b2c-worker<N> --no-wait` |
 | Full cleanup | `az group delete -n rg-b2c-eeid-mig-test1 --yes --no-wait` |

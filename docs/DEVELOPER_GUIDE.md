@@ -95,11 +95,11 @@ Increase to 4–8 per instance for higher throughput. For significant scale, run
 }
 ```
 
-**Permissions by process**:
+**B2C permissions by process**:
 
 | Process | Permission | Type |
 |---|---|---|
-| harvest + worker-migrate | `User.Read.All` | Application |
+| export, harvest, worker-migrate | `User.Read.All` | Application |
 | phone-registration | `UserAuthenticationMethod.Read.All` | Application |
 
 Each worker instance needs a **dedicated** app registration on a **dedicated IP** for independent throttle quotas.
@@ -330,11 +330,16 @@ dotnet build -c Release   # release build
 
 ## JIT Migration Implementation
 
-⏱️ **Quick Start**: ~15 minutes to running local test
+⏱️ **Quick Start**: ~15 minutes to set up local testing environment
 
-### How JIT Triggers
+### How JIT Works
 
-Worker-migrate creates EEID users with **random 16-char passwords** and `RequiresMigration = true`. On first login, the real B2C password doesn't match → triggers JIT → function validates against B2C → updates EEID password → sets `RequiresMigration = false`. Subsequent logins authenticate directly.
+Users migrated via bulk migration have random passwords and `RequiresMigration = true`. On first login:
+
+1. User enters real B2C password → EEID doesn't match → triggers Custom Authentication Extension
+2. Azure Function validates password against B2C via ROPC flow
+3. If valid → updates EEID password, sets `RequiresMigration = false`
+4. Subsequent logins authenticate directly against EEID
 
 ### Step 1: Generate RSA Key Pair
 

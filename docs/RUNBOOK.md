@@ -107,10 +107,12 @@ The script will:
 5. Write `/opt/b2c-migration/app/appsettings.json` with permissions `600`
 6. Run `validate` to verify all connections work
 
-You can also pass `--role worker` or `--role master` to skip the role prompt:
+You can also specify the role to skip the interactive prompt:
 
 ```bash
 bash /opt/b2c-migration/repo/scripts/Configure-Worker.sh --role user-worker --worker-id 2
+bash /opt/b2c-migration/repo/scripts/Configure-Worker.sh --role master
+bash /opt/b2c-migration/repo/scripts/Configure-Worker.sh --role phone-worker --worker-id 1
 ```
 
 > **Manual editing:** If you prefer to edit manually, run `nano /opt/b2c-migration/app/appsettings.json` instead. See `appsettings.user-worker.example.json` for the full structure.
@@ -149,14 +151,21 @@ Repeat for each worker VM (connect via different `WorkerIndex`).
 
 ### Option A: From the VM (recommended)
 
-SSH into any worker VM and run:
+SSH into any worker VM and run the validation command to verify all connections:
 
 ```bash
 cd /opt/b2c-migration/app
 ./B2CMigrationKit.Console validate --config appsettings.json
 ```
 
-This checks connectivity to B2C Graph API, Entra External ID Graph API, Azure Queue Storage, and Azure Blob Storage. All four checks must pass (✓) before starting migration. Master VMs (harvest) will show EEID as skipped since it's not configured.
+This checks connectivity to:
+- B2C Graph API
+- Entra External ID Graph API (skipped for master/harvest VMs)
+- Azure Queue Storage
+- Azure Blob Storage
+- Azure Table Storage
+
+All applicable checks must pass (✓) before starting migration.
 
 ### Option B: From your local machine
 

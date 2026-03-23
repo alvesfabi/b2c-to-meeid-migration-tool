@@ -33,10 +33,10 @@ The kit has two independent concerns:
 
 | Factor | Simple Mode (Export/Import) | Advanced Mode (Workers) |
 |--------|----------------------|-------------------|
-| **Best for** | Small/medium tenants < 1 million users, no MFA phones | Large tenants, MFA phone migration |
+| **Best for** | Small/medium tenants <500K users, no MFA phones | Large tenants, MFA phone migration |
 | **Infrastructure** | Blob Storage only | Queue + Table Storage |
 | **Parallelism** | Single-threaded | N worker pairs, configurable concurrency |
-| **MFA phones** | ❌ Not implemented | ✅ Full phone method migration |
+| **MFA phones** | ❌ Not supported | ✅ Full phone method migration |
 | **Commands** | `export` → `import` (2 steps) | `harvest` → `worker-migrate` → `phone-registration` (3 steps) |
 | **Complexity** | Low | Medium |
 
@@ -415,9 +415,9 @@ JIT:     user@externalid.com → user@b2c.com  (reverse using same local part)
 
 ### Data Protection
 
-- **At rest**: Azure SSE (Storage), HSM-backed keys (Key Vault Premium)
-- **In transit**: TLS 1.2+ everywhere, strict certificate validation, HTTPS enforced
-- **Secrets**: Target: Key Vault references (`@Microsoft.KeyVault(SecretUri=...)`). Current: config files (gitignored)
+- **At rest**: Azure Storage Service Encryption (SSE), Key Vault for sensitive configuration
+- **In transit**: TLS 1.2+ for all connections, strict certificate validation
+- **Secrets**: Configuration files with gitignored credentials or Key Vault integration
 
 ### Audit & Compliance
 
@@ -484,7 +484,7 @@ Fast iteration, full debugging, inline RSA keys, no Key Vault dependency.
 
 ### Production Environment
 
-All resources deploy via Bicep (`infra/`) and two GitHub Actions workflows. No public endpoints; all data-plane traffic stays inside the VNet via Private Endpoints.
+All resources deploy via Bicep (`infra/`) and the Deploy-All.ps1 script. No public endpoints; all data-plane traffic stays inside the VNet via Private Endpoints.
 
 ```
 ┌─ VNet 10.0.0.0/16 ─────────────────────────────────────────────┐
@@ -516,10 +516,9 @@ All resources deploy via Bicep (`infra/`) and two GitHub Actions workflows. No p
 
 ### Deployment Workflow
 
-1. **`Deploy Infrastructure`** (GitHub Action, `workflow_dispatch`) — provisions all Azure resources via Bicep.
-2. **Upload configs** to Key Vault (one-time): `az keyvault secret set --name appsettings-worker1 --file ...`
-3. **`Build & Deploy Migration App`** (GitHub Action) — builds self-contained binary, uploads to blob, provisions VMs via `run-command` (falls back to manual Bastion SSH if blocked).
-4. **Run migration** via Bastion SSH tunnel:
+1. **Deploy Infrastructure** via Deploy-All.ps1 — provisions all Azure resources via Bicep and provisions VMs
+2. **Configure workers** — use Configure-Worker.sh on each VM to set up credentials interactively
+3. **Run migration** via Bastion SSH tunnel:
    ```bash
    ./scripts/Connect-Worker.ps1 -WorkerIndex 1   # opens tunnel on port 2201
    ssh -p 2201 azureuser@localhost                # in another terminal
@@ -543,8 +542,8 @@ Query audit records via Azure Storage Explorer or `az storage entity query`.
 
 | Resource | Running | Stopped |
 |----------|---------|---------|
-| 4× Standard_B2s VMs | ~$4/day | $0 (deallocated) |
+| 5× Standard_B2s VMs | ~$5/day | $0 (deallocated) |
 | Bastion Standard | ~$5/day | $0 (stopped) |
 | NAT Gateway | ~$1/day | $0 (deleted) |
-| Storage | negligible | negligible |
-| **Total** | **~$10/day** | **~$0** |
+| Storage | ~$0.50/day | ~$0.50/day |
+| **Total** | **~$11.50/day** | **~$0.50/day** |

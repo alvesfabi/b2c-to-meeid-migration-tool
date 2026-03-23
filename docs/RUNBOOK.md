@@ -217,15 +217,20 @@ Reads MFA phone numbers from B2C and registers them in External ID. Throttled to
 
 ---
 
-## Step 6: Monitor Progress
+## Step 6: Monitor Progress (Optional)
 
-From your local machine:
+You can monitor migration progress in real time by SSHing into a worker VM and tailing the telemetry files:
 
-```powershell
-.\scripts\Watch-Migration.ps1 -WorkerCount 5 -RefreshSeconds 3
+```bash
+# Terminal 1: open Bastion tunnel
+.\scripts\Connect-Worker.ps1 -WorkerIndex 1
+
+# Terminal 2: SSH and tail
+ssh -p 2201 azureuser@localhost
+tail -f /opt/b2c-migration/app/*-telemetry.jsonl
 ```
 
-Shows live counters: users migrated, phones registered, errors, throttles. Press `Ctrl+C` for a final summary.
+> **Note:** `Watch-Migration.ps1` is designed for local development only — it reads JSONL files from the local filesystem and does not connect to remote VMs.
 
 ---
 

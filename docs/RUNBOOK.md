@@ -107,10 +107,12 @@ The script will:
 5. Write `/opt/b2c-migration/app/appsettings.json` with permissions `600`
 6. Run `validate` to verify all connections work
 
-You can also pass `--role worker` or `--role master` to skip the role prompt:
+You can also specify the role to skip the interactive prompt:
 
 ```bash
 bash /opt/b2c-migration/repo/scripts/Configure-Worker.sh --role user-worker --worker-id 2
+bash /opt/b2c-migration/repo/scripts/Configure-Worker.sh --role master
+bash /opt/b2c-migration/repo/scripts/Configure-Worker.sh --role phone-worker --worker-id 1
 ```
 
 > **Manual editing:** If you prefer to edit manually, run `nano /opt/b2c-migration/app/appsettings.json` instead. See `appsettings.user-worker.example.json` for the full structure.
@@ -149,14 +151,21 @@ Repeat for each worker VM (connect via different `WorkerIndex`).
 
 ### Option A: From the VM (recommended)
 
-SSH into any worker VM and run:
+SSH into any worker VM and run the validation command to verify all connections:
 
 ```bash
 cd /opt/b2c-migration/app
 ./B2CMigrationKit.Console validate --config appsettings.json
 ```
 
-This checks connectivity to B2C Graph API, Entra External ID Graph API, Azure Queue Storage, and Azure Blob Storage. All four checks must pass (✓) before starting migration. Master VMs (harvest) will show EEID as skipped since it's not configured.
+This checks connectivity to:
+- B2C Graph API
+- Entra External ID Graph API (skipped for master/harvest VMs)
+- Azure Queue Storage
+- Azure Blob Storage
+- Azure Table Storage
+
+All applicable checks must pass (✓) before starting migration.
 
 ### Option B: From your local machine
 
@@ -179,7 +188,7 @@ cd /opt/b2c-migration/app
 ./B2CMigrationKit.Console harvest --config appsettings.json
 ```
 
-This pages all B2C user IDs and enqueues them to the migration queue. Wait for it to complete before starting workers.
+This pages all B2C user IDs and enqueues them to the migration queue. Workers can be started while harvest is still running — they will pick up messages as they appear in the queue.
 
 ### 5b. Worker Migrate (user-worker VMs in parallel)
 
@@ -208,39 +217,36 @@ Reads MFA phone numbers from B2C and registers them in External ID. Throttled to
 
 ---
 
-## Step 6: Monitor Progress
+## Step 6: Monitor Progress (Optional)
 
-From your local machine:
-
-```powershell
-.\scripts\Watch-Migration.ps1 -WorkerCount 5 -RefreshSeconds 3
-```
-
-Shows live counters: users migrated, phones registered, errors, throttles. Press `Ctrl+C` for a final summary.
-
-You can also check the audit table directly:
+You can monitor migration progress in real time by SSHing into a worker VM and tailing the telemetry files:
 
 ```bash
-az storage entity query --table-name migrationAudit \
-    --account-name <storage-account> --auth-mode login \
-    --filter "Status eq 'Failed'" --output table
+# Terminal 1: open Bastion tunnel
+.\scripts\Connect-Worker.ps1 -WorkerIndex 1
+
+# Terminal 2: SSH and tail
+ssh -p 2201 azureuser@localhost
+tail -f /opt/b2c-migration/app/*-telemetry.jsonl
 ```
+
+> **Note:** `Watch-Migration.ps1` is designed for local development only — it reads JSONL files from the local filesystem and does not connect to remote VMs.
 
 ---
 
-## Step 7: Analyze Results
+## Step 7: Download Telemetry & Analyze Results
 
-After migration completes:
-
-```powershell
-.\scripts\Analyze-Telemetry.ps1 -WorkerCount 5
-```
-
-Upload telemetry to blob storage for archival:
+Each worker VM writes audit and telemetry JSONL files locally. Since the storage account has no public endpoint, download the files to your local machine via Bastion tunnels:
 
 ```powershell
-.\scripts\Upload-Telemetry.ps1
+# Download all .jsonl files from every worker VM
+.\scripts\Download-Telemetry.ps1
+
+# Analyze locally
+.\scripts\Analyze-Telemetry.ps1 -ConsoleDir ./telemetry-download
 ```
+
+The script opens a Bastion tunnel to each VM, SCPs the `.jsonl` files, and closes the tunnel. Files are saved to `telemetry-download/` prefixed by VM name.
 
 ---
 
@@ -297,6 +303,7 @@ az group delete -n rg-b2c-eeid-mig-test1 --yes --no-wait
 | Run worker-migrate | `./B2CMigrationKit.Console worker-migrate --config appsettings.json` |
 | Run phone-registration | `./B2CMigrationKit.Console phone-registration --config appsettings.json` |
 | Monitor progress | `.\scripts\Watch-Migration.ps1 -WorkerCount 5` |
-| Analyze results | `.\scripts\Analyze-Telemetry.ps1 -WorkerCount 5` |
+| Download telemetry | `.\scripts\Download-Telemetry.ps1` |
+| Analyze results | `.\scripts\Analyze-Telemetry.ps1 -ConsoleDir ./telemetry-download` |
 | Stop VMs | `az vm deallocate -g rg-b2c-eeid-mig-test1 -n vm-b2c-worker<N> --no-wait` |
 | Full cleanup | `az group delete -n rg-b2c-eeid-mig-test1 --yes --no-wait` |

@@ -65,7 +65,7 @@ See [Architecture Guide](ARCHITECTURE_GUIDE.md) for detailed mode comparison and
     "Storage": { ... },
     "Telemetry": { ... },
     "Retry": { ... },
-    "MaxConcurrency": 1
+    "MaxConcurrency": 8
   }
 }
 ```
@@ -74,8 +74,7 @@ See [Architecture Guide](ARCHITECTURE_GUIDE.md) for detailed mode comparison and
 
 | Setting | Default | Scope |
 |---------|---------|-------|
-| `Migration.MaxConcurrency` | 1 | Parallel user-creation calls in worker-migrate |
-| `Migration.PhoneRegistration.MaxConcurrency` | 1 | Parallel phone-registration calls |
+| `Migration.MaxConcurrency` | 8 | Parallel calls in worker-migrate and phone-registration |
 
 Increase to 4–8 per instance for higher throughput. For significant scale, run **multiple instances** on separate IPs with dedicated app registrations.
 
@@ -95,11 +94,11 @@ Increase to 4–8 per instance for higher throughput. For significant scale, run
 }
 ```
 
-**Permissions by process**:
+**B2C permissions by process**:
 
 | Process | Permission | Type |
 |---|---|---|
-| harvest + worker-migrate | `User.Read.All` | Application |
+| export, harvest, worker-migrate | `User.Read.All` | Application |
 | phone-registration | `UserAuthenticationMethod.Read.All` | Application |
 
 Each worker instance needs a **dedicated** app registration on a **dedicated IP** for independent throttle quotas.
@@ -330,11 +329,16 @@ dotnet build -c Release   # release build
 
 ## JIT Migration Implementation
 
-⏱️ **Quick Start**: ~15 minutes to running local test
+⏱️ **Quick Start**: ~15 minutes to set up local testing environment
 
-### How JIT Triggers
+### How JIT Works
 
-Worker-migrate creates EEID users with **random 16-char passwords** and `RequiresMigration = true`. On first login, the real B2C password doesn't match → triggers JIT → function validates against B2C → updates EEID password → sets `RequiresMigration = false`. Subsequent logins authenticate directly.
+Users migrated via bulk migration have random passwords and `RequiresMigration = true`. On first login:
+
+1. User enters real B2C password → EEID doesn't match → triggers Custom Authentication Extension
+2. Azure Function validates password against B2C via ROPC flow
+3. If valid → updates EEID password, sets `RequiresMigration = false`
+4. Subsequent logins authenticate directly against EEID
 
 ### Step 1: Generate RSA Key Pair
 
@@ -637,7 +641,7 @@ Connect to a worker via Bastion SSH to see real-time stdout. Enable `--verbose` 
 
 ### Scaling
 
-Scale by adding worker VMs (increase `vmCount` in the deploy workflow). Each worker needs a dedicated app registration with distinct IPs to avoid per-IP soft limits. See [Architecture Guide](ARCHITECTURE_GUIDE.md) § 9.
+Scale by adding worker VMs (increase `-UserWorkerCount` and/or `-PhoneWorkerCount` parameters in Deploy-All.ps1). Each worker needs a dedicated app registration with distinct IPs to avoid per-IP soft limits. See [Architecture Guide](ARCHITECTURE_GUIDE.md) § 9.
 
 ## Troubleshooting
 

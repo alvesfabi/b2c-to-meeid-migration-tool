@@ -14,7 +14,7 @@ Deploy-All.ps1 creates the following resources:
 - **Resource Group** with VNet, NAT Gateway, NSGs
 - **Worker VMs** (Ubuntu 22.04, configurable count 1–16) with managed identity
 - **Storage Account** with Queue, Blob, and Table Storage (private endpoints)
-- **Key Vault** for storing per-worker `appsettings` secrets (used by the GitHub Actions deployment workflow; manual Deploy-All.ps1 path copies example configs instead)
+- **Key Vault** for secure configuration management (Deploy-All.ps1 copies example configs as starting point)
 - **Bastion** for secure SSH access (no public IPs on VMs)
 
 VMs clone the repo from GitHub, build the .NET app locally, and copy the example config as a starting point.
@@ -37,7 +37,7 @@ The script auto-detects your Git remote URL and current branch. Override with `-
 |-----------|---------|-------------|
 | `-ResourceGroup` | *(required)* | Target Azure resource group |
 | `-Location` | `eastus2` | Azure region |
-| `-VmCount` | `5` | Number of worker VMs (1–16). Derived from role counts. |
+| `-StorageAccountName` | *(auto-generated)* | Storage account name (reuses existing or generates unique name) |
 | `-VmSize` | `Standard_B2s` | VM SKU |
 | `-AdminUsername` | `azureuser` | VM admin user |
 | `-SshPublicKeyFile` | `~/.ssh/id_ed25519.pub` | Path to SSH public key |
@@ -47,9 +47,9 @@ The script auto-detects your Git remote URL and current branch. Override with `-
 | `-MasterCount` | `1` | Number of master VMs (harvest) |
 | `-UserWorkerCount` | `2` | Number of user-worker VMs (worker-migrate) |
 | `-PhoneWorkerCount` | `2` | Number of phone-worker VMs (phone-registration) |
-| `-ConfigProfile` | *N/A* | Removed — role-appropriate config is auto-selected per VM |
 | `-SkipInfra` | `false` | Skip Bicep deployment, only re-provision VMs |
-| `-WhatIf` | `false` | Dry run |
+
+**Note:** Total VM count is automatically derived as `MasterCount + UserWorkerCount + PhoneWorkerCount` (default: 5 VMs).
 
 ## Pipeline Steps
 

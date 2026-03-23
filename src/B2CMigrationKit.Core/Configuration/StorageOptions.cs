@@ -59,7 +59,7 @@ public class StorageOptions
     /// </list>
     /// Default: "Table"
     /// </summary>
-    public string AuditMode { get; set; } = "Table";
+    public string AuditMode { get; set; } = "File";
 
     /// <summary>
     /// Path to the local JSONL audit file. Only used when <see cref="AuditMode"/> is "File".

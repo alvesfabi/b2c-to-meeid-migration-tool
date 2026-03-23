@@ -4,19 +4,17 @@ PowerShell scripts for running bulk migrations, configuring JIT password migrati
 
 **📖 For complete configuration reference, see the [Developer Guide](../docs/DEVELOPER_GUIDE.md)**
 
-> **🚀 New here?** Start with [`Setup-Migration.ps1`](#setup-wizard) — the interactive wizard that walks you through the entire setup end-to-end.
+> **🚀 New here?** Start with [`Setup-Migration.ps1`](#setup-wizard) for interactive setup, or see the [Developer Guide](../docs/DEVELOPER_GUIDE.md) for complete configuration reference.
 
 ## Table of Contents
 
-- [Setup Wizard (Recommended First Step)](#setup-wizard)
-- [Full Deployment (Deploy-All)](#full-deployment-deploy-all)
+- [Setup Wizard](#setup-wizard) — Interactive end-to-end setup
+- [Full Deployment](#full-deployment-deploy-all) — Azure VM infrastructure
 - [Prerequisites](#prerequisites)
-- [Readiness Validation](#readiness-validation)
-- [Simple Mode (Export → Import)](#simple-mode-export--import)
-- [Advanced Mode (Harvest → Workers)](#advanced-mode-harvest--workers)
-- [JIT Password Migration Setup](#jit-password-migration-setup)
-- [Telemetry Analysis](#telemetry-analysis)
-- [Utility Scripts](#utility-scripts)
+- [Migration Modes](#migration-modes) — Simple vs Advanced workflows  
+- [JIT Setup](#jit-password-migration-setup) — Password migration configuration
+- [Analysis](#telemetry-analysis) — Results and monitoring
+- [Utilities](#utility-scripts)
 
 ---
 
@@ -56,7 +54,7 @@ Interactive wizard that walks through the **entire setup process** end-to-end: t
 | `-EeidTenantId` | — | External ID tenant GUID |
 | `-EeidTenantDomain` | — | External ID `.onmicrosoft.com` domain |
 | `-ExtensionAppId` | — | Extension app ID (32 hex chars, no hyphens) |
-| `-WorkerCount` | `4` | Number of parallel workers |
+| `-WorkerCount` | `5` | Number of parallel workers |
 | `-Mode` | *(prompted)* | `Simple` (Export/Import) or `Advanced` (Harvest/Workers/Phone) |
 | `-Target` | *(prompted)* | `Local` (Azurite) or `Azure` (VM deployment) |
 | `-ResourceGroup` | `rg-b2c-migration` | Azure resource group (when Target=Azure) |
@@ -94,14 +92,14 @@ VMs build the app themselves from source — no blob upload needed.
 .\scripts\Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -WhatIf
 
 # Custom worker count and location
-.\scripts\Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -SshPublicKeyFile .\scripts\b2c-mig-deploy.pub -VmCount 8 -Location westus2
+.\scripts\Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -SshPublicKeyFile .\scripts\b2c-mig-deploy.pub -MasterCount 1 -UserWorkerCount 4 -PhoneWorkerCount 3 -Location westus2
 ```
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `-ResourceGroup` | *(required)* | Target Azure resource group |
 | `-Location` | `eastus2` | Azure region |
-| `-VmCount` | `5` | Total number of VMs (derived from role counts) |
+| `-StorageAccountName` | *(auto-generated)* | Storage account name (reuses existing or generates unique name) |
 | `-MasterCount` | `1` | Number of master VMs (harvest) |
 | `-UserWorkerCount` | `2` | Number of user-worker VMs (worker-migrate) |
 | `-PhoneWorkerCount` | `2` | Number of phone-worker VMs (phone-registration) |
@@ -111,9 +109,10 @@ VMs build the app themselves from source — no blob upload needed.
 | `-DeployBastion` | `true` | Whether to deploy Azure Bastion |
 | `-GitRepo` | *(auto-detected from git remote)* | Git repo URL for VMs to clone |
 | `-GitBranch` | *(auto-detected from current branch)* | Git branch to checkout on VMs |
-| `-ConfigProfile` | *N/A* | Removed — role-appropriate config is auto-selected per VM |
 | `-SkipInfra` | `false` | Skip Bicep deployment, only re-provision VMs |
 | `-WhatIf` | `false` | Dry run — shows what would happen without making changes |
+
+**Note:** Total VM count is automatically derived as `MasterCount + UserWorkerCount + PhoneWorkerCount` (default: 5 VMs).
 
 **Pipeline steps:**
 1. Deploy infrastructure via `az deployment sub create` with `infra/main.bicep`
@@ -158,7 +157,7 @@ Interactive script that runs **on the VM** to generate `appsettings.json` withou
 bash /opt/b2c-migration/repo/scripts/Configure-Worker.sh
 
 # Or skip the role prompt:
-bash /opt/b2c-migration/repo/scripts/Configure-Worker.sh --role worker --worker-id 2
+bash /opt/b2c-migration/repo/scripts/Configure-Worker.sh --role user-worker --worker-id 2
 ```
 
 The script prompts for B2C credentials, External ID credentials, and storage account name, then writes the config with `chmod 600` and runs `validate` automatically.
@@ -216,99 +215,51 @@ Live monitoring dashboard that tails JSONL telemetry files and shows running cou
 
 ---
 
-## Simple Mode (Export → Import)
+## Migration Modes
 
-Two sequential scripts for straightforward bulk migration without MFA phone migration.
+Choose between Simple (export/import) or Advanced (queue-based workers) migration modes.
 
-> ⚠️ **Azurite must be running first.** Start via VS Code: `Ctrl+Shift+P` → `Azurite: Start Service`
+> ⚠️ **Prerequisites:** Azurite must be running. Start via VS Code: `Ctrl+Shift+P` → `Azurite: Start Service`
 
-### 1. Export
+### Simple Mode (Export → Import)
 
-Pages all B2C users and writes full profiles to Blob Storage as JSON files.
+For tenants <500K users, no MFA phone migration needed.
 
 ```powershell
+# Step 1: Export B2C users to blob storage
 .\scripts\Start-LocalExport.ps1
-```
 
-- Uses `-ConfigFile appsettings.export-import.json` by default
-- Set `Export.MaxUsers: 20` in config for smoke tests (`0` = all users)
-
-### 2. Import
-
-Reads exported blobs, transforms profiles, and creates users in External ID.
-
-```powershell
+# Step 2: Import users to External ID
 .\scripts\Start-LocalImport.ps1
 ```
 
-- Uses the same config file as export
-- Users are created with `RequiresMigration=true` — JIT handles real password on first login
-- Duplicates (409) are skipped gracefully
+**Config:** `appsettings.export-import.example.json`
 
-**Config template:** `appsettings.export-import.example.json`
+### Advanced Mode (Harvest → Workers)
 
-Both scripts accept `-VerboseLogging` and `-SkipAzurite` parameters.
-
----
-
-## Advanced Mode (Harvest → Workers)
-
-Queue-based parallel pipeline for large tenants with MFA phone migration support.
-
-> ⚠️ **Azurite must be running first.** Start via VS Code: `Ctrl+Shift+P` → `Azurite: Start Service`
-
-### 1. Harvest (run once)
-
-Enqueues all B2C user IDs to the migration queue.
+For large tenants, supports MFA phone migration and parallel processing.
 
 ```powershell
+# Step 1: Harvest (run once)
 .\scripts\Start-LocalHarvest.ps1
-```
 
-- Uses `-ConfigFile appsettings.master.json` by default
-- Set `Harvest.MaxUsers: 20` in config for smoke tests (`0` = all users)
-- Exits when all IDs are enqueued
-
-### 2. Worker Migrate (run N instances in parallel)
-
-Each worker dequeues ID batches, fetches full profiles from B2C, creates users in External ID, and enqueues phone tasks.
-
-```powershell
-# Terminal 1
-.\scripts\Start-LocalWorkerMigrate.ps1
-
-# Terminal 2 (different app registration)
+# Step 2a: Worker Migrate (run N in parallel, each with different config)
+.\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker1.json
 .\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker2.json
 
-# Terminal 3
-.\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker3.json
+# Step 2b: Phone Registration (run alongside step 2a)
+.\scripts\Start-LocalPhoneRegistration.ps1 -ConfigFile appsettings.worker1.json
 ```
 
-Each instance needs a **dedicated app registration** for independent throttle quotas. Workers auto-exit when the queue is empty.
-
-### 3. Phone Registration (run after or alongside workers)
-
-Drains the phone queue and registers MFA phones in External ID.
-
-```powershell
-.\scripts\Start-LocalPhoneRegistration.ps1
-```
-
-- Uses `-ConfigFile appsettings.phone-registration.json` by default
-- Handles 409 Conflict as success (idempotent)
-- Exits after `MaxEmptyPolls` consecutive empty polls
+**Requirements:** Each worker needs dedicated app registration for independent throttle quotas.
 
 ### Common Parameters
 
-All three scripts accept:
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `-ConfigFile` | *(per script)* | Configuration file path |
-| `-VerboseLogging` | `false` | Enable detailed logging |
-| `-SkipAzurite` | `false` | Skip Azurite port check (for cloud storage) |
-
-The scripts automatically verify Azurite, pre-create queues/tables, build and run the console app.
+| Parameter | Description |
+|-----------|-------------|
+| `-ConfigFile <path>` | Configuration file (defaults per script) |
+| `-VerboseLogging` | Enable detailed debug output |
+| `-SkipAzurite` | Skip local storage checks (for cloud) |
 
 ---
 
@@ -374,6 +325,29 @@ Test the JIT flow via Azure Portal → User flows → Run user flow.
 ---
 
 ## Telemetry Analysis
+
+### Download-Telemetry.ps1
+
+Downloads audit and telemetry JSONL files from all worker VMs via Bastion tunnels. Run this from your local machine after migration completes — the storage account has no public endpoint, so files must be pulled from the VMs directly.
+
+```powershell
+# Download from all 5 workers (default)
+.\scripts\Download-Telemetry.ps1
+
+# Download from 3 workers to a custom directory
+.\scripts\Download-Telemetry.ps1 -WorkerCount 3 -OutputDir ./my-telemetry
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `WorkerCount` | `5` | Number of worker VMs to download from |
+| `ResourceGroup` | `rg-b2c-eeid-mig-test1` | Azure resource group |
+| `SshPrivateKeyFile` | `./scripts/b2c-mig-deploy` | SSH private key used during deployment |
+| `OutputDir` | `./telemetry-download` | Local directory for downloaded files |
+| `AppDir` | `/opt/b2c-migration/app` | Remote directory containing .jsonl files |
+| `AdminUsername` | `azureuser` | SSH username on the VMs |
+
+Files are prefixed with the VM name (e.g., `vm-b2c-worker1_migration-audit.jsonl`) to avoid collisions.
 
 ### Analyze-Telemetry.ps1
 

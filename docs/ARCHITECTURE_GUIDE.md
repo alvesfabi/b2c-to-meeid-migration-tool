@@ -252,7 +252,7 @@ Worker N  (App Reg B2C-N / EEID-N)  ──► queue: phone-reg-wN  ──► Pho
 
 ## 3. Design Principles
 
-> **Note**: Infrastructure (VNet, Private Endpoints, Key Vault) is implemented in `infra/` and deployed via GitHub Actions.
+> **Note**: Infrastructure (VNet, Private Endpoints, Key Vault) is implemented in `infra/` and deployed via Deploy-All.ps1.
 
 | Principle | Details |
 |-----------|---------|

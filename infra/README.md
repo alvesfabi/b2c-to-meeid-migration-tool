@@ -14,7 +14,7 @@ Deploy-All.ps1 creates the following resources:
 - **Resource Group** with VNet, NAT Gateway, NSGs
 - **Worker VMs** (Ubuntu 22.04, configurable count 1–16) with managed identity
 - **Storage Account** with Queue, Blob, and Table Storage (private endpoints)
-- **Key Vault** for storing per-worker `appsettings` secrets (used by the GitHub Actions deployment workflow; manual Deploy-All.ps1 path copies example configs instead)
+- **Key Vault** for secure configuration management (Deploy-All.ps1 copies example configs as starting point)
 - **Bastion** for secure SSH access (no public IPs on VMs)
 
 VMs clone the repo from GitHub, build the .NET app locally, and copy the example config as a starting point.

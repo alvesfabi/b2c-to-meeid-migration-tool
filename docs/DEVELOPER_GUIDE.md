@@ -74,8 +74,7 @@ See [Architecture Guide](ARCHITECTURE_GUIDE.md) for detailed mode comparison and
 
 | Setting | Default | Scope |
 |---------|---------|-------|
-| `Migration.MaxConcurrency` | 1 | Parallel user-creation calls in worker-migrate |
-| `Migration.PhoneRegistration.MaxConcurrency` | 1 | Parallel phone-registration calls |
+| `Migration.MaxConcurrency` | 8 | Parallel calls in worker-migrate and phone-registration |
 
 Increase to 4–8 per instance for higher throughput. For significant scale, run **multiple instances** on separate IPs with dedicated app registrations.
 

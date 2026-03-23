@@ -191,7 +191,7 @@ prompt STORAGE_ACCOUNT "Storage Account Name (just the name, not the full URL)"
 STORAGE_URI="https://${STORAGE_ACCOUNT}.blob.core.windows.net"
 echo -e "  → Connection URI: ${color_yellow}${STORAGE_URI}${color_reset}"
 
-prompt_optional AUDIT_MODE "Audit Mode (Table / File / None)" "Table"
+prompt_optional AUDIT_MODE "Audit Mode (Table / File / None)" "File"
 echo ""
 
 # ───────────────────────────────────────────

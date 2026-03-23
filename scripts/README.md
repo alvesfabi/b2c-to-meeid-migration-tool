@@ -157,7 +157,7 @@ Interactive script that runs **on the VM** to generate `appsettings.json` withou
 bash /opt/b2c-migration/repo/scripts/Configure-Worker.sh
 
 # Or skip the role prompt:
-bash /opt/b2c-migration/repo/scripts/Configure-Worker.sh --role worker --worker-id 2
+bash /opt/b2c-migration/repo/scripts/Configure-Worker.sh --role user-worker --worker-id 2
 ```
 
 The script prompts for B2C credentials, External ID credentials, and storage account name, then writes the config with `chmod 600` and runs `validate` automatically.

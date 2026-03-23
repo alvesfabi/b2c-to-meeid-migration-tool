@@ -641,7 +641,7 @@ Connect to a worker via Bastion SSH to see real-time stdout. Enable `--verbose` 
 
 ### Scaling
 
-Scale by adding worker VMs (increase `vmCount` in the deploy workflow). Each worker needs a dedicated app registration with distinct IPs to avoid per-IP soft limits. See [Architecture Guide](ARCHITECTURE_GUIDE.md) § 9.
+Scale by adding worker VMs (increase `-UserWorkerCount` and/or `-PhoneWorkerCount` parameters in Deploy-All.ps1). Each worker needs a dedicated app registration with distinct IPs to avoid per-IP soft limits. See [Architecture Guide](ARCHITECTURE_GUIDE.md) § 9.
 
 ## Troubleshooting
 

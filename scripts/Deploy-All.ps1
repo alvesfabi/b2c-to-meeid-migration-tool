@@ -225,6 +225,29 @@ for ($i = 1; $i -le $VmCount; $i++) {
         continue
     }
 
+    # Ensure VM is running before sending run-command
+    $vmStatus = az vm get-instance-view --resource-group $ResourceGroup --name $vmName `
+        --query "instanceView.statuses[1].displayStatus" -o tsv 2>$null
+    if ($vmStatus -ne 'VM running') {
+        Write-Warn "  $vmName is '$vmStatus' — starting it..."
+        az vm start --resource-group $ResourceGroup --name $vmName 2>$null | Out-Null
+    }
+
+    # Wait until VM is running (max ~3 minutes)
+    $maxWait = 36; $waited = 0
+    while ($waited -lt $maxWait) {
+        $vmStatus = az vm get-instance-view --resource-group $ResourceGroup --name $vmName `
+            --query "instanceView.statuses[1].displayStatus" -o tsv 2>$null
+        if ($vmStatus -eq 'VM running') { break }
+        Start-Sleep -Seconds 5; $waited++
+    }
+    if ($vmStatus -ne 'VM running') {
+        Write-Err "  $vmName did not start after ~3 minutes. Skipping."
+        $failedVms += $vmName
+        continue
+    }
+    Write-Success "  $vmName is running."
+
     # The script runs on the VM as root via run-command.
     # It installs prerequisites itself in case cloud-init used an older template.
     $scriptContent = @"

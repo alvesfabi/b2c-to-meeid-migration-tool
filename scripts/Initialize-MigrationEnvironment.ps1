@@ -2,21 +2,22 @@
 # Licensed under the MIT License.
 <#
 .SYNOPSIS
-    Provisions app registrations in B2C and External ID for additional migration workers
-    and writes the corresponding appsettings.workerN.json files.
+    Initializes the migration environment: creates app registrations, ensures
+    extension properties, and generates appsettings.workerN.json files.
 
 .DESCRIPTION
-    For each worker number in [StartWorker..EndWorker] this script:
-      1. Creates a B2C app registration with User.Read.All (Application) and grants admin consent.
-      2. Creates an External ID app registration with User.ReadWrite.All (Application) and grants
-         admin consent.
-      3. Generates a client secret for each registration.
-      4. Writes appsettings.workerN.json to src/B2CMigrationKit.Console/.
+    Idempotent setup script that prepares both tenants for migration:
+      1. Creates (or reuses) B2C app registrations with User.Read.All.
+      2. Creates (or reuses) External ID app registrations with User.ReadWrite.All.
+      3. Ensures extension properties (B2CObjectId, RequiresMigration) exist on the
+         EEID ExtensionApp.
+      4. Generates appsettings.workerN.json files with all credentials.
 
-    Authentication is performed via device code flow — you will be prompted to sign in as an admin
-    once for the B2C tenant and once for the External ID tenant.
+    The script is fully idempotent — safe to re-run. Existing app registrations are
+    reused (matched by display name), and extension properties are only created if missing.
 
-    Required admin role in each tenant: Application Administrator (or Global Administrator).
+    Authentication is performed via device code flow — you will be prompted to sign in
+    as a Global Administrator once per tenant (unless skipped).
 
 .PARAMETER StartWorker
     First worker number to provision.  Default: 5.
@@ -35,24 +36,31 @@
     Overwrite existing appsettings.workerN.json files.
     Without this flag, workers whose config file already exists are skipped.
 
+.PARAMETER SkipB2C
+    Skip creating B2C app registrations.  Credentials are read from the ConfigFile.
+
+.PARAMETER SkipEEID
+    Skip creating External ID app registrations.  Credentials are read from the ConfigFile.
+    NOTE: EEID authentication is still performed to ensure extension properties exist.
+
 .PARAMETER WhatIf
     Print every action that would be taken without calling any Graph API or writing any file.
 
 .EXAMPLE
-    # Provision workers 5-8 (default)
-    .\New-WorkerAppRegistrations.ps1
+    # Full setup for workers 1-3 (apps + extension properties + configs)
+    .\Initialize-MigrationEnvironment.ps1 -StartWorker 1 -EndWorker 3 -Force
 
 .EXAMPLE
-    # Provision only worker 6
-    .\New-WorkerAppRegistrations.ps1 -StartWorker 6 -EndWorker 6
+    # Skip B2C (apps already exist), create EEID apps + extension properties
+    .\Initialize-MigrationEnvironment.ps1 -StartWorker 1 -EndWorker 3 -SkipB2C -Force
 
 .EXAMPLE
-    # Overwrite existing files and re-create secrets
-    .\New-WorkerAppRegistrations.ps1 -Force
+    # Only ensure extension properties (skip all app creation, rewrite configs)
+    .\Initialize-MigrationEnvironment.ps1 -StartWorker 1 -EndWorker 3 -SkipB2C -SkipEEID -Force
 
 .EXAMPLE
     # Preview everything without touching Azure
-    .\New-WorkerAppRegistrations.ps1 -WhatIf
+    .\Initialize-MigrationEnvironment.ps1 -WhatIf
 #>
 
 param(
@@ -73,6 +81,12 @@ param(
 
     [Parameter(Mandatory = $false)]
     [switch]$Force,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$SkipB2C,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$SkipEEID,
 
     [Parameter(Mandatory = $false)]
     [switch]$WhatIf
@@ -124,10 +138,12 @@ foreach ($field in @("b2cTenantId","b2cTenantDomain","eeidTenantId","eeidTenantD
 # ─── Header ────────────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "  B2C Migration Kit – Provision Worker App Registrations"       -ForegroundColor Cyan
+Write-Host "  B2C Migration Kit – Initialize Migration Environment"       -ForegroundColor Cyan
 Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host ""
 Write-Info "Workers to provision : $StartWorker – $EndWorker ($($EndWorker - $StartWorker + 1) worker(s))"
+if ($SkipB2C)  { Write-Warn "SkipB2C  : B2C app creation will be skipped (using credentials from config)" }
+if ($SkipEEID) { Write-Warn "SkipEEID : EEID app creation will be skipped (using credentials from config)" }
 Write-Info "B2C tenant           : $b2cTenantDomain  ($b2cTenantId)"
 Write-Info "External ID tenant   : $eeidTenantDomain  ($eeidTenantId)"
 Write-Info "Secret expiry        : $SecretExpiryYears year(s)"
@@ -141,6 +157,26 @@ Write-Host ""
 if ($StartWorker -gt $EndWorker) {
     Write-Err "StartWorker ($StartWorker) must be <= EndWorker ($EndWorker)"
     exit 1
+}
+
+# Validate skip flags have required credentials in config
+if ($SkipB2C -and (-not $WhatIf)) {
+    $B2CClientId     = $cfg.Migration.B2C.AppRegistration.ClientId
+    $B2CClientSecret = $cfg.Migration.B2C.AppRegistration.ClientSecret
+    if ([string]::IsNullOrWhiteSpace($B2CClientId) -or [string]::IsNullOrWhiteSpace($B2CClientSecret)) {
+        Write-Err "-SkipB2C requires B2C.AppRegistration.ClientId and ClientSecret in the config file"
+        exit 1
+    }
+    Write-Info "B2C credentials read from config: ClientId=$($B2CClientId.Substring(0,8))…"
+}
+if ($SkipEEID -and (-not $WhatIf)) {
+    $EEIDClientId     = $cfg.Migration.ExternalId.AppRegistration.ClientId
+    $EEIDClientSecret = $cfg.Migration.ExternalId.AppRegistration.ClientSecret
+    if ([string]::IsNullOrWhiteSpace($EEIDClientId) -or [string]::IsNullOrWhiteSpace($EEIDClientSecret)) {
+        Write-Err "-SkipEEID requires ExternalId.AppRegistration.ClientId and ClientSecret in the config file"
+        exit 1
+    }
+    Write-Info "EEID credentials read from config: ClientId=$($EEIDClientId.Substring(0,8))…"
 }
 
 # ─── Check for already-existing output files (before authenticating) ───────────
@@ -178,31 +214,52 @@ if ($WhatIf) {
 else {
     $adminScopes = @(
         "https://graph.microsoft.com/Application.ReadWrite.All"
+        "https://graph.microsoft.com/AppRoleAssignment.ReadWrite.All"
         "https://graph.microsoft.com/User.Read"
     )
 
-    # Authenticate to B2C tenant first
-    $b2cToken  = Get-DeviceCodeToken `
-        -TenantId    $b2cTenantId `
-        -TenantLabel "B2C ($b2cTenantDomain)" `
-        -Scopes      $adminScopes
+    # Authenticate to B2C tenant (skip if -SkipB2C)
+    if ($SkipB2C) {
+        Write-Info "Skipping B2C authentication (-SkipB2C)"
+        $b2cHeaders   = $null
+        $b2cGraphSpId = $null
+    }
+    else {
+        $b2cToken    = Get-DeviceCodeToken `
+            -TenantId    $b2cTenantId `
+            -TenantLabel "B2C ($b2cTenantDomain)" `
+            -Scopes      $adminScopes
+        $b2cHeaders  = @{ Authorization = "Bearer $b2cToken";  "Content-Type" = "application/json" }
+    }
 
-    # Authenticate to External ID tenant
-    $eeidToken = Get-DeviceCodeToken `
+    # Authenticate to External ID tenant (always needed for extension properties)
+    $eeidToken   = Get-DeviceCodeToken `
         -TenantId    $eeidTenantId `
         -TenantLabel "External ID ($eeidTenantDomain)" `
         -Scopes      $adminScopes
-
-    $b2cHeaders  = @{ Authorization = "Bearer $b2cToken";  "Content-Type" = "application/json" }
     $eeidHeaders = @{ Authorization = "Bearer $eeidToken"; "Content-Type" = "application/json" }
 
     # Locate the Microsoft Graph SP in each tenant (needed for admin consent)
     Write-Host ""
     Write-Info "Locating Microsoft Graph service principal in each tenant..."
-    $b2cGraphSpId  = Get-GraphSpId -Headers $b2cHeaders  -TenantLabel "B2C"
-    $eeidGraphSpId = Get-GraphSpId -Headers $eeidHeaders -TenantLabel "External ID"
-    Write-Info "  B2C  Graph SP : $b2cGraphSpId"
-    Write-Info "  EEID Graph SP : $eeidGraphSpId"
+    if (-not $SkipB2C) {
+        $b2cGraphSpId  = Get-GraphSpId -Headers $b2cHeaders  -TenantLabel "B2C"
+        Write-Info "  B2C  Graph SP : $b2cGraphSpId"
+    }
+    if (-not $SkipEEID) {
+        $eeidGraphSpId = Get-GraphSpId -Headers $eeidHeaders -TenantLabel "External ID"
+        Write-Info "  EEID Graph SP : $eeidGraphSpId"
+    }
+}
+
+# ─── Ensure extension properties on EEID ExtensionApp ──────────────────────────
+if ($WhatIf) {
+    Write-Host ""
+    Write-Warn "[WhatIf] Would ensure extension properties (B2CObjectId, RequiresMigration) on ExtensionApp $extensionAppId"
+}
+else {
+    Write-Host ""
+    Ensure-ExtensionProperties -Headers $eeidHeaders -ExtensionAppId $extensionAppId
 }
 
 # ─── Provision workers ─────────────────────────────────────────────────────────
@@ -230,22 +287,34 @@ foreach ($n in $workersToProvision) {
 
     try {
         # B2C app registration (User.Read.All)
-        $b2cApp = New-WorkerApp `
-            -Headers          $b2cHeaders `
-            -AppDisplayName   "B2C App Registration (Local - Worker $n)" `
-            -PermissionRoleId $PERM_USER_READ_ALL `
-            -GraphSpId        $b2cGraphSpId `
-            -TenantLabel      "B2C" `
-            -WorkerNumber     $n
+        if ($SkipB2C) {
+            Write-Info "  [B2C] Skipped – using provided credentials (ClientId: $($B2CClientId.Substring(0,8))…)"
+            $b2cApp = @{ ClientId = $B2CClientId; ClientSecret = $B2CClientSecret }
+        }
+        else {
+            $b2cApp = New-WorkerApp `
+                -Headers          $b2cHeaders `
+                -AppDisplayName   "B2C App Registration (Local - Worker $n)" `
+                -PermissionRoleIds $PERM_USER_READ_ALL `
+                -GraphSpId        $b2cGraphSpId `
+                -TenantLabel      "B2C" `
+                -WorkerNumber     $n
+        }
 
-        # External ID app registration (User.ReadWrite.All)
-        $eeidApp = New-WorkerApp `
-            -Headers          $eeidHeaders `
-            -AppDisplayName   "External ID App Registration $n (Local)" `
-            -PermissionRoleId $PERM_USER_READWRITE `
-            -GraphSpId        $eeidGraphSpId `
-            -TenantLabel      "External ID" `
-            -WorkerNumber     $n
+        # External ID app registration (User.ReadWrite.All + UserAuthenticationMethod.ReadWrite.All)
+        if ($SkipEEID) {
+            Write-Info "  [EEID] Skipped – using provided credentials (ClientId: $($EEIDClientId.Substring(0,8))…)"
+            $eeidApp = @{ ClientId = $EEIDClientId; ClientSecret = $EEIDClientSecret }
+        }
+        else {
+            $eeidApp = New-WorkerApp `
+                -Headers          $eeidHeaders `
+                -AppDisplayName   "External ID App Registration $n (Local)" `
+                -PermissionRoleIds @($PERM_USER_READWRITE, $PERM_USER_AUTH_RW) `
+                -GraphSpId        $eeidGraphSpId `
+                -TenantLabel      "External ID" `
+                -WorkerNumber     $n
+        }
     }
     catch {
         Write-Err "Failed to provision worker $n`: $_"

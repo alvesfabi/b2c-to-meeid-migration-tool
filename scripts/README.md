@@ -418,14 +418,15 @@ Queries and updates the `RequiresMigration` flag on External ID users.
 .\scripts\Manage-MigrationFlag.ps1 -Discover                # list extension attributes
 ```
 
-### New-WorkerAppRegistrations.ps1
+### Initialize-MigrationEnvironment.ps1
 
-Provisions additional app registrations in B2C and External ID for parallel workers. Creates apps, grants permissions, generates secrets, and writes `appsettings.workerN.json` files.
+Initializes the migration environment: creates (or reuses) app registrations, ensures extension properties exist on the EEID ExtensionApp, and generates `appsettings.workerN.json` files. Fully idempotent — safe to re-run.
 
 ```powershell
-.\scripts\New-WorkerAppRegistrations.ps1                          # provision workers 5-8
-.\scripts\New-WorkerAppRegistrations.ps1 -StartWorker 2 -EndWorker 4   # specific range
-.\scripts\New-WorkerAppRegistrations.ps1 -WhatIf                  # preview only
+.\scripts\Initialize-MigrationEnvironment.ps1 -StartWorker 1 -EndWorker 3 -Force   # full setup
+.\scripts\Initialize-MigrationEnvironment.ps1 -SkipB2C -Force                       # EEID only
+.\scripts\Initialize-MigrationEnvironment.ps1 -SkipB2C -SkipEEID -Force             # extension props + configs only
+.\scripts\Initialize-MigrationEnvironment.ps1 -WhatIf                               # preview only
 ```
 
 ### _Common.ps1

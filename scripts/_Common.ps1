@@ -230,6 +230,7 @@ $GRAPH_APP_ID          = "00000003-0000-0000-c000-000000000000"
 # Application permission role IDs (stable Microsoft-assigned GUIDs)
 $PERM_USER_READ_ALL    = "df021288-bdef-4463-88db-98f22de89214"  # User.Read.All (Application)
 $PERM_USER_READWRITE   = "741f803b-c850-494e-b5df-cde7c675a1ca"  # User.ReadWrite.All (Application)
+$PERM_USER_AUTH_RW     = "50483e42-d915-4231-9639-7fdb7fd190e5"  # UserAuthenticationMethod.ReadWrite.All (Application)
 
 # Public client used for device code authentication (Microsoft Graph Command Line Tools)
 $DEVICE_CODE_CLIENT    = "14d82eec-204b-4c2f-b7e8-296a70dab67e"
@@ -369,16 +370,84 @@ function New-WorkerApp {
     param(
         [hashtable]$Headers,
         [string]$AppDisplayName,
-        [string]$PermissionRoleId,
+        [string[]]$PermissionRoleIds,
         [string]$GraphSpId,
         [string]$TenantLabel,
         [int]$WorkerNumber,
         [int]$SecretExpiryYears = 2
     )
 
-    Write-Info "  [$TenantLabel] Creating '$AppDisplayName'..."
+    Write-Info "  [$TenantLabel] Provisioning '$AppDisplayName'..."
 
-    # 1. Create app registration with the desired permission declared
+    # Check if app already exists by displayName (idempotent)
+    $filter = "displayName eq '$AppDisplayName'"
+    $existing = Invoke-Graph -Method GET `
+        -Uri "https://graph.microsoft.com/v1.0/applications?`$filter=$filter&`$select=id,appId" `
+        -Headers $Headers
+
+    if ($existing.value -and $existing.value.Count -gt 0) {
+        $app = $existing.value[0]
+        Write-Info "    App already exists — reusing (Object ID: $($app.id), Client ID: $($app.appId))"
+
+        # Ensure service principal exists
+        $spFilter = "appId eq '$($app.appId)'"
+        $spResult = Invoke-Graph -Method GET `
+            -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=$spFilter&`$select=id" `
+            -Headers $Headers
+        if (-not $spResult.value -or $spResult.value.Count -eq 0) {
+            $sp = Invoke-Graph -Method POST `
+                -Uri "https://graph.microsoft.com/v1.0/servicePrincipals" `
+                -Headers $Headers `
+                -Body @{ appId = $app.appId }
+            Write-Info "    Created missing service principal: $($sp.id)"
+        }
+        else {
+            $sp = $spResult.value[0]
+        }
+
+        # Ensure admin consent for all permissions (idempotent)
+        foreach ($roleId in $PermissionRoleIds) {
+            try {
+                Invoke-Graph -Method POST `
+                    -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$($sp.id)/appRoleAssignments" `
+                    -Headers $Headers `
+                    -Body @{
+                        principalId = $sp.id
+                        resourceId  = $GraphSpId
+                        appRoleId   = $roleId
+                    } | Out-Null
+                Write-Info "    Admin consent granted for role $roleId"
+            }
+            catch {
+                if ($_.Exception.Message -match 'Permission being assigned already exists') {
+                    Write-Info "    Admin consent already granted for role $roleId"
+                }
+                else { throw }
+            }
+        }
+
+        # Create a new secret (always — old secrets still work)
+        $expiry     = [DateTime]::UtcNow.AddYears($SecretExpiryYears).ToString("yyyy-MM-ddTHH:mm:ssZ")
+        $secretResp = Invoke-Graph -Method POST `
+            -Uri "https://graph.microsoft.com/v1.0/applications/$($app.id)/addPassword" `
+            -Headers $Headers `
+            -Body @{
+                passwordCredential = @{
+                    displayName = "worker-$WorkerNumber-local-dev"
+                    endDateTime = $expiry
+                }
+            }
+        Write-Success "    ✓ Reused existing app (new secret expires $expiry)"
+
+        return @{
+            AppObjectId  = $app.id
+            ClientId     = $app.appId
+            ClientSecret = $secretResp.secretText
+        }
+    }
+
+    # App does not exist — create it
+    $resourceAccess = $PermissionRoleIds | ForEach-Object { @{ id = $_; type = "Role" } }
     $app = Invoke-Graph -Method POST `
         -Uri "https://graph.microsoft.com/v1.0/applications" `
         -Headers $Headers `
@@ -388,9 +457,7 @@ function New-WorkerApp {
             requiredResourceAccess = @(
                 @{
                     resourceAppId  = $GRAPH_APP_ID
-                    resourceAccess = @(
-                        @{ id = $PermissionRoleId; type = "Role" }
-                    )
+                    resourceAccess = @($resourceAccess)
                 }
             )
         }
@@ -405,16 +472,18 @@ function New-WorkerApp {
         -Body @{ appId = $app.appId }
     Write-Info "    Service principal: $($sp.id)"
 
-    # 3. Grant admin consent via app role assignment
-    Invoke-Graph -Method POST `
-        -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$($sp.id)/appRoleAssignments" `
-        -Headers $Headers `
-        -Body @{
-            principalId = $sp.id
-            resourceId  = $GraphSpId
-            appRoleId   = $PermissionRoleId
-        } | Out-Null
-    Write-Info "    Admin consent granted for role $PermissionRoleId"
+    # 3. Grant admin consent via app role assignments
+    foreach ($roleId in $PermissionRoleIds) {
+        Invoke-Graph -Method POST `
+            -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$($sp.id)/appRoleAssignments" `
+            -Headers $Headers `
+            -Body @{
+                principalId = $sp.id
+                resourceId  = $GraphSpId
+                appRoleId   = $roleId
+            } | Out-Null
+        Write-Info "    Admin consent granted for role $roleId"
+    }
 
     # 4. Create client secret
     $expiry     = [DateTime]::UtcNow.AddYears($SecretExpiryYears).ToString("yyyy-MM-ddTHH:mm:ssZ")
@@ -427,12 +496,81 @@ function New-WorkerApp {
                 endDateTime = $expiry
             }
         }
-    Write-Success "    ✓ Done  (secret expires $expiry)"
+    Write-Success "    ✓ Created new app (secret expires $expiry)"
 
     return @{
         AppObjectId  = $app.id
         ClientId     = $app.appId
         ClientSecret = $secretResp.secretText
+    }
+}
+
+# Ensure required extension properties exist on the ExtensionApp in EEID tenant (idempotent)
+function Ensure-ExtensionProperties {
+    param(
+        [hashtable]$Headers,
+        [string]$ExtensionAppId   # without hyphens, e.g. "7343db9f2a60428caab75693cc9172e3"
+    )
+
+    # Convert no-hyphen appId to GUID format for Graph filter
+    $appIdGuid = $ExtensionAppId.Insert(8, '-').Insert(13, '-').Insert(18, '-').Insert(23, '-')
+
+    Write-Info "Ensuring extension properties on ExtensionApp ($appIdGuid)..."
+
+    # Find the application object by appId
+    $filter = "appId eq '$appIdGuid'"
+    $result = Invoke-Graph -Method GET `
+        -Uri "https://graph.microsoft.com/v1.0/applications?`$filter=$filter&`$select=id,appId,displayName" `
+        -Headers $Headers
+
+    if (-not $result.value -or $result.value.Count -eq 0) {
+        throw "Extension app with appId '$appIdGuid' not found in the EEID tenant. Verify ExtensionAppId in config."
+    }
+
+    $appObjectId = $result.value[0].id
+    $appName     = $result.value[0].displayName
+    Write-Info "  Found: '$appName' (Object ID: $appObjectId)"
+
+    # List existing extension properties
+    $existing = Invoke-Graph -Method GET `
+        -Uri "https://graph.microsoft.com/v1.0/applications/$appObjectId/extensionProperties?`$select=name,dataType,targetObjects" `
+        -Headers $Headers
+
+    $existingNames = @()
+    if ($existing.value) {
+        $existingNames = $existing.value | ForEach-Object { $_.name }
+    }
+
+    $requiredProps = @(
+        @{ Name = "B2CObjectId";       DataType = "String";  FullName = "extension_${ExtensionAppId}_B2CObjectId" }
+        @{ Name = "RequiresMigration"; DataType = "Boolean"; FullName = "extension_${ExtensionAppId}_RequiresMigration" }
+    )
+
+    $created = 0
+    foreach ($prop in $requiredProps) {
+        if ($existingNames -contains $prop.FullName) {
+            Write-Success "  ✓ $($prop.FullName) — already exists"
+        }
+        else {
+            Write-Info "  Creating $($prop.Name) ($($prop.DataType))..."
+            Invoke-Graph -Method POST `
+                -Uri "https://graph.microsoft.com/v1.0/applications/$appObjectId/extensionProperties" `
+                -Headers $Headers `
+                -Body @{
+                    name          = $prop.Name
+                    dataType      = $prop.DataType
+                    targetObjects = @("User")
+                } | Out-Null
+            Write-Success "  ✓ $($prop.FullName) — created"
+            $created++
+        }
+    }
+
+    if ($created -eq 0) {
+        Write-Success "All extension properties already exist."
+    }
+    else {
+        Write-Success "$created extension property/ies created."
     }
 }
 

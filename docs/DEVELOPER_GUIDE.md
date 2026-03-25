@@ -5,8 +5,8 @@
 - [Overview](#overview)
 - [Configuration Guide](#configuration-guide)
 - [Development Workflow](#development-workflow)
-  - [Running Simple Mode (Export → Import)](#running-mode-a-export--import)
-  - [Running Advanced Mode (Harvest → Worker Migrate → Phone Registration)](#running-mode-b-harvest--worker-migrate--phone-registration)
+  - [Running Simple Mode (Export → Import)](#running-simple-mode-export--import)
+  - [Running Advanced Mode (Harvest → Worker Migrate → Phone Registration)](#running-advanced-mode-harvest--worker-migrate--phone-registration)
 - [JIT Migration Implementation](#jit-migration-implementation)
 - [Attribute Mapping](#attribute-mapping)
 - [Migration Audit Table](#migration-audit-table)
@@ -22,7 +22,7 @@
 
 ```
 B2CMigrationKit.Core/       # Business logic, models, abstractions, DI registration
-B2CMigrationKit.Console/    # CLI for bulk operations (5 commands across 2 modes)
+B2CMigrationKit.Console/    # CLI for bulk operations (6 commands across 2 modes + utilities)
 B2CMigrationKit.Function/   # Azure Function for JIT authentication
 ```
 
@@ -32,8 +32,8 @@ The CLI supports two migration modes:
 
 | Orchestrator | Command | Description |
 |---|---|---|
-| `ExportOrchestrator` | `export` | Pages B2C users, writes JSON files to Blob Storage |
-| `ImportOrchestrator` | `import` | Reads blobs, creates users in EEID with attribute mapping + JIT flag |
+| `ExportOrchestrator` | `export` | Pages B2C users, writes local JSON files |
+| `ImportOrchestrator` | `import` | Reads local JSON files, creates users in EEID with attribute mapping + JIT flag |
 
 **Advanced Mode — Workers** (full MFA, parallel scaling):
 
@@ -42,6 +42,12 @@ The CLI supports two migration modes:
 | `HarvestOrchestrator` | `harvest` | Pages B2C user IDs, enqueues batches to migrate queue |
 | `WorkerMigrateOrchestrator` | `worker-migrate` | Dequeues IDs, fetches from B2C, creates in EEID, enqueues phone tasks |
 | `PhoneRegistrationWorker` | `phone-registration` | Fetches MFA phone from B2C, registers in EEID (throttled) |
+
+**Utilities:**
+
+| Orchestrator | Command | Description |
+|---|---|---|
+| `ValidateOrchestrator` | `validate` | Checks connectivity to B2C, EEID, and Queue Storage (Advanced Mode) |
 
 **Both modes**: `JitMigrationService` *(Azure Function)* — Validates B2C credentials on first login, returns `MigratePassword` action.
 
@@ -59,7 +65,7 @@ See [Architecture Guide](ARCHITECTURE_GUIDE.md) for detailed mode comparison and
     "Storage": { ... },
     "Telemetry": { ... },
     "Retry": { ... },
-    "MaxConcurrency": 1
+    "MaxConcurrency": 8
   }
 }
 ```
@@ -68,8 +74,7 @@ See [Architecture Guide](ARCHITECTURE_GUIDE.md) for detailed mode comparison and
 
 | Setting | Default | Scope |
 |---------|---------|-------|
-| `Migration.MaxConcurrency` | 1 | Parallel user-creation calls in worker-migrate |
-| `Migration.PhoneRegistration.MaxConcurrency` | 1 | Parallel phone-registration calls |
+| `Migration.MaxConcurrency` | 8 | Parallel calls in worker-migrate and phone-registration |
 
 Increase to 4–8 per instance for higher throughput. For significant scale, run **multiple instances** on separate IPs with dedicated app registrations.
 
@@ -89,11 +94,11 @@ Increase to 4–8 per instance for higher throughput. For significant scale, run
 }
 ```
 
-**Permissions by process**:
+**B2C permissions by process**:
 
 | Process | Permission | Type |
 |---|---|---|
-| harvest + worker-migrate | `User.Read.All` | Application |
+| export, harvest, worker-migrate | `User.Read.All` | Application |
 | phone-registration | `UserAuthenticationMethod.Read.All` | Application |
 
 Each worker instance needs a **dedicated** app registration on a **dedicated IP** for independent throttle quotas.
@@ -137,7 +142,7 @@ Admin consent required. `Directory.ReadWrite.All` is **NOT** required. `Extensio
 | `MaxUsers` | 0 (unlimited) | Cap for smoke tests (e.g., `20`). `0` = export all. |
 | `FilterPattern` | *(empty)* | OData `$filter` expression to subset users. |
 
-Storage sections used by export: `ExportContainerName`, `ErrorContainerName`, `ExportBlobPrefix`.
+Export writes to local JSON files — no Azure storage configuration needed for Simple Mode.
 
 ### Import Configuration (Simple Mode)
 
@@ -163,7 +168,7 @@ Storage sections used by export: `ExportContainerName`, `ErrorContainerName`, `E
 | `OverwriteExtensionAttributes` | `false` | If `true`, overwrites existing extension values |
 | `SkipPhoneRegistration` | `true` | Simple Mode skips MFA phone migration (use Advanced Mode if needed) |
 
-Storage sections used by import: `ExportContainerName` (reads from), `ImportAuditContainerName`, `AuditTableName`.
+Import reads from local JSON files exported in Step 1. Audit defaults to local JSONL (`AuditMode="File"`).
 
 ### Harvest Configuration
 
@@ -199,20 +204,20 @@ Storage sections used by import: `ExportContainerName` (reads from), `ImportAudi
 
 ```json
 "Storage": {
-  "ConnectionStringOrUri": "https://yourstorage.blob.core.windows.net",
+  "ConnectionStringOrUri": "UseDevelopmentStorage=true",
   "AuditTableName": "migrationAudit",
-  "UseManagedIdentity": true,
-  "AuditMode": "Table"
+  "UseManagedIdentity": false,
+  "AuditMode": "File"
 }
 ```
 
 | AuditMode | Backend | Notes |
 |---|---|---|
-| `Table` | Azure Table Storage / Azurite | **Default.** Production-grade, queryable. |
-| `File` | Local JSONL file (`AuditFilePath`) | Dev use when Azurite unavailable. Thread-safe. |
+| `File` | Local JSONL file (`AuditFilePath`) | **Default.** Thread-safe, no Azure dependency. |
+| `Table` | Azure Table Storage / Azurite | Optional. Queryable, production-grade. Requires `Storage Table Data Contributor` role. |
 | `None` | No-op | Smoke tests only. |
 
-Required roles (Table mode): `Storage Queue Data Contributor`, `Storage Table Data Contributor`.
+Required roles (Advanced Mode): `Storage Queue Data Contributor`. Add `Storage Table Data Contributor` only if using `AuditMode="Table"`.
 
 ### Retry Configuration
 
@@ -232,10 +237,7 @@ Required roles (Table mode): `Storage Queue Data Contributor`, `Storage Table Da
 ```json
 "Telemetry": {
   "Enabled": true,
-  "UseConsoleLogging": true,
-  "UseApplicationInsights": false,
-  "ConnectionString": "",
-  "SamplingPercentage": 100.0
+  "UseConsoleLogging": true
 }
 ```
 
@@ -246,7 +248,7 @@ Key metrics: `harvest.users.enqueued`, `WorkerMigrate.UserCreated/Duplicate/Fail
 ### Prerequisites
 
 - .NET 8.0 SDK, Azure Functions Core Tools v4, Azure CLI
-- VS Code with C# Dev Kit (repo includes `.vscode/launch.json` and `tasks.json`)
+- VS Code with C# Dev Kit
 
 ### Local Setup
 
@@ -261,8 +263,8 @@ cp appsettings.export-import.example.json appsettings.export-import.json
 ```bash
 cd src/B2CMigrationKit.Console
 cp appsettings.master.example.json appsettings.master.json
-cp appsettings.worker1.example.json appsettings.worker1.json
-cp appsettings.phone-registration.example.json appsettings.phone-registration.json
+cp appsettings.user-worker.example.json appsettings.user-worker.json
+cp appsettings.phone-worker.example.json appsettings.phone-worker.json
 # Edit each file with your tenant credentials
 ```
 
@@ -272,14 +274,14 @@ Config patterns: **Local** → `ClientSecret` with actual value. **Production** 
 
 Two commands, no queues. Best for small & medium tenant, < 1 million users without MFA phone migration.
 
-**1. Export** — pages B2C users to Blob Storage JSON files.
+**1. Export** — pages B2C users to local JSON files.
 ```powershell
 dotnet run -- export --config appsettings.export-import.json
 
 # Smoke test: set Export.MaxUsers to 20 in config first
 ```
 
-**2. Import** — reads exported blobs, creates users in EEID.
+**2. Import** — reads exported local JSON files, creates users in EEID.
 ```powershell
 dotnet run -- import --config appsettings.export-import.json
 ```
@@ -298,11 +300,10 @@ Three-stage pipeline with Azure Queues. Best for large tenants and MFA phone mig
 **2. Worker Migrate** — fetches profiles, creates EEID users, enqueues phone tasks.
 ```powershell
 # Single instance (smoke test)
-.\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker1.json -VerboseLogging
+.\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.user-worker.json -VerboseLogging
 
 # Parallel (separate terminal per instance, each with different app registrations)
-.\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker1.json
-.\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker2.json
+.\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.user-worker.json
 ```
 
 Workers auto-exit when queue is empty. Existing users recorded as `Duplicate` (phone task still enqueued).
@@ -326,13 +327,80 @@ dotnet build              # all projects
 dotnet build -c Release   # release build
 ```
 
+## Bulk Migration Pipeline Reference
+
+Detailed technical reference for each pipeline step — permissions, configuration, and audit fields.
+
+### Simple Mode — Export
+
+Pages B2C users with configurable `$select` fields, writes each page as a local JSON file. Supports optional `FilterPattern` for client-side filtering by `displayName`/`userPrincipalName`.
+
+- **Permissions**: B2C `User.Read.All` (Application)
+- **Config**: `Export.SelectFields`, `Export.FilterPattern`, `PageSize` (default: 999)
+- **Output**: Local JSON files (`exports/page-{N}.json`)
+
+### Simple Mode — Import
+
+Reads exported local JSON files sequentially, transforms user profiles (UPN domain rewrite, extension attribute mapping, email identity, random password + `RequiresMigration` JIT flag), creates users in EEID. Audit results written to local JSONL files by default (`AuditMode="File"`); optionally to Azure Table Storage (`AuditMode="Table"`).
+
+- **Permissions**: EEID `User.ReadWrite.All` (Application)
+- **Config**: `Import.ExtensionAttributes` (source → target attribute mapping)
+- **Idempotency**: 409 Conflict = duplicate, skipped gracefully
+
+### Advanced Mode — Harvest
+
+Pages B2C with `$select=id` (~10× cheaper than full profile fetch), splits into batches of `IdsPerMessage` (default: 20), enqueues to `user-ids-to-process`. Single instance, exits on completion.
+
+- **Permissions**: B2C `User.Read.All` (Application) — read-only, no EEID access needed
+- **Config**: `HarvestOptions.PageSize` (default: 999), `HarvestOptions.IdsPerMessage` (default: 20)
+
+### Advanced Mode — Worker Migrate
+
+Consumes harvest queue, fetches full profiles via `$batch`, transforms and creates users in EEID, enqueues phone tasks.
+
+**Per-message flow**: Dequeue (20 IDs) → `$batch` fetch from B2C → Transform (UPN, attrs, email identity, random password) → `POST /users` to EEID → Audit → Enqueue phone task → Delete message.
+
+**Audit trail** (local JSONL by default; optional Azure Table `migration-audit` when `AuditMode="Table"`):
+
+| Field | Description |
+|---|---|
+| `PartitionKey` | Date `yyyyMMdd` |
+| `RowKey` | `migrate_{B2CObjectId}` |
+| `Status` | `Created` / `Duplicate` / `Failed` |
+| `ErrorCode` | HTTP status or exception type |
+| `ErrorMessage` | Truncated to 4 KB |
+| `DurationMs` | API call duration |
+
+**Permissions**: B2C `User.Read.All`, EEID `User.ReadWrite.All` (both Application).
+
+### Advanced Mode — Phone Registration
+
+Registers MFA phone numbers in EEID so users confirm (not re-register) on first JIT login.
+
+Queue messages contain only `{ B2CUserId, EEIDUpn }` — phone numbers are fetched at drain time (PII never persisted in queue).
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `ThrottleDelayMs` | 400 ms | Rate control — increase if sustained 429s |
+| `MessageVisibilityTimeoutSeconds` | 120 s | Retry delay on failure |
+| `MaxEmptyPolls` | 3 | Exit after N consecutive empty polls |
+
+**Permissions**: B2C `UserAuthenticationMethod.Read.All`, EEID `UserAuthenticationMethod.ReadWrite.All` (both Application).
+
+---
+
 ## JIT Migration Implementation
 
-⏱️ **Quick Start**: ~15 minutes to running local test
+⏱️ **Quick Start**: ~15 minutes to set up local testing environment
 
-### How JIT Triggers
+### How JIT Works
 
-Worker-migrate creates EEID users with **random 16-char passwords** and `RequiresMigration = true`. On first login, the real B2C password doesn't match → triggers JIT → function validates against B2C → updates EEID password → sets `RequiresMigration = false`. Subsequent logins authenticate directly.
+Users migrated via bulk migration have random passwords and `RequiresMigration = true`. On first login:
+
+1. User enters real B2C password → EEID doesn't match → triggers Custom Authentication Extension
+2. Azure Function validates password against B2C via ROPC flow
+3. If valid → updates EEID password, sets `RequiresMigration = false`
+4. Subsequent logins authenticate directly against EEID
 
 ### Step 1: Generate RSA Key Pair
 
@@ -566,9 +634,9 @@ All identity `issuer` fields updated from B2C to EEID domain. Standard fields (`
 
 Create target custom attributes in External ID (**Azure Portal → External Identities → Custom user attributes**) before import. Full attribute name format: `extension_{ExtensionAppId}_{attributeName}`.
 
-## Migration Audit Table
+## Migration Audit
 
-Every user processed is recorded in Azure Table Storage (`migrationAudit`):
+Every user processed is recorded in the audit trail. By default, audit records are written to local JSONL files (`AuditMode="File"`). Optionally, set `AuditMode="Table"` to write to Azure Table Storage (`migrationAudit`) for queryable audit:
 
 | Column | Description |
 |---|---|
@@ -589,7 +657,7 @@ az storage entity query --account-name <acct> --table-name migrationAudit --filt
 
 ## Deployment
 
-### Function Deployment
+### JIT Function Deployment
 
 ```bash
 cd src/B2CMigrationKit.Function
@@ -600,31 +668,43 @@ az functionapp restart --name func-b2c-migration --resource-group rg-b2c-migrati
 
 > Always restart after deployment to load new binaries.
 
+### Bulk Migration Infrastructure
+
+Infrastructure deploys via `Deploy-All.ps1`. See [`infra/README.md`](../infra/README.md) for full details and [`docs/RUNBOOK.md`](RUNBOOK.md) for a step-by-step operations guide.
+
+**Quick start**:
+
+1. Generate SSH key: `ssh-keygen -t ed25519 -f scripts/b2c-mig-deploy -C "b2c-migration"`
+2. Create app registrations per worker: `.\scripts\Setup-Migration.ps1` (or manually)
+3. Generate Azure configs: `.\scripts\Initialize-MigrationEnvironment.ps1 -MasterCount 1 -UserWorkerCount 2 -PhoneWorkerCount 2 -StorageAccountName <name> -Force`
+4. Deploy infra + VMs: `.\scripts\Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -SshPublicKeyFile .\scripts\b2c-mig-deploy.pub`
+5. Connect via Bastion: `.\scripts\Connect-Worker.ps1 -WorkerIndex 1`
+6. SSH: `ssh -p 2201 -i .\scripts\b2c-mig-deploy azureuser@localhost`
+7. Configure each VM: `bash /opt/b2c-migration/repo/scripts/Configure-Worker.sh` (interactive) or `--config-file` (non-interactive)
+8. Run migration (see [Runbook](RUNBOOK.md))
+
 ## Operations & Monitoring
 
-> KQL queries below are reference patterns. Configure App Insights with `Telemetry:UseApplicationInsights: true`.
+### Audit
 
-**Migration progress**:
-```kql
-traces | where message contains "RUN SUMMARY"
-| extend Success = toint(extract("Success: ([0-9]+)", 1, message))
-| extend Failed = toint(extract("Failed: ([0-9]+)", 1, message))
-| project timestamp, Success, Failed
+The primary observability source is the local JSONL audit files (default `AuditMode="File"`). Each line tracks one user migration with status, timestamps, and error details.
+
+If using `AuditMode="Table"` (Azure Table Storage), query via CLI:
+```bash
+az storage entity query --table-name MigrationAudit \
+  --account-name <storage> --auth-mode login \
+  --filter "Status eq 'Failed'"
 ```
 
-**Phone registration**:
-```kql
-customMetrics
-| where name in ("PhoneRegistration.Success", "PhoneRegistration.Failed")
-| summarize Count = sum(value) by bin(timestamp, 5m), name
-| render timechart
-```
+Or use Azure Storage Explorer for visual browsing.
 
-If sustained 429s on phoneMethods, increase `PhoneRegistration.ThrottleDelayMs`.
+### Console Logging
 
-### Scaling Patterns
+Connect to a worker via Bastion SSH to see real-time stdout. Enable `--verbose` for detailed Graph API call logging.
 
-Scale by adding worker instances with dedicated app registrations and distinct IPs. Increase `MaxConcurrency` within a worker for more parallelism per instance. For multiple instances, use separate VMs/ACI/AKS pods to avoid per-IP soft limits. See [Architecture Guide](ARCHITECTURE_GUIDE.md) for architecture details.
+### Scaling
+
+Scale by adding worker VMs (increase `-UserWorkerCount` and/or `-PhoneWorkerCount` parameters in Deploy-All.ps1). Each worker needs a dedicated app registration with distinct IPs to avoid per-IP soft limits. See [Architecture Guide](ARCHITECTURE_GUIDE.md) § 9.
 
 ## Troubleshooting
 
@@ -634,7 +714,7 @@ Scale by adding worker instances with dedicated app registrations and distinct I
 | "User already exists" | Check for duplicates, use `B2CObjectId` to correlate. Handled as `Duplicate` status. |
 | High latency, zero 429s | Soft concurrency ceiling hit. Reduce `MaxConcurrency`. |
 
-**Tips**: Enable `--verbose` logging, check App Insights traces, test with small subsets first, use VS Code breakpoints for local debugging.
+**Tips**: Enable `--verbose` logging, check Table Storage audit records, test with small subsets first, use VS Code breakpoints for local debugging.
 
 ### Resources
 

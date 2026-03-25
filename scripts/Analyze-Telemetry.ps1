@@ -3,7 +3,7 @@
     Analyzes worker + phone-registration telemetry JSONL files.
 
 .PARAMETER WorkerCount
-    Number of migrate workers to aggregate (default: 4).
+    Number of migrate workers to aggregate (default: 5).
     Loads worker1..N-telemetry.jsonl + phone-registration1..N-telemetry.jsonl.
 
 .PARAMETER ConsoleDir
@@ -14,8 +14,11 @@
     Analyze a single JSONL file instead of aggregating all workers.
     When set, phone registration section is skipped.
 
+.PARAMETER OutputMarkdown
+    Path to write a Markdown report file. If omitted, only console output is produced.
+
 .EXAMPLE
-    # Aggregate all 4 workers + 4 phone workers (default)
+    # Aggregate all 5 workers + phone workers (default)
     .\Analyze-Telemetry.ps1
 
     # Aggregate 8 workers
@@ -25,9 +28,10 @@
     .\Analyze-Telemetry.ps1 -TelemetryFile ..\src\B2CMigrationKit.Console\worker2-telemetry.jsonl
 #>
 param(
-    [int]$WorkerCount = 4,
+    [int]$WorkerCount = 5,
     [string]$ConsoleDir = "$PSScriptRoot\..\src\B2CMigrationKit.Console",
-    [string]$TelemetryFile = ""
+    [string]$TelemetryFile = "",
+    [string]$OutputMarkdown = ""
 )
 
 # ── Helper: load one or more JSONL files into a flat string array ──────────────
@@ -79,6 +83,20 @@ function Stats($label, [int[]]$a) {
     $p99 = $s[[int]($n * .99)]
     Write-Host ("  {0,-26} n={1,4}  avg={2,6}ms  min={3,5}  p50={4,5}  p90={5,6}  p95={6,6}  p99={7,6}  max={8,6}" `
         -f $label, $n, $avg, $min, $p50, $p90, $p95, $p99, $max)
+}
+
+# ── Markdown stats row helper ─────────────────────────────────────────────────
+function StatsMd($label, [int[]]$a) {
+    if ($a.Count -eq 0) { return "| $label | — | — | — | — | — | — | — | — |" }
+    $s   = $a | Sort-Object
+    $n   = $s.Count
+    $avg = [Math]::Round(($a | Measure-Object -Average).Average)
+    $min = $s[0]; $max = $s[-1]
+    $p50 = $s[[int]($n * .50)]
+    $p90 = $s[[int]($n * .90)]
+    $p95 = $s[[int]($n * .95)]
+    $p99 = $s[[int]($n * .99)]
+    return "| $label | $n | $avg | $min | $p50 | $p90 | $p95 | $p99 | $max |"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -387,4 +405,192 @@ if ($phoneLines.Count -gt 0) {
             Write-Host ("  Users with phone registered     : {0,5:N1}%" -f ($phSucceeded * 100.0 / $userMs.Count))
         }
     }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MARKDOWN REPORT
+# ═══════════════════════════════════════════════════════════════════════════════
+if ($OutputMarkdown -ne "") {
+    $md = [System.Text.StringBuilder]::new()
+    $null = $md.AppendLine("# Migration Telemetry Report")
+    $null = $md.AppendLine("")
+    $null = $md.AppendLine("Generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
+    $null = $md.AppendLine("")
+    if ($singleFileMode) {
+        $null = $md.AppendLine("**Mode:** single file — ``$resolved``")
+    } else {
+        $null = $md.AppendLine("**Mode:** multi-worker ($WorkerCount workers)  ")
+        $null = $md.AppendLine("**Source:** ``$consoleResolved``  ")
+        $null = $md.AppendLine("**Migrate files:** $migrateFound / $WorkerCount ($($migrateLines.Count) lines)  ")
+        $null = $md.AppendLine("**Phone files:** $phoneFound / $WorkerCount ($($phoneLines.Count) lines)")
+    }
+
+    # ── Migrate Workers ──
+    if ($migrateLines.Count -gt 0) {
+        $null = $md.AppendLine("")
+        $null = $md.AppendLine("## Migrate Workers")
+        $null = $md.AppendLine("")
+        $null = $md.AppendLine("### Latency by Component (ms)")
+        $null = $md.AppendLine("")
+        $null = $md.AppendLine("| Metric | n | avg | min | p50 | p90 | p95 | p99 | max |")
+        $null = $md.AppendLine("|--------|---|-----|-----|-----|-----|-----|-----|-----|")
+        $null = $md.AppendLine((StatsMd "B2C fetch (per batch)" ([int[]]$bB2c)))
+        $null = $md.AppendLine((StatsMd "EEID create (pure API)" ([int[]]$userApiMs)))
+        $null = $md.AppendLine((StatsMd "EEID create (total op)" ([int[]]$userMs)))
+        $null = $md.AppendLine((StatsMd "EEID max (per batch)" ([int[]]$bEeidMax)))
+        $null = $md.AppendLine((StatsMd "EEID avg (per batch)" ([int[]]$bEeidAvg)))
+        $null = $md.AppendLine((StatsMd "Wall time (b2c+eeid_max)" $wall))
+
+        if ($bB2c.Count -gt 0) {
+            $null = $md.AppendLine("")
+            $null = $md.AppendLine("### Share of Wall Time")
+            $null = $md.AppendLine("")
+            $null = $md.AppendLine("| Component | Time (s) | % of Wall |")
+            $null = $md.AppendLine("|-----------|----------|-----------|")
+            $null = $md.AppendLine(("| B2C fetch | {0:N1} | {1}% |" -f ($sumB2c/1000), [Math]::Round($sumB2c*100/$sumWall)))
+            $null = $md.AppendLine(("| EEID create | {0:N1} | {1}% |" -f ($sumEeid/1000), [Math]::Round($sumEeid*100/$sumWall)))
+            $null = $md.AppendLine(("| **Total wall** | **{0:N1}** | {1} batches |" -f ($sumWall/1000), $bB2c.Count))
+        }
+
+        if ($migrateTs.Count -ge 2) {
+            $null = $md.AppendLine("")
+            $null = $md.AppendLine("### Throughput")
+            $null = $md.AppendLine("")
+            $null = $md.AppendLine("| Metric | Value |")
+            $null = $md.AppendLine("|--------|-------|")
+            $null = $md.AppendLine("| Run start | $t0 |")
+            $null = $md.AppendLine("| Last event | $t1 |")
+            $null = $md.AppendLine(("| Elapsed | {0:N1}s |" -f $elapsed))
+            if ($elapsed -gt 0 -and $userMs.Count -gt 0) {
+                $null = $md.AppendLine(("| Users/sec | {0:N2} |" -f ($userMs.Count / $elapsed)))
+                $null = $md.AppendLine(("| Users/min | {0:N0} |" -f ($userMs.Count / $elapsed * 60)))
+            }
+        }
+
+        if ($wall.Count -gt 0) {
+            $null = $md.AppendLine("")
+            $null = $md.AppendLine("### Theoretical Max (20 users/batch)")
+            $null = $md.AppendLine("")
+            $null = $md.AppendLine("| Scenario | users/s | users/min |")
+            $null = $md.AppendLine("|----------|---------|-----------|")
+            $null = $md.AppendLine(("| At avg wall ({0}ms) | {1:N1} | {2:N0} |" -f $avgBatch, (20/$avgBatch*1000), (20/$avgBatch*60000)))
+            $null = $md.AppendLine(("| At min wall ({0}ms) | {1:N1} | {2:N0} |" -f $minBatch, (20/$minBatch*1000), (20/$minBatch*60000)))
+        }
+
+        $null = $md.AppendLine("")
+        $null = $md.AppendLine("### Tail Latency & Throttles")
+        $null = $md.AppendLine("")
+        if ($userMs.Count -gt 0) {
+            $null = $md.AppendLine(("- Slow EEID creates (>1s): $slowCount / $($userMs.Count) ({0:N1}%)" -f ($slowCount * 100.0 / $userMs.Count)))
+        }
+        $null = $md.AppendLine("- Graph.Throttled B2C: $migrateThrottledB2c")
+        $null = $md.AppendLine("- Graph.Throttled EEID: $migrateThrottledEeid")
+    }
+
+    # ── Phone Workers ──
+    if ($phoneLines.Count -gt 0) {
+        $null = $md.AppendLine("")
+        $null = $md.AppendLine("## Phone Registration Workers")
+        $null = $md.AppendLine("")
+        $null = $md.AppendLine("### Outcomes")
+        $null = $md.AppendLine("")
+        $null = $md.AppendLine("| Outcome | Count |")
+        $null = $md.AppendLine("|---------|-------|")
+        $null = $md.AppendLine("| Succeeded (phone registered) | $phSucceeded |")
+        $null = $md.AppendLine("| Skipped (no phone in B2C) | $phSkipped |")
+        $null = $md.AppendLine("| Failed (exhausted retries) | $phFailed |")
+        $null = $md.AppendLine("| **Total** | **$phTotal_n** |")
+
+        if ($phFailed -gt 0) {
+            $null = $md.AppendLine("")
+            $null = $md.AppendLine("#### Failure Breakdown")
+            $null = $md.AppendLine("")
+            $null = $md.AppendLine("| Category | Count |")
+            $null = $md.AppendLine("|----------|-------|")
+            if ($phFailedStepB2c -gt 0)  { $null = $md.AppendLine("| Step: b2c-get-phone | $phFailedStepB2c |") }
+            if ($phFailedStepEeid -gt 0) { $null = $md.AppendLine("| Step: eeid-register | $phFailedStepEeid |") }
+            foreach ($kv in $phErrCodes.GetEnumerator() | Sort-Object Value -Descending) {
+                $null = $md.AppendLine("| Error: $($kv.Key) | $($kv.Value) |")
+            }
+        }
+
+        $null = $md.AppendLine("")
+        $null = $md.AppendLine("### Latency by Phase (ms)")
+        $null = $md.AppendLine("")
+        $null = $md.AppendLine("| Metric | n | avg | min | p50 | p90 | p95 | p99 | max |")
+        $null = $md.AppendLine("|--------|---|-----|-----|-----|-----|-----|-----|-----|")
+        $null = $md.AppendLine((StatsMd "B2C GET phone (success)" ([int[]]$phB2cGet)))
+        $null = $md.AppendLine((StatsMd "B2C GET phone (all API)" ([int[]]$phB2cApiAll)))
+        $null = $md.AppendLine((StatsMd "EEID POST phone (success)" ([int[]]$phEeidPost)))
+        $null = $md.AppendLine((StatsMd "EEID POST phone (all API)" ([int[]]$phEeidApiAll)))
+        $null = $md.AppendLine((StatsMd "Total per user (success)" ([int[]]$phTotal)))
+        $null = $md.AppendLine((StatsMd "B2C GET phone (skipped)" ([int[]]$phSkipB2c)))
+
+        if ($phB2cGet.Count -gt 0 -and $phEeidPost.Count -gt 0) {
+            $null = $md.AppendLine("")
+            $null = $md.AppendLine("### Share of Phone Time")
+            $null = $md.AppendLine("")
+            $null = $md.AppendLine("| Component | Time (s) | % of API Time |")
+            $null = $md.AppendLine("|-----------|----------|---------------|")
+            $null = $md.AppendLine(("| B2C GET phone | {0:N1} | {1}% |" -f ($sumPhB2c/1000), [Math]::Round($sumPhB2c*100/$sumPhWall)))
+            $null = $md.AppendLine(("| EEID POST phone | {0:N1} | {1}% |" -f ($sumPhEeid/1000), [Math]::Round($sumPhEeid*100/$sumPhWall)))
+        }
+
+        if ($phoneTs.Count -ge 2) {
+            $null = $md.AppendLine("")
+            $null = $md.AppendLine("### Throughput")
+            $null = $md.AppendLine("")
+            $null = $md.AppendLine("| Metric | Value |")
+            $null = $md.AppendLine("|--------|-------|")
+            $null = $md.AppendLine("| Run start | $pt0 |")
+            $null = $md.AppendLine("| Last event | $pt1 |")
+            $null = $md.AppendLine(("| Elapsed | {0:N1}s |" -f $pelapsed))
+            if ($pelapsed -gt 0 -and $phTotal_n -gt 0) {
+                $null = $md.AppendLine(("| Msgs/sec | {0:N2} |" -f ($phTotal_n / $pelapsed)))
+                $null = $md.AppendLine(("| Msgs/min | {0:N1} |" -f ($phTotal_n / $pelapsed * 60)))
+            }
+            if ($pelapsed -gt 0 -and $phSucceeded -gt 0) {
+                $null = $md.AppendLine(("| Registered/min | {0:N2} |" -f ($phSucceeded / $pelapsed * 60)))
+            }
+        }
+
+        $null = $md.AppendLine("")
+        $null = $md.AppendLine("### Tail Latency & Throttles")
+        $null = $md.AppendLine("")
+        if ($phSucceeded -gt 0) {
+            $null = $md.AppendLine(("- Slow B2C GET (>1s): $slowPhB2c / $phSucceeded ({0:N1}%)" -f ($slowPhB2c * 100.0 / $phSucceeded)))
+        }
+        if ($phEeidApiAll.Count -gt 0) {
+            $null = $md.AppendLine(("- Slow EEID POST (>1s): $slowPhEeid / $($phEeidApiAll.Count) ({0:N1}%)" -f ($slowPhEeid * 100.0 / $phEeidApiAll.Count)))
+        }
+        $null = $md.AppendLine("- Graph.Throttled total: $phThrottled")
+        $null = $md.AppendLine("  - B2C: $phThrottledB2c")
+        $null = $md.AppendLine("  - EEID: $phThrottledEeid")
+    }
+
+    # ── Cross-pipeline ──
+    if ($phoneLines.Count -gt 0 -and $userMs.Count -gt 0) {
+        $null = $md.AppendLine("")
+        $null = $md.AppendLine("## Cross-Pipeline Summary")
+        $null = $md.AppendLine("")
+        $null = $md.AppendLine("| Metric | Count |")
+        $null = $md.AppendLine("|--------|-------|")
+        $null = $md.AppendLine("| Users migrated (EEID created) | $($userMs.Count) |")
+        $null = $md.AppendLine("| Phones registered | $phSucceeded |")
+        $null = $md.AppendLine("| Phones skipped | $phSkipped |")
+        $null = $md.AppendLine("| Phones failed | $phFailed |")
+        $phoneAttemptedMd = $phSucceeded + $phSkipped + $phFailed
+        if ($userMs.Count -gt 0 -and $phoneAttemptedMd -gt 0) {
+            $covPct = $phoneAttemptedMd * 100.0 / $userMs.Count
+            $null = $md.AppendLine(("| Phone pipeline coverage | {0:N1}% |" -f $covPct))
+        }
+        if ($userMs.Count -gt 0 -and $phSucceeded -gt 0) {
+            $null = $md.AppendLine(("| Users with phone registered | {0:N1}% |" -f ($phSucceeded * 100.0 / $userMs.Count)))
+        }
+    }
+
+    $null = $md.AppendLine("")
+    [System.IO.File]::WriteAllText($OutputMarkdown, $md.ToString())
+    Write-Host ""
+    Write-Host "Markdown report written to: $OutputMarkdown" -ForegroundColor Green
 }

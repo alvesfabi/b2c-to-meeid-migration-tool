@@ -32,7 +32,10 @@ public class QueueStorageClient : IQueueClient
         if (_options.UseManagedIdentity)
         {
             var credential = new DefaultAzureCredential();
-            _serviceClient = new QueueServiceClient(new Uri(_options.ConnectionStringOrUri), credential);
+            // Derive queue endpoint from configured URI (which may be a blob endpoint)
+            var uri = new Uri(_options.ConnectionStringOrUri);
+            var queueUri = new Uri(uri.Scheme + "://" + uri.Host.Replace(".blob.", ".queue.") + uri.AbsolutePath);
+            _serviceClient = new QueueServiceClient(queueUri, credential);
             _logger.LogInformation("Queue storage client initialized with Managed Identity");
         }
         else

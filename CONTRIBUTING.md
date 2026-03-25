@@ -26,8 +26,8 @@ This project is currently a **preview/sample implementation** showcasing Just-In
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/alvesfabi/B2C-Migration-Kit.git
-   cd B2C-Migration-Kit
+   git clone https://github.com/alvesfabi/b2c-to-meeid-migration-tool.git
+   cd b2c-to-meeid-migration-tool
    ```
 
 2. **Install dependencies**
@@ -39,8 +39,8 @@ This project is currently a **preview/sample implementation** showcasing Just-In
    ```bash
    cd src/B2CMigrationKit.Console
    cp appsettings.master.example.json appsettings.master.json
-   cp appsettings.worker1.example.json appsettings.worker1.json
-   cp appsettings.phone-registration.example.json appsettings.phone-registration.json
+   cp appsettings.user-worker.example.json appsettings.user-worker.json
+   cp appsettings.phone-worker.example.json appsettings.phone-worker.json
    # Edit each file with your tenant credentials
    ```
 

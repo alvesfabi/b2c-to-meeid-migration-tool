@@ -91,6 +91,14 @@ local.settings.json
 **/jit-public-key*.json
 **/jit-public-key*.jwk.json
 
+# SSH Keys
+**/b2c-mig-deploy
+**/b2c-mig-deploy.pub
+**/id_ed25519
+**/id_ed25519.pub
+**/id_rsa
+**/id_rsa.pub
+
 # Test configuration with sensitive data
 **/migrate.http
 **/tokens.json

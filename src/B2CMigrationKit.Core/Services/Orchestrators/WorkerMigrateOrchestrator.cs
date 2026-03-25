@@ -493,6 +493,14 @@ public class WorkerMigrateOrchestrator : IOrchestrator<ExecutionResult>
                 {
                     identity.IssuerAssignedId = TransformUpn(identity.IssuerAssignedId);
                 }
+                else if (!string.IsNullOrEmpty(_options.Import.UpnSuffix) &&
+                         identity.SignInType?.ToLower() == "emailaddress" &&
+                         !string.IsNullOrEmpty(identity.IssuerAssignedId))
+                {
+                    var emailAt = identity.IssuerAssignedId.IndexOf('@');
+                    if (emailAt > 0)
+                        identity.IssuerAssignedId = identity.IssuerAssignedId[..emailAt] + _options.Import.UpnSuffix + identity.IssuerAssignedId[emailAt..];
+                }
             }
         }
 
@@ -516,11 +524,12 @@ public class WorkerMigrateOrchestrator : IOrchestrator<ExecutionResult>
 
         _logger.LogInformation(
             "Config: AttrMappings={AttrCount} ExcludeFields={ExcludeCount} " +
-            "StoreB2CObjectId={StoreId} SetRequireMigration={SetMig}",
+            "StoreB2CObjectId={StoreId} SetRequireMigration={SetMig} UpnSuffix={UpnSuffix}",
             _options.Import.AttributeMappings.Count,
             _options.Import.ExcludeFields.Count,
             _options.Import.MigrationAttributes.StoreB2CObjectId,
-            _options.Import.MigrationAttributes.SetRequireMigration);
+            _options.Import.MigrationAttributes.SetRequireMigration,
+            _options.Import.UpnSuffix ?? "(none)");
     }
 
     private void ApplyAttributeMappings(UserProfile user)
@@ -570,6 +579,8 @@ public class WorkerMigrateOrchestrator : IOrchestrator<ExecutionResult>
         var local = b2cUpn[..at];
         if (string.IsNullOrEmpty(local))
             local = Guid.NewGuid().ToString("N")[..8];
+        if (!string.IsNullOrEmpty(_options.Import.UpnSuffix))
+            local += _options.Import.UpnSuffix;
         return $"{local}@{_options.ExternalId.TenantDomain}";
     }
 
@@ -581,6 +592,14 @@ public class WorkerMigrateOrchestrator : IOrchestrator<ExecutionResult>
         if (hasEmail) return;
 
         var email = string.IsNullOrEmpty(user.Mail) ? user.UserPrincipalName : user.Mail;
+
+        // Apply UpnSuffix to email identity to avoid collisions with previous migrations
+        if (!string.IsNullOrEmpty(_options.Import.UpnSuffix) && !string.IsNullOrEmpty(email))
+        {
+            var emailAt = email.IndexOf('@');
+            if (emailAt > 0)
+                email = email[..emailAt] + _options.Import.UpnSuffix + email[emailAt..];
+        }
 
         user.Identities ??= new List<ObjectIdentity>();
         user.Identities.Add(new ObjectIdentity

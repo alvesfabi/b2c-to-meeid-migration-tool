@@ -128,7 +128,7 @@ public interface IGraphClient
     /// Calls <c>GET /users/{userId}/authentication/phoneMethods/3179e48a-750b-4051-897c-87b9720928f7</c>.
     ///
     /// This endpoint belongs to the <c>authenticationMethod</c> Graph resource family,
-    /// which has a significantly lower throttle budget than the main Users API.
+    /// which has a different throttle budget than the main Users API.
     /// Call throttling is managed by the caller via <see cref="PhoneRegistrationOptions.ThrottleDelayMs"/>.
     ///
     /// Requires <c>UserAuthenticationMethod.Read.All</c> on the B2C tenant.

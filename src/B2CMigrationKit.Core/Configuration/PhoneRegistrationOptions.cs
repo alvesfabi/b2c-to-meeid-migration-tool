@@ -18,7 +18,7 @@ public class PhoneRegistrationOptions
     /// <summary>
     /// Minimum delay (ms) between processing consecutive queue messages.
     /// Each message makes one API call to B2C (GET phoneMethods) and one to EEID (POST phoneMethods).
-    /// The phoneMethods API has a significantly lower throttle budget than the main Users API.
+    /// The phoneMethods API has a different throttle budget than the main Users API.
     /// Increase this value if you observe sustained HTTP 429 responses.
     /// To increase throughput, run additional workers each with dedicated B2C and EEID app registrations.
     /// Default: 400 ms

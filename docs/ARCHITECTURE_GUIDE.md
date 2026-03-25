@@ -164,7 +164,7 @@ Queue: phone-registration
 
 Phone numbers are fetched at drain time — never stored in the queue (PII protection).
 
-> **Throttle note**: The `phoneMethods` API has a significantly lower throttle budget than the main Users API (see [Microsoft Graph throttling guidance](https://learn.microsoft.com/graph/throttling)). Default `ThrottleDelayMs` is **400 ms**. Scale by adding workers with dedicated app registration pairs.
+> **Throttle note**: The `phoneMethods` API has a differnt throttle budget than the main Users API (see [Microsoft Graph throttling guidance](https://learn.microsoft.com/graph/throttling)). Default `ThrottleDelayMs` is **400 ms**. Scale by adding workers with dedicated app registration pairs.
 
 #### Step 3 — JIT Migration (first login, Azure Function)
 

@@ -23,7 +23,7 @@ namespace B2CMigrationKit.Core.Services.Orchestrators;
 ///
 /// Throttle strategy
 /// -----------------
-/// The phoneMethods API has a significantly lower throttle budget than the main Users API.
+/// The phoneMethods API has a different throttle budget than the main Users API.
 /// GET and POST/PATCH calls count together against the same per-app budget.
 ///
 /// Each message = 1 GET (B2C tenant) + 1 POST (EEID tenant). Because B2C and EEID are

@@ -10,11 +10,10 @@
 2. [System Overview](#2-system-overview) — Architecture diagrams, Simple Mode & Advanced Mode data flows
 3. [Design Principles](#3-design-principles)
 4. [Component Architecture](#4-component-architecture)
-5. [Bulk Migration Pipeline](#5-bulk-migration-pipeline) — Simple Mode (Export/Import) + Advanced Mode (Workers)
-6. [Just-In-Time (JIT) Migration](#6-just-in-time-jit-migration)
-7. [Security Architecture](#7-security-architecture)
-8. [Scalability & Performance](#8-scalability--performance)
-9. [Deployment & Operations](#9-deployment--operations)
+5. [Just-In-Time (JIT) Migration](#5-just-in-time-jit-migration)
+6. [Security Architecture](#6-security-architecture)
+7. [Scalability & Performance](#7-scalability--performance)
+8. [Deployment & Operations](#8-deployment--operations)
 
 ---
 
@@ -164,7 +163,7 @@ Queue: phone-registration
 
 Phone numbers are fetched at drain time — never stored in the queue (PII protection).
 
-> **Throttle note**: The `phoneMethods` API has a differnt throttle budget than the main Users API (see [Microsoft Graph throttling guidance](https://learn.microsoft.com/graph/throttling)). Default `ThrottleDelayMs` is **400 ms**. Scale by adding workers with dedicated app registration pairs.
+> **Throttle note**: The `phoneMethods` API has a different throttle budget than the main Users API (see [Microsoft Graph throttling guidance](https://learn.microsoft.com/graph/throttling)). Default `ThrottleDelayMs` is **400 ms**. Scale by adding workers with dedicated app registration pairs.
 
 #### Step 3 — JIT Migration (first login, Azure Function)
 
@@ -302,67 +301,7 @@ public class WorkerMigrateOrchestrator : IOrchestrator
 
 ---
 
-## 5. Bulk Migration Pipeline
-
-### 5.0 Simple Mode — Export
-
-Pages B2C users with configurable `$select` fields, writes each page as a local JSON file. Supports optional `FilterPattern` for client-side filtering by `displayName`/`userPrincipalName`.
-
-- **Permissions**: B2C `User.Read.All` (Application)
-- **Config**: `Export.SelectFields`, `Export.FilterPattern`, `PageSize` (default: 999)
-- **Output**: Local JSON files (`exports/page-{N}.json`)
-
-### 5.0b Simple Mode — Import
-
-Reads exported local JSON files sequentially, transforms user profiles (UPN domain rewrite, extension attribute mapping, email identity, random password + `RequiresMigration` JIT flag), creates users in EEID. Audit results written to local JSONL files by default (`AuditMode="File"`); optionally to Azure Table Storage (`AuditMode="Table"`).
-
-- **Permissions**: EEID `User.ReadWrite.All` (Application)
-- **Config**: `Import.ExtensionAttributes` (source → target attribute mapping)
-- **Idempotency**: 409 Conflict = duplicate, skipped gracefully
-
-### 5.1 Advanced Mode — Harvest
-
-Pages B2C with `$select=id` (~10× cheaper than full profile fetch), splits into batches of `IdsPerMessage` (default: 20), enqueues to `user-ids-to-process`. Single instance, exits on completion.
-
-- **Permissions**: B2C `User.Read.All` (Application) — read-only, no EEID access needed
-- **Config**: `HarvestOptions.PageSize` (default: 999), `HarvestOptions.IdsPerMessage` (default: 20)
-
-### 5.2 Advanced Mode — Worker Migrate
-
-Consumes harvest queue, fetches full profiles via `$batch`, transforms and creates users in EEID, enqueues phone tasks. Replaces the old three-step blob pipeline.
-
-**Per-message flow**: Dequeue (20 IDs) → `$batch` fetch from B2C → Transform (UPN, attrs, email identity, random password) → `POST /users` to EEID → Audit → Enqueue phone task → Delete message.
-
-**Audit trail** (local JSONL by default; optional Azure Table `migration-audit` when `AuditMode="Table"`):
-
-| Field | Description |
-|---|---|
-| `PartitionKey` | Date `yyyyMMdd` |
-| `RowKey` | `migrate_{B2CObjectId}` |
-| `Status` | `Created` / `Duplicate` / `Failed` |
-| `ErrorCode` | HTTP status or exception type |
-| `ErrorMessage` | Truncated to 4 KB |
-| `DurationMs` | API call duration |
-
-**Permissions**: B2C `User.Read.All`, EEID `User.ReadWrite.All` (both Application).
-
-### 5.3 Advanced Mode — Phone Registration
-
-Registers MFA phone numbers in EEID so users confirm (not re-register) on first JIT login. 
-
-Queue messages contain only `{ B2CUserId, EEIDUpn }` — phone numbers are fetched at drain time (PII never persisted in queue).
-
-| Setting | Default | Purpose |
-|---|---|---|
-| `ThrottleDelayMs` | 400 ms | Rate control — increase if sustained 429s |
-| `MessageVisibilityTimeoutSeconds` | 120 s | Retry delay on failure |
-| `MaxEmptyPolls` | 3 | Exit after N consecutive empty polls |
-
-**Permissions**: B2C `UserAuthenticationMethod.Read.All`, EEID `UserAuthenticationMethod.ReadWrite.All` (both Application).
-
----
-
-## 6. Just-In-Time (JIT) Migration
+## 5. Just-In-Time (JIT) Migration
 
 ### Overview
 
@@ -395,7 +334,7 @@ JIT:     user@externalid.com → user@b2c.com  (reverse using same local part)
 
 ---
 
-## 7. Security Architecture
+## 6. Security Architecture
 
 > **⚠️ STATUS**: v1.0 includes TLS 1.2+, client secret auth, no secrets in code. 
 
@@ -429,7 +368,7 @@ JIT:     user@externalid.com → user@b2c.com  (reverse using same local part)
 
 ---
 
-## 8. Scalability & Performance
+## 7. Scalability & Performance
 
 ### Throughput Model
 
@@ -438,28 +377,11 @@ Migration throughput scales along two axes:
 | Axis | Mechanism | Effect |
 |------|-----------|--------|
 | **More worker pairs** | Add worker-migrate + phone-registration instances with dedicated app registrations | Linear throughput increase (each pair gets its own Graph API throttle budget) |
-| **Higher concurrency** | Increase `MaxConcurrency` within a worker (default: 1, sweet spot: 8) | Sub-linear gains; beyond ~8, latency spikes without throughput improvement |
-
-### Benchmarks (Simple Mode)
-
-| Tenant Size | Duration | Notes |
-|-------------|----------|-------|
-| 1K users | ~2 min | Single process, export + import |
-| 50K users | ~30 min | Single process |
-| 500K users | ~5 hours | Single process; consider Advanced Mode above this |
-
-### Benchmarks (Advanced Mode)
-
-| Workers | MaxConcurrency | Throughput | Notes |
-|---------|---------------|------------|-------|
-| 1 | 1 | ~3 users/sec | Baseline |
-| 1 | 8 | ~15 users/sec | Sweet spot per instance |
-| 4 | 8 | ~55 users/sec | Near-linear scaling |
-| 8 | 8 | ~100 users/sec | Recommended max without dedicated IPs |
+| **Higher concurrency** | Increase `MaxConcurrency` within a worker | Sub-linear gains; tune based on observed telemetry |
 
 ### Phone Registration Throughput
 
-The `phoneMethods` API has a significantly lower throttle budget than the main Users API. Each phone-registration worker with a dedicated app registration adds its own quota. Scale by adding more phone-worker VMs. See [Microsoft Graph throttling guidance](https://learn.microsoft.com/graph/throttling) for current limits.
+The `phoneMethods` API has a different throttle budget than the main Users API. Each phone-registration worker with a dedicated app registration adds its own quota. Scale by adding more phone-worker VMs. See [Microsoft Graph throttling guidance](https://learn.microsoft.com/graph/throttling) for current limits.
 
 ### Rate Limiting Strategy
 
@@ -469,7 +391,7 @@ The `phoneMethods` API has a significantly lower throttle budget than the main U
 
 ---
 
-## 9. Deployment & Operations
+## 8. Deployment & Operations
 
 ### Development Environment
 
@@ -539,12 +461,4 @@ No App Insights dependency. Workers use two telemetry channels:
 
 Query audit records via Azure Storage Explorer or `az storage entity query`.
 
-### Cost Estimate
 
-| Resource | Running | Stopped |
-|----------|---------|---------|
-| 5× Standard_B2s VMs | ~$5/day | $0 (deallocated) |
-| Bastion Standard | ~$5/day | $0 (stopped) |
-| NAT Gateway | ~$1/day | $0 (deleted) |
-| Storage | ~$0.50/day | ~$0.50/day |
-| **Total** | **~$11.50/day** | **~$0.50/day** |

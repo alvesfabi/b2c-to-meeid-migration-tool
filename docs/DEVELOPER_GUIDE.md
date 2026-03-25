@@ -327,6 +327,68 @@ dotnet build              # all projects
 dotnet build -c Release   # release build
 ```
 
+## Bulk Migration Pipeline Reference
+
+Detailed technical reference for each pipeline step — permissions, configuration, and audit fields.
+
+### Simple Mode — Export
+
+Pages B2C users with configurable `$select` fields, writes each page as a local JSON file. Supports optional `FilterPattern` for client-side filtering by `displayName`/`userPrincipalName`.
+
+- **Permissions**: B2C `User.Read.All` (Application)
+- **Config**: `Export.SelectFields`, `Export.FilterPattern`, `PageSize` (default: 999)
+- **Output**: Local JSON files (`exports/page-{N}.json`)
+
+### Simple Mode — Import
+
+Reads exported local JSON files sequentially, transforms user profiles (UPN domain rewrite, extension attribute mapping, email identity, random password + `RequiresMigration` JIT flag), creates users in EEID. Audit results written to local JSONL files by default (`AuditMode="File"`); optionally to Azure Table Storage (`AuditMode="Table"`).
+
+- **Permissions**: EEID `User.ReadWrite.All` (Application)
+- **Config**: `Import.ExtensionAttributes` (source → target attribute mapping)
+- **Idempotency**: 409 Conflict = duplicate, skipped gracefully
+
+### Advanced Mode — Harvest
+
+Pages B2C with `$select=id` (~10× cheaper than full profile fetch), splits into batches of `IdsPerMessage` (default: 20), enqueues to `user-ids-to-process`. Single instance, exits on completion.
+
+- **Permissions**: B2C `User.Read.All` (Application) — read-only, no EEID access needed
+- **Config**: `HarvestOptions.PageSize` (default: 999), `HarvestOptions.IdsPerMessage` (default: 20)
+
+### Advanced Mode — Worker Migrate
+
+Consumes harvest queue, fetches full profiles via `$batch`, transforms and creates users in EEID, enqueues phone tasks.
+
+**Per-message flow**: Dequeue (20 IDs) → `$batch` fetch from B2C → Transform (UPN, attrs, email identity, random password) → `POST /users` to EEID → Audit → Enqueue phone task → Delete message.
+
+**Audit trail** (local JSONL by default; optional Azure Table `migration-audit` when `AuditMode="Table"`):
+
+| Field | Description |
+|---|---|
+| `PartitionKey` | Date `yyyyMMdd` |
+| `RowKey` | `migrate_{B2CObjectId}` |
+| `Status` | `Created` / `Duplicate` / `Failed` |
+| `ErrorCode` | HTTP status or exception type |
+| `ErrorMessage` | Truncated to 4 KB |
+| `DurationMs` | API call duration |
+
+**Permissions**: B2C `User.Read.All`, EEID `User.ReadWrite.All` (both Application).
+
+### Advanced Mode — Phone Registration
+
+Registers MFA phone numbers in EEID so users confirm (not re-register) on first JIT login.
+
+Queue messages contain only `{ B2CUserId, EEIDUpn }` — phone numbers are fetched at drain time (PII never persisted in queue).
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `ThrottleDelayMs` | 400 ms | Rate control — increase if sustained 429s |
+| `MessageVisibilityTimeoutSeconds` | 120 s | Retry delay on failure |
+| `MaxEmptyPolls` | 3 | Exit after N consecutive empty polls |
+
+**Permissions**: B2C `UserAuthenticationMethod.Read.All`, EEID `UserAuthenticationMethod.ReadWrite.All` (both Application).
+
+---
+
 ## JIT Migration Implementation
 
 ⏱️ **Quick Start**: ~15 minutes to set up local testing environment

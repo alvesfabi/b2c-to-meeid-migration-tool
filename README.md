@@ -122,7 +122,7 @@ graph LR
 
 ## ⚡ Quick Start
 
-Want to try it locally in 5 minutes? See **[QUICKSTART.md](QUICKSTART.md)** — local dev setup with Azurite, Simple Mode, and 20 test users.
+Want to get started? See the **[Runbook](docs/RUNBOOK.md)** for step-by-step setup and deployment instructions.
 
 ## 📚 Documentation
 

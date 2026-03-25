@@ -140,7 +140,7 @@ Low-level script that runs **on the VM** to clone the repository and build the a
 bash /opt/b2c-migration/repo/scripts/Setup-Worker.sh
 
 # Specific branch
-bash /opt/b2c-migration/repo/scripts/Setup-Worker.sh azure-test-2
+bash /opt/b2c-migration/repo/scripts/Setup-Worker.sh my-branch
 ```
 
 | Argument | Default | Description |

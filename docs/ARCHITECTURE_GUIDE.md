@@ -164,7 +164,7 @@ Queue: phone-registration
 
 Phone numbers are fetched at drain time — never stored in the queue (PII protection).
 
-> **Throttle note**: `phoneMethods` API is throttled at **30 requests / 10 seconds per app registration** (~3 RPS). Default `ThrottleDelayMs` is **400 ms**. Scale by adding workers with dedicated app registration pairs.
+> **Throttle note**: The `phoneMethods` API has a significantly lower throttle budget than the main Users API (see [Microsoft Graph throttling guidance](https://learn.microsoft.com/graph/throttling)). Default `ThrottleDelayMs` is **400 ms**. Scale by adding workers with dedicated app registration pairs.
 
 #### Step 3 — JIT Migration (first login, Azure Function)
 
@@ -226,7 +226,7 @@ All workers emit structured JSONL telemetry to local files (`worker{N}-telemetry
 Throughput scales along two axes:
 
 1. **More worker pairs** — each pair consists of one worker-migrate instance + one phone-registration instance, with **dedicated app registration pairs** (B2C + EEID) and **per-pair queues** for phone registration (e.g., `phone-reg-w1`, `phone-reg-w2`). This multiplies the API throttle budget linearly.
-2. **More concurrency within a worker** — increase `MaxConcurrency` (default 1, sweet spot 8). Beyond ~8 threads per app registration, latency spikes without throughput gains.
+2. **More concurrency within a worker** — increase `MaxConcurrency` (default 1). Beyond a certain threshold per app registration, latency spikes without throughput gains — tune based on your observed telemetry.
 
 ### Per-Worker Queue Pairing
 
@@ -459,7 +459,7 @@ Migration throughput scales along two axes:
 
 ### Phone Registration Throughput
 
-The `phoneMethods` API is rate-limited at **30 requests / 10 seconds per app registration** (~3 RPS). Each phone-registration worker with a dedicated app registration adds ~3 RPS. With 2 phone-workers: ~6 RPS → ~500K phones in ~24 hours. Scale by adding more phone-worker VMs.
+The `phoneMethods` API has a significantly lower throttle budget than the main Users API. Each phone-registration worker with a dedicated app registration adds its own quota. Scale by adding more phone-worker VMs. See [Microsoft Graph throttling guidance](https://learn.microsoft.com/graph/throttling) for current limits.
 
 ### Rate Limiting Strategy
 

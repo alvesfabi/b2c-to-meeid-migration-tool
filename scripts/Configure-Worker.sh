@@ -7,6 +7,7 @@
 #   bash Configure-Worker.sh --role master             # harvest (B2C only)
 #   bash Configure-Worker.sh --role user-worker        # worker-migrate (B2C + EEID)
 #   bash Configure-Worker.sh --role phone-worker       # phone-registration (B2C + EEID auth methods)
+#   bash Configure-Worker.sh --config-file /path/to/appsettings.json   # copy pre-built config (non-interactive)
 #
 # The script asks for credentials one by one and writes the config
 # to the console app directory. Much easier than editing with nano.
@@ -14,7 +15,7 @@
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/b2c-migration/app}"
-CONFIG_FILE="$APP_DIR/appsettings.json"
+CONFIG_FILE_TARGET="$APP_DIR/appsettings.json"
 
 # ───────────────────────────────────────────
 # Helpers
@@ -91,13 +92,43 @@ prompt_optional() {
 # ───────────────────────────────────────────
 ROLE=""
 WORKER_ID=""
+CONFIG_FILE=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --role) ROLE="$2"; shift 2 ;;
         --worker-id) WORKER_ID="$2"; shift 2 ;;
+        --config-file) CONFIG_FILE="$2"; shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
+
+# ───────────────────────────────────────────
+# Fast path: --config-file (non-interactive)
+# ───────────────────────────────────────────
+if [ -n "$CONFIG_FILE" ]; then
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "Error: config file not found: $CONFIG_FILE" >&2
+        exit 1
+    fi
+    cp "$CONFIG_FILE" "$CONFIG_FILE_TARGET"
+    chmod 600 "$CONFIG_FILE_TARGET"
+    echo ""
+    echo -e "${color_green}✓ Config copied from: ${CONFIG_FILE}${color_reset}"
+    echo -e "  Target: ${CONFIG_FILE_TARGET}"
+    echo -e "  Permissions set to 600 (owner-only)."
+    echo ""
+    echo -e "${color_green}── Running validate ──${color_reset}"
+    echo ""
+    cd "$APP_DIR"
+    if ./B2CMigrationKit.Console validate --config appsettings.json; then
+        echo ""
+        echo -e "${color_green}✓ All checks passed!${color_reset}"
+    else
+        echo ""
+        echo -e "${color_yellow}⚠ Some checks failed. Review output above.${color_reset}"
+    fi
+    exit 0
+fi
 
 # ───────────────────────────────────────────
 # Banner
@@ -242,7 +273,7 @@ B2C_SECRET_ESC=$(escape_json "$B2C_CLIENT_SECRET")
 
 if [ "$ROLE" = "master" ]; then
     # Master (harvest) — B2C only, no EEID needed
-    cat > "$CONFIG_FILE" <<JSONEOF
+    cat > "$CONFIG_FILE_TARGET" <<JSONEOF
 {
   "Logging": {
     "LogLevel": {
@@ -329,7 +360,7 @@ else
         AUDIT_FILE="migration-audit-phone-worker${WORKER_ID}.jsonl"
     fi
 
-    cat > "$CONFIG_FILE" <<JSONEOF
+    cat > "$CONFIG_FILE_TARGET" <<JSONEOF
 {
   "Logging": {
     "LogLevel": {
@@ -426,10 +457,10 @@ $([ -n "$UPN_SUFFIX" ] && echo "      \"UpnSuffix\": \"$UPN_SUFFIX\"" || echo -n
 JSONEOF
 fi
 
-chmod 600 "$CONFIG_FILE"
+chmod 600 "$CONFIG_FILE_TARGET"
 
 echo ""
-echo -e "${color_green}✓ Config written to: ${CONFIG_FILE}${color_reset}"
+echo -e "${color_green}✓ Config written to: ${CONFIG_FILE_TARGET}${color_reset}"
 echo -e "  File permissions set to 600 (owner-only read/write)."
 echo ""
 
@@ -445,7 +476,7 @@ if ./B2CMigrationKit.Console validate --config appsettings.json; then
 else
     echo ""
     echo -e "${color_yellow}⚠ Some checks failed. Review the output above and fix your config.${color_reset}"
-    echo "  To edit:   nano $CONFIG_FILE"
+    echo "  To edit:   nano $CONFIG_FILE_TARGET"
     echo "  To re-run: ./B2CMigrationKit.Console validate --config appsettings.json"
 fi
 

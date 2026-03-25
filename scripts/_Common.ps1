@@ -574,7 +574,297 @@ function Ensure-ExtensionProperties {
     }
 }
 
-# Build the JSON content for appsettings.workerN.json
+# ─── Azure deployment config generators ────────────────────────────────────────
+# These generate role-specific appsettings for Azure VMs (managed identity storage).
+
+function New-MasterConfigContent {
+    param(
+        [string]$B2cTenantId,
+        [string]$B2cTenantDomain,
+        [string]$B2cClientId,
+        [string]$B2cClientSecret,
+        [string]$StorageAccountName
+    )
+    $storageUri = "https://${StorageAccountName}.blob.core.windows.net"
+    return @"
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft": "Warning"
+    }
+  },
+  "Migration": {
+    "B2C": {
+      "TenantId": "$B2cTenantId",
+      "TenantDomain": "$B2cTenantDomain",
+      "AppRegistration": {
+        "ClientId": "$B2cClientId",
+        "ClientSecret": "$B2cClientSecret",
+        "Name": "B2C App Registration (Master)",
+        "Enabled": true
+      },
+      "Scopes": ["https://graph.microsoft.com/.default"]
+    },
+    "ExternalId": {
+      "TenantId": "",
+      "TenantDomain": "",
+      "ExtensionAppId": "",
+      "AppRegistration": {
+        "ClientId": "",
+        "ClientSecret": "",
+        "Name": "Not used by harvest",
+        "Enabled": false
+      },
+      "Scopes": ["https://graph.microsoft.com/.default"]
+    },
+    "Storage": {
+      "ConnectionStringOrUri": "$storageUri",
+      "ExportContainerName": "user-exports",
+      "ErrorContainerName": "migration-errors",
+      "ImportAuditContainerName": "import-audit",
+      "ExportBlobPrefix": "users_",
+      "AuditTableName": "migrationAudit",
+      "AuditMode": "File",
+      "AuditFilePath": "migration-audit-master.jsonl",
+      "UseManagedIdentity": true
+    },
+    "Telemetry": {
+      "ConnectionString": "",
+      "Enabled": true,
+      "UseApplicationInsights": false,
+      "UseConsoleLogging": true,
+      "SamplingPercentage": 100.0,
+      "TrackDependencies": true,
+      "TrackExceptions": true,
+      "LogFilePath": "master-telemetry.jsonl"
+    },
+    "Retry": {
+      "MaxRetries": 5,
+      "InitialDelayMs": 1000,
+      "MaxDelayMs": 30000,
+      "BackoffMultiplier": 2.0,
+      "UseRetryAfterHeader": true,
+      "OperationTimeoutSeconds": 120
+    },
+    "Export": {
+      "SelectFields": "id,userPrincipalName,displayName,givenName,surname,mail,mobilePhone,identities"
+    },
+    "Harvest": {
+      "QueueName": "user-ids-to-process",
+      "IdsPerMessage": 20,
+      "PageSize": 999,
+      "MessageVisibilityTimeout": "00:05:00",
+      "MaxUsers": 0
+    },
+    "BatchDelayMs": 0,
+    "MaxConcurrency": 8
+  }
+}
+"@
+}
+
+function New-UserWorkerConfigContent {
+    param(
+        [int]   $WorkerN,
+        [string]$B2cTenantId,
+        [string]$B2cTenantDomain,
+        [string]$B2cClientId,
+        [string]$B2cClientSecret,
+        [string]$EeidTenantId,
+        [string]$EeidTenantDomain,
+        [string]$ExtAppId,
+        [string]$EeidClientId,
+        [string]$EeidClientSecret,
+        [string]$StorageAccountName,
+        [string]$UpnSuffix = ""
+    )
+    $storageUri = "https://${StorageAccountName}.blob.core.windows.net"
+    $upnSuffixJson = if ($UpnSuffix) { ",`n      `"UpnSuffix`": `"$UpnSuffix`"" } else { "" }
+    return @"
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft": "Warning"
+    }
+  },
+  "Migration": {
+    "B2C": {
+      "TenantId": "$B2cTenantId",
+      "TenantDomain": "$B2cTenantDomain",
+      "AppRegistration": {
+        "ClientId": "$B2cClientId",
+        "ClientSecret": "$B2cClientSecret",
+        "Name": "B2C App Registration (User Worker $WorkerN)",
+        "Enabled": true
+      },
+      "Scopes": ["https://graph.microsoft.com/.default"]
+    },
+    "ExternalId": {
+      "TenantId": "$EeidTenantId",
+      "TenantDomain": "$EeidTenantDomain",
+      "ExtensionAppId": "$ExtAppId",
+      "AppRegistration": {
+        "ClientId": "$EeidClientId",
+        "ClientSecret": "$EeidClientSecret",
+        "Name": "EEID App Registration (User Worker $WorkerN)",
+        "Enabled": true
+      },
+      "Scopes": ["https://graph.microsoft.com/.default"]
+    },
+    "Storage": {
+      "ConnectionStringOrUri": "$storageUri",
+      "ExportContainerName": "user-exports",
+      "ErrorContainerName": "migration-errors",
+      "ImportAuditContainerName": "import-audit",
+      "ExportBlobPrefix": "users_",
+      "AuditTableName": "migrationAudit",
+      "AuditMode": "File",
+      "AuditFilePath": "migration-audit-user-worker${WorkerN}.jsonl",
+      "UseManagedIdentity": true
+    },
+    "Telemetry": {
+      "ConnectionString": "",
+      "Enabled": true,
+      "UseApplicationInsights": false,
+      "UseConsoleLogging": true,
+      "SamplingPercentage": 100.0,
+      "TrackDependencies": true,
+      "TrackExceptions": true,
+      "LogFilePath": "user-worker${WorkerN}-telemetry.jsonl"
+    },
+    "Retry": {
+      "MaxRetries": 5,
+      "InitialDelayMs": 1000,
+      "MaxDelayMs": 30000,
+      "BackoffMultiplier": 2.0,
+      "UseRetryAfterHeader": true,
+      "OperationTimeoutSeconds": 120
+    },
+    "Export": {
+      "SelectFields": "id,userPrincipalName,displayName,givenName,surname,mail,mobilePhone,identities"
+    },
+    "Harvest": {
+      "QueueName": "user-ids-to-process",
+      "IdsPerMessage": 20,
+      "PageSize": 999,
+      "MessageVisibilityTimeout": "00:05:00",
+      "MaxUsers": 0
+    },
+    "Import": {
+      "AttributeMappings": {},
+      "ExcludeFields": ["createdDateTime", "lastPasswordChangeDateTime"],
+      "MigrationAttributes": {
+        "StoreB2CObjectId": true,
+        "SetRequireMigration": true,
+        "OverwriteExtensionAttributes": false
+      },
+      "SkipPhoneRegistration": false$upnSuffixJson
+    },
+    "PhoneRegistration": {
+      "QueueName": "phone-registration",
+      "ThrottleDelayMs": 400,
+      "MessageVisibilityTimeoutSeconds": 120,
+      "EmptyQueuePollDelayMs": 5000,
+      "MaxEmptyPolls": 3,
+      "UseFakePhoneWhenMissing": false
+    },
+    "BatchDelayMs": 0,
+    "MaxConcurrency": 8
+  }
+}
+"@
+}
+
+function New-PhoneWorkerConfigContent {
+    param(
+        [int]   $WorkerN,
+        [string]$B2cTenantId,
+        [string]$B2cTenantDomain,
+        [string]$B2cClientId,
+        [string]$B2cClientSecret,
+        [string]$EeidTenantId,
+        [string]$EeidTenantDomain,
+        [string]$ExtAppId,
+        [string]$EeidClientId,
+        [string]$EeidClientSecret,
+        [string]$StorageAccountName
+    )
+    $storageUri = "https://${StorageAccountName}.blob.core.windows.net"
+    return @"
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft": "Warning"
+    }
+  },
+  "Migration": {
+    "B2C": {
+      "TenantId": "$B2cTenantId",
+      "TenantDomain": "$B2cTenantDomain",
+      "AppRegistration": {
+        "ClientId": "$B2cClientId",
+        "ClientSecret": "$B2cClientSecret",
+        "Name": "B2C App Registration (Phone Worker $WorkerN)",
+        "Enabled": true
+      },
+      "Scopes": ["https://graph.microsoft.com/.default"]
+    },
+    "ExternalId": {
+      "TenantId": "$EeidTenantId",
+      "TenantDomain": "$EeidTenantDomain",
+      "ExtensionAppId": "$ExtAppId",
+      "AppRegistration": {
+        "ClientId": "$EeidClientId",
+        "ClientSecret": "$EeidClientSecret",
+        "Name": "EEID App Registration (Phone Worker $WorkerN)",
+        "Enabled": true
+      },
+      "Scopes": ["https://graph.microsoft.com/.default"]
+    },
+    "Storage": {
+      "ConnectionStringOrUri": "$storageUri",
+      "AuditTableName": "migrationAudit",
+      "AuditMode": "File",
+      "AuditFilePath": "migration-audit-phone-worker${WorkerN}.jsonl",
+      "UseManagedIdentity": true
+    },
+    "Telemetry": {
+      "ConnectionString": "",
+      "Enabled": true,
+      "UseApplicationInsights": false,
+      "UseConsoleLogging": true,
+      "SamplingPercentage": 100.0,
+      "TrackDependencies": true,
+      "TrackExceptions": true,
+      "LogFilePath": "phone-worker${WorkerN}-telemetry.jsonl"
+    },
+    "Retry": {
+      "MaxRetries": 5,
+      "InitialDelayMs": 1000,
+      "MaxDelayMs": 30000,
+      "BackoffMultiplier": 2.0,
+      "UseRetryAfterHeader": true,
+      "OperationTimeoutSeconds": 120
+    },
+    "PhoneRegistration": {
+      "QueueName": "phone-registration",
+      "ThrottleDelayMs": 400,
+      "MessageVisibilityTimeoutSeconds": 120,
+      "EmptyQueuePollDelayMs": 5000,
+      "MaxEmptyPolls": 3,
+      "UseFakePhoneWhenMissing": false
+    },
+    "BatchDelayMs": 0,
+    "MaxConcurrency": 8
+  }
+}
+"@
+}
+
+# Build the JSON content for appsettings.workerN.json (local dev mode)
 function New-WorkerAppSettingsContent {
     param(
         [int]   $WorkerN,

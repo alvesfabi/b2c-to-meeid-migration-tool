@@ -58,9 +58,28 @@
     # Only ensure extension properties (skip all app creation, rewrite configs)
     .\Initialize-MigrationEnvironment.ps1 -StartWorker 1 -EndWorker 3 -SkipB2C -SkipEEID -Force
 
+.PARAMETER MasterCount
+    Number of master workers (Azure mode).  When any role count > 0, Azure mode is used.
+
+.PARAMETER UserWorkerCount
+    Number of user-migrate workers (Azure mode).
+
+.PARAMETER PhoneWorkerCount
+    Number of phone-registration workers (Azure mode).
+
+.PARAMETER StorageAccountName
+    Azure storage account name (Azure mode).  Required when using role counts.
+
+.PARAMETER UpnSuffix
+    UPN suffix for user-worker Import config (e.g. '-test2').
+
 .EXAMPLE
     # Preview everything without touching Azure
     .\Initialize-MigrationEnvironment.ps1 -WhatIf
+
+.EXAMPLE
+    # Azure mode: 1 master + 3 user workers + 10 phone workers
+    .\Initialize-MigrationEnvironment.ps1 -MasterCount 1 -UserWorkerCount 3 -PhoneWorkerCount 10 -StorageAccountName stb2cmig123 -Force
 #>
 
 param(
@@ -87,6 +106,24 @@ param(
 
     [Parameter(Mandatory = $false)]
     [switch]$SkipEEID,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(0, 10)]
+    [int]$MasterCount = 0,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(0, 20)]
+    [int]$UserWorkerCount = 0,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(0, 50)]
+    [int]$PhoneWorkerCount = 0,
+
+    [Parameter(Mandatory = $false)]
+    [string]$StorageAccountName = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$UpnSuffix = "",
 
     [Parameter(Mandatory = $false)]
     [switch]$WhatIf
@@ -136,12 +173,29 @@ foreach ($field in @("b2cTenantId","b2cTenantDomain","eeidTenantId","eeidTenantD
 }
 
 # ─── Header ────────────────────────────────────────────────────────────────────
+$azureMode = ($MasterCount + $UserWorkerCount + $PhoneWorkerCount) -gt 0
+
 Write-Host ""
 Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host "  B2C Migration Kit – Initialize Migration Environment"       -ForegroundColor Cyan
 Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host ""
-Write-Info "Workers to provision : $StartWorker – $EndWorker ($($EndWorker - $StartWorker + 1) worker(s))"
+
+if ($azureMode) {
+    if ([string]::IsNullOrWhiteSpace($StorageAccountName) -and -not $WhatIf) {
+        Write-Err "-StorageAccountName is required in Azure mode (when using role counts)"
+        exit 1
+    }
+    Write-Info "Mode                 : Azure deployment"
+    Write-Info "Masters              : $MasterCount"
+    Write-Info "User Workers         : $UserWorkerCount"
+    Write-Info "Phone Workers        : $PhoneWorkerCount"
+    Write-Info "Storage Account      : $StorageAccountName"
+    if ($UpnSuffix) { Write-Info "UPN Suffix           : $UpnSuffix" }
+} else {
+    Write-Info "Mode                 : Local development"
+    Write-Info "Workers to provision : $StartWorker – $EndWorker ($($EndWorker - $StartWorker + 1) worker(s))"
+}
 if ($SkipB2C)  { Write-Warn "SkipB2C  : B2C app creation will be skipped (using credentials from config)" }
 if ($SkipEEID) { Write-Warn "SkipEEID : EEID app creation will be skipped (using credentials from config)" }
 Write-Info "B2C tenant           : $b2cTenantDomain  ($b2cTenantId)"
@@ -181,13 +235,43 @@ if ($SkipEEID -and (-not $WhatIf)) {
 
 # ─── Check for already-existing output files (before authenticating) ───────────
 $workersToProvision = @()
-foreach ($n in $StartWorker..$EndWorker) {
-    $outFile = Join-Path $consoleAppDir "appsettings.worker$n.json"
-    if ((Test-Path $outFile) -and -not $Force -and -not $WhatIf) {
-        Write-Warn "Worker $n`: appsettings.worker$n.json already exists — skipping. Use -Force to overwrite."
+
+if ($azureMode) {
+    # Azure mode: check role-specific config files
+    $azureOutputDir = Join-Path $consoleAppDir "azure-configs"
+    if (-not (Test-Path $azureOutputDir)) { New-Item -ItemType Directory -Path $azureOutputDir -Force | Out-Null }
+
+    # Build provisioning list: (role, number, filename)
+    $azureWorkers = @()
+    for ($m = 1; $m -le $MasterCount; $m++) {
+        $azureWorkers += @{ Role = 'master'; N = $m; File = "appsettings.master.json" }
     }
-    else {
-        $workersToProvision += $n
+    for ($u = 1; $u -le $UserWorkerCount; $u++) {
+        $azureWorkers += @{ Role = 'user-worker'; N = $u; File = "appsettings.user-worker$u.json" }
+    }
+    for ($p = 1; $p -le $PhoneWorkerCount; $p++) {
+        $azureWorkers += @{ Role = 'phone-worker'; N = $p; File = "appsettings.phone-worker$p.json" }
+    }
+
+    foreach ($w in $azureWorkers) {
+        $outFile = Join-Path $azureOutputDir $w.File
+        if ((Test-Path $outFile) -and -not $Force -and -not $WhatIf) {
+            Write-Warn "$($w.Role) $($w.N): $($w.File) already exists — skipping. Use -Force to overwrite."
+        }
+        else {
+            $workersToProvision += $w
+        }
+    }
+} else {
+    # Legacy local-dev mode
+    foreach ($n in $StartWorker..$EndWorker) {
+        $outFile = Join-Path $consoleAppDir "appsettings.worker$n.json"
+        if ((Test-Path $outFile) -and -not $Force -and -not $WhatIf) {
+            Write-Warn "Worker $n`: appsettings.worker$n.json already exists — skipping. Use -Force to overwrite."
+        }
+        else {
+            $workersToProvision += $n
+        }
     }
 }
 
@@ -196,7 +280,12 @@ if ($workersToProvision.Count -eq 0) {
     exit 0
 }
 
-Write-Info "Will provision: workers $($workersToProvision -join ', ')"
+if ($azureMode) {
+    $roleList = ($workersToProvision | ForEach-Object { "$($_.Role) $($_.N)" }) -join ', '
+    Write-Info "Will provision: $roleList"
+} else {
+    Write-Info "Will provision: workers $($workersToProvision -join ', ')"
+}
 Write-Host ""
 
 # Functions Get-DeviceCodeToken, Invoke-Graph, Get-GraphSpId, New-WorkerApp,
@@ -265,7 +354,125 @@ else {
 # ─── Provision workers ─────────────────────────────────────────────────────────
 $results = @()
 
-foreach ($n in $workersToProvision) {
+if ($azureMode) {
+    # ═══ Azure mode: create role-specific apps + configs ═══
+    foreach ($w in $workersToProvision) {
+        $role = $w.Role
+        $n    = $w.N
+        $file = $w.File
+
+        Write-Host ""
+        Write-Host "───────────────────────────────────────────────────────────────" -ForegroundColor Cyan
+        Write-Host "  $role $n" -ForegroundColor Cyan
+        Write-Host "───────────────────────────────────────────────────────────────" -ForegroundColor Cyan
+
+        $appLabel = "$role $n"
+        $b2cAppName  = "B2C App Registration ($appLabel)"
+        $eeidAppName = "EEID App Registration ($appLabel)"
+        $needsEeid   = $role -ne 'master'
+
+        if ($WhatIf) {
+            Write-Warn "  [WhatIf] Would create '$b2cAppName' in B2C"
+            if ($needsEeid) { Write-Warn "  [WhatIf] Would create '$eeidAppName' in External ID" }
+            Write-Warn "  [WhatIf] Would write $file"
+            $results += [pscustomobject]@{ Label = $appLabel; B2cClientId = "WhatIf"; EeidClientId = "WhatIf"; File = $file; Skipped = $false }
+            continue
+        }
+
+        try {
+            # B2C app registration
+            if ($SkipB2C) {
+                Write-Info "  [B2C] Skipped – using provided credentials"
+                $b2cApp = @{ ClientId = $B2CClientId; ClientSecret = $B2CClientSecret }
+            } else {
+                $b2cApp = New-WorkerApp `
+                    -Headers          $b2cHeaders `
+                    -AppDisplayName   $b2cAppName `
+                    -PermissionRoleIds $PERM_USER_READ_ALL `
+                    -GraphSpId        $b2cGraphSpId `
+                    -TenantLabel      "B2C" `
+                    -WorkerNumber     $n
+            }
+
+            # EEID app registration (not needed for master)
+            if (-not $needsEeid) {
+                $eeidApp = @{ ClientId = ""; ClientSecret = "" }
+            } elseif ($SkipEEID) {
+                Write-Info "  [EEID] Skipped – using provided credentials"
+                $eeidApp = @{ ClientId = $EEIDClientId; ClientSecret = $EEIDClientSecret }
+            } else {
+                $eeidApp = New-WorkerApp `
+                    -Headers          $eeidHeaders `
+                    -AppDisplayName   $eeidAppName `
+                    -PermissionRoleIds @($PERM_USER_READWRITE, $PERM_USER_AUTH_RW) `
+                    -GraphSpId        $eeidGraphSpId `
+                    -TenantLabel      "External ID" `
+                    -WorkerNumber     $n
+            }
+        }
+        catch {
+            Write-Err "Failed to provision $appLabel`: $_"
+            Write-Warn "  Skipping. Other workers will still be attempted."
+            $results += [pscustomobject]@{ Label = $appLabel; B2cClientId = "ERROR"; EeidClientId = "ERROR"; File = $file; Skipped = $true }
+            continue
+        }
+
+        # Generate role-specific config
+        switch ($role) {
+            'master' {
+                $content = New-MasterConfigContent `
+                    -B2cTenantId       $b2cTenantId `
+                    -B2cTenantDomain   $b2cTenantDomain `
+                    -B2cClientId       $b2cApp.ClientId `
+                    -B2cClientSecret   $b2cApp.ClientSecret `
+                    -StorageAccountName $StorageAccountName
+            }
+            'user-worker' {
+                $content = New-UserWorkerConfigContent `
+                    -WorkerN           $n `
+                    -B2cTenantId       $b2cTenantId `
+                    -B2cTenantDomain   $b2cTenantDomain `
+                    -B2cClientId       $b2cApp.ClientId `
+                    -B2cClientSecret   $b2cApp.ClientSecret `
+                    -EeidTenantId      $eeidTenantId `
+                    -EeidTenantDomain  $eeidTenantDomain `
+                    -ExtAppId          $extensionAppId `
+                    -EeidClientId      $eeidApp.ClientId `
+                    -EeidClientSecret  $eeidApp.ClientSecret `
+                    -StorageAccountName $StorageAccountName `
+                    -UpnSuffix         $UpnSuffix
+            }
+            'phone-worker' {
+                $content = New-PhoneWorkerConfigContent `
+                    -WorkerN           $n `
+                    -B2cTenantId       $b2cTenantId `
+                    -B2cTenantDomain   $b2cTenantDomain `
+                    -B2cClientId       $b2cApp.ClientId `
+                    -B2cClientSecret   $b2cApp.ClientSecret `
+                    -EeidTenantId      $eeidTenantId `
+                    -EeidTenantDomain  $eeidTenantDomain `
+                    -ExtAppId          $extensionAppId `
+                    -EeidClientId      $eeidApp.ClientId `
+                    -EeidClientSecret  $eeidApp.ClientSecret `
+                    -StorageAccountName $StorageAccountName
+            }
+        }
+
+        $outFile = Join-Path $azureOutputDir $file
+        Set-Content -Path $outFile -Value $content -Encoding UTF8 -NoNewline
+        Write-Success "✓ Written: $file"
+
+        $results += [pscustomobject]@{
+            Label       = $appLabel
+            B2cClientId = $b2cApp.ClientId
+            EeidClientId= if ($needsEeid) { $eeidApp.ClientId } else { "N/A" }
+            File        = $file
+            Skipped     = $false
+        }
+    }
+} else {
+    # ═══ Legacy local-dev mode ═══
+    foreach ($n in $workersToProvision) {
     Write-Host ""
     Write-Host "───────────────────────────────────────────────────────────────" -ForegroundColor Cyan
     Write-Host "  Worker $n" -ForegroundColor Cyan
@@ -354,6 +561,7 @@ foreach ($n in $workersToProvision) {
         Skipped     = $false
     }
 }
+} # end if/else azureMode
 
 # ─── Summary ───────────────────────────────────────────────────────────────────
 Write-Host ""
@@ -366,22 +574,33 @@ $succeeded = $results | Where-Object { -not $_.Skipped }
 $failed    = $results | Where-Object { $_.Skipped }
 
 foreach ($r in $results) {
+    $label = if ($r.PSObject.Properties.Name -contains 'Label') { $r.Label } else { "Worker $($r.Worker)" }
     if ($r.Skipped) {
-        Write-Err "  Worker $($r.Worker): FAILED – check errors above"
+        Write-Err "  ${label}: FAILED – check errors above"
     }
     elseif ($WhatIf) {
-        Write-Warn "  Worker $($r.Worker): [WhatIf] $($r.File)"
+        Write-Warn "  ${label}: [WhatIf] $($r.File)"
     }
     else {
         $b2cShort  = $r.B2cClientId.Substring(0, [Math]::Min(8, $r.B2cClientId.Length))
         $eeidShort = $r.EeidClientId.Substring(0, [Math]::Min(8, $r.EeidClientId.Length))
-        Write-Success "  Worker $($r.Worker): B2C=$b2cShort…  EEID=$eeidShort…  → $($r.File)"
+        Write-Success "  ${label}: B2C=$b2cShort…  EEID=$eeidShort…  → $($r.File)"
     }
 }
 
 Write-Host ""
 
-if ($succeeded.Count -gt 0 -and -not $WhatIf) {
+if ($azureMode -and $succeeded.Count -gt 0 -and -not $WhatIf) {
+    Write-Info "Config files written to: $azureOutputDir"
+    Write-Host ""
+    Write-Info "Next steps:"
+    Write-Info "  1. Deploy infra: .\Deploy-All.ps1 -ResourceGroup <rg> -MasterCount $MasterCount -UserWorkerCount $UserWorkerCount -PhoneWorkerCount $PhoneWorkerCount"
+    Write-Info "  2. Configure workers via SSH: bash Configure-Worker.sh --config-file appsettings.json"
+    Write-Host ""
+    Write-Warn "⚠ Client secrets are embedded in the generated appsettings files."
+    Write-Warn "  These files contain credentials — keep them out of source control."
+}
+elseif ($succeeded.Count -gt 0 -and -not $WhatIf) {
     Write-Info "To run the new workers, open one terminal per worker:"
     Write-Host ""
     foreach ($r in $succeeded) {
@@ -394,6 +613,6 @@ if ($succeeded.Count -gt 0 -and -not $WhatIf) {
 
 if ($failed.Count -gt 0) {
     Write-Host ""
-    Write-Err "⚠ $($failed.Count) worker(s) failed. Review errors above and re-run with -StartWorker/-EndWorker to retry specific workers."
+    Write-Err "⚠ $($failed.Count) worker(s) failed. Review errors above and re-run to retry."
     exit 1
 }

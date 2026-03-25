@@ -110,6 +110,7 @@ VMs build the app themselves from source — no blob upload needed.
 | `-GitRepo` | *(auto-detected from git remote)* | Git repo URL for VMs to clone |
 | `-GitBranch` | *(auto-detected from current branch)* | Git branch to checkout on VMs |
 | `-SkipInfra` | `false` | Skip Bicep deployment, only re-provision VMs |
+| `-IncludeCustomData` | `true` | Include cloud-init customData in Bicep. Set to `$false` when redeploying to existing VMs to avoid conflicts |
 | `-WhatIf` | `false` | Dry run — shows what would happen without making changes |
 
 **Note:** Total VM count is automatically derived as `MasterCount + UserWorkerCount + PhoneWorkerCount` (default: 5 VMs).
@@ -509,10 +510,12 @@ Shared helper module dot-sourced by all scripts. Not meant to be run directly.
 | Function | Description |
 |----------|-------------|
 | `Confirm-AzuriteRunning` | Checks Azurite ports are open |
+| `Get-StorageMode` | Detects storage mode (Azurite vs Azure) from config |
 | `Initialize-LocalStorage` | Creates queues, tables, containers in local storage |
 | `Invoke-ConsoleApp` | Builds and runs the .NET console app |
 | `Get-DeviceCodeToken` | Authenticates via device code flow for Graph API |
 | `Invoke-Graph` | Executes Graph API calls with token refresh |
+| `Get-GraphSpId` | Resolves a service principal ID from an app registration |
 | `New-WorkerApp` | Creates app registrations with required permissions |
 | `Ensure-ExtensionProperties` | Creates extension attributes on EEID ExtensionApp |
 | `New-MasterConfigContent` | Generates appsettings JSON for master (harvest) role |

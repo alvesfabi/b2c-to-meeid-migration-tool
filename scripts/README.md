@@ -130,6 +130,29 @@ VMs build the app themselves from source — no blob upload needed.
 
 **Prerequisites:** Azure CLI logged in (`az login`), SSH key pair generated, config changes committed and pushed to your repo.
 
+### Setup-Worker.sh
+
+Low-level script that runs **on the VM** to clone the repository and build the app. Normally invoked automatically by `Deploy-All.ps1` via `az vm run-command`, but can be run manually if provisioning fails or you need to update the app on a VM.
+
+```bash
+# Default branch (main)
+bash /opt/b2c-migration/repo/scripts/Setup-Worker.sh
+
+# Specific branch
+bash /opt/b2c-migration/repo/scripts/Setup-Worker.sh azure-test-2
+```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `branch` | `main` | Git branch to clone |
+
+**What it does:**
+1. Clones the repo (shallow, single branch) to `/opt/b2c-migration/repo/`
+2. Runs `dotnet publish` to `/opt/b2c-migration/app/`
+3. Makes the console binary executable
+
+After this, run `Configure-Worker.sh` to generate `appsettings.json`.
+
 ### Connect-Worker.ps1
 
 Opens a Bastion SSH tunnel to a worker VM for secure access.

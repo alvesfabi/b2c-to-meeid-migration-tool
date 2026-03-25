@@ -35,7 +35,7 @@ This will:
 1. Deploy Azure infrastructure via Bicep (VNet, Storage, VMs, Bastion, Key Vault, NAT Gateway)
 2. Provision each VM: install .NET SDK + git, clone your repo, `dotnet publish` the app, copy example config
 
-> **Why clone on VM?** VMs clone the repo and build locally — no blob storage uploads, no public endpoints for binaries, no artifact pipelines. Updates are just `git pull && dotnet publish` (or re-run `Deploy-All.ps1 -SkipInfra`).
+> **Why clone on VM?** VMs clone the repo and build locally — no blob storage uploads, no public endpoints for binaries, no artifact pipelines. Updates are just `git pull && dotnet publish` (or re-run `Deploy-All.ps1 -SkipInfra`). Under the hood, each VM runs `Setup-Worker.sh` which does the git clone and `dotnet publish` — you can also run it manually if provisioning fails (see Troubleshooting).
 
 **To re-provision VMs without redeploying infra** (e.g., after a code change):
 

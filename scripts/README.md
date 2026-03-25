@@ -248,7 +248,7 @@ Live monitoring dashboard that tails JSONL telemetry files and shows running cou
 
 | Parameter | Default | Description |
 |---|---|---|
-| `WorkerCount` | 4 | Number of migrate + phone workers to monitor |
+| `WorkerCount` | 5 | Number of migrate + phone workers to monitor |
 | `ConsoleDir` | `../src/B2CMigrationKit.Console` | Directory with telemetry JSONL files |
 | `RefreshSeconds` | 3 | Seconds between dashboard refreshes |
 
@@ -339,6 +339,8 @@ This script automates the full setup via device code flow:
 | `CertificatePath` | Yes | Path to `jit-certificate.txt` |
 | `FunctionUrl` | Yes | Azure Function or ngrok endpoint URL |
 | `MigrationPropertyId` | No | Extension attribute ID (prompted if not provided) |
+| `ExtensionAppName` | No | Display name for the Custom Auth Extension app (default: `EEID Auth Extension - JIT Migration`) |
+| `ClientAppName` | No | Display name for the test client app (default: `JIT Migration Test Client`) |
 | `SkipClientApp` | No | Skip creating the test client app |
 
 **Manual step required:** Grant admin consent for the Extension App in Azure Portal after the script completes.
@@ -385,6 +387,7 @@ Downloads audit and telemetry JSONL files from all worker VMs via Bastion tunnel
 | `OutputDir` | `./telemetry-download` | Local directory for downloaded files |
 | `AppDir` | `/opt/b2c-migration/app` | Remote directory containing .jsonl files |
 | `AdminUsername` | `azureuser` | SSH username on the VMs |
+| `SubscriptionId` | *(current)* | Azure subscription ID (uses current `az` context if not specified) |
 
 Files are prefixed with the VM name (e.g., `vm-b2c-worker1_migration-audit.jsonl`) to avoid collisions.
 
@@ -405,7 +408,7 @@ Aggregates and analyzes JSONL telemetry files produced by migration workers.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `WorkerCount` | `4` | Number of worker file pairs to load |
+| `WorkerCount` | `5` | Number of worker file pairs to load |
 | `ConsoleDir` | `../src/B2CMigrationKit.Console` | Directory containing telemetry files |
 | `TelemetryFile` | — | Analyze a single file instead of aggregating |
 

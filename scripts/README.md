@@ -1,30 +1,31 @@
 # B2C Migration Kit - Scripts
 
-PowerShell scripts for running bulk migrations, configuring JIT password migration, and analyzing telemetry.
+PowerShell and Bash scripts for running bulk migrations, deploying Azure infrastructure, configuring JIT password migration, and analyzing telemetry.
 
 **📖 For complete configuration reference, see the [Developer Guide](../docs/DEVELOPER_GUIDE.md)**
 
-> **🚀 New here?** Start with [`Setup-Migration.ps1`](#setup-wizard) for interactive setup, or see the [Developer Guide](../docs/DEVELOPER_GUIDE.md) for complete configuration reference.
-
 ## Table of Contents
 
-- [Setup Wizard](#setup-wizard) — Interactive end-to-end setup
-- [Full Deployment](#full-deployment-deploy-all) — Azure VM infrastructure
-- [Prerequisites](#prerequisites)
-- [Migration Modes](#migration-modes) — Simple vs Advanced workflows  
-- [JIT Setup](#jit-password-migration-setup) — Password migration configuration
-- [Analysis](#telemetry-analysis) — Results and monitoring
-- [Utilities](#utility-scripts)
+- [🏠 Local Development](#-local-development) — Setup, run migrations locally, test utilities
+- [☁️ Azure Production](#️-azure-production) — Deploy VMs, configure workers, connect via Bastion
+- [🔐 JIT Password Migration](#-jit-password-migration) — RSA keys, Custom Auth Extension, environment switching
+- [📊 Analysis & Monitoring](#-analysis--monitoring) — Live dashboard, telemetry download, reports
 
 ---
 
-## Setup Wizard
+## 🏠 Local Development
+
+Scripts for setting up and running migrations on your local machine with Azurite.
+
+**Prerequisites:**
+1. **.NET 8.0 SDK** — `dotnet --version` (8.0+)
+2. **Azurite VS Code Extension** — `ms-azuretools.vscode-azurite` (start with `Ctrl+Shift+P` → `Azurite: Start Service`)
+3. **PowerShell 7.0+** — required for all `.ps1` scripts
+4. **Configuration files** — copy the relevant `.example.json` and fill in your tenant credentials (see [Developer Guide](../docs/DEVELOPER_GUIDE.md#configuration-guide))
 
 ### Setup-Migration.ps1
 
-Interactive wizard that walks through the **entire setup process** end-to-end: tenant configuration, app registration provisioning, config file generation, migration mode selection, and deployment target.
-
-**Run this first** — it replaces the manual steps in the Quick Start guide.
+Interactive wizard that walks through the **entire setup process** end-to-end. Best for **first-time setup** — it collects tenant info, creates app registrations, generates config files, and optionally deploys Azure infrastructure.
 
 ```powershell
 # Fully interactive (recommended for first-time setup)
@@ -64,16 +65,150 @@ Interactive wizard that walks through the **entire setup process** end-to-end: t
 
 **Wizard steps:**
 1. **Tenant info** — collects and validates B2C/EEID tenant IDs, domains, extension app ID
-2. **App registrations** — creates B2C (User.Read.All) + EEID (User.ReadWrite.All) apps per worker via device code auth, writes `appsettings.workerN.json`
+2. **App registrations** — creates B2C (User.Read.All) + EEID (User.ReadWrite.All) apps per worker via device code auth, writes config files
 3. **Migration mode** — Simple (export/import) or Advanced (queue-based workers + phone registration)
 4. **Deployment target** — Local (Azurite) or Azure VMs (invokes Deploy-All.ps1)
 5. **Summary** — prints everything created and the exact commands to run
 
 The wizard detects existing config files and offers to skip already-completed steps.
 
+### Initialize-MigrationEnvironment.ps1
+
+Granular, idempotent setup script for creating app registrations, ensuring extension properties, and generating config files. Use this when you need **more control** than the wizard provides — e.g., adding workers to an existing setup, re-generating configs, or provisioning Azure-mode configs.
+
+> **Tip**: `Setup-Migration.ps1` is the friendly wizard for first-time setup. `Initialize-MigrationEnvironment.ps1` is the power tool for granular control. Both create app registrations and generate configs — use whichever fits your workflow.
+
+Supports two modes:
+
+- **Local mode** (default): generates `appsettings.workerN.json` files for local development using `-StartWorker`/`-EndWorker`.
+- **Azure mode**: activated when any role count (`-MasterCount`, `-UserWorkerCount`, `-PhoneWorkerCount`) is greater than 0. Generates role-specific config files in `azure-configs/` subdirectory.
+
+```powershell
+# Local mode: workers 1-3
+.\scripts\Initialize-MigrationEnvironment.ps1 -StartWorker 1 -EndWorker 3 -Force
+
+# Local mode: EEID only (B2C apps already exist)
+.\scripts\Initialize-MigrationEnvironment.ps1 -SkipB2C -Force
+
+# Local mode: extension props + configs only
+.\scripts\Initialize-MigrationEnvironment.ps1 -SkipB2C -SkipEEID -Force
+
+# Azure mode: 1 master + 3 user workers + 10 phone workers
+.\scripts\Initialize-MigrationEnvironment.ps1 -MasterCount 1 -UserWorkerCount 3 -PhoneWorkerCount 10 -StorageAccountName stb2cmig123 -Force
+
+# Preview only (either mode)
+.\scripts\Initialize-MigrationEnvironment.ps1 -WhatIf
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-StartWorker` | `5` | First worker number (local mode) |
+| `-EndWorker` | `8` | Last worker number (local mode) |
+| `-ConfigFile` | `appsettings.worker1.json` | Source config for tenant IDs and shared settings |
+| `-SecretExpiryYears` | `2` | Client secret validity period |
+| `-Force` | `false` | Overwrite existing config files |
+| `-SkipB2C` | `false` | Skip B2C app registration creation |
+| `-SkipEEID` | `false` | Skip EEID app registration creation |
+| `-MasterCount` | `0` | Number of master (harvest) workers — activates Azure mode when > 0 |
+| `-UserWorkerCount` | `0` | Number of user-migrate workers (Azure mode) |
+| `-PhoneWorkerCount` | `0` | Number of phone-registration workers (Azure mode) |
+| `-StorageAccountName` | — | Azure storage account name (required in Azure mode) |
+| `-UpnSuffix` | — | UPN suffix for user-worker Import config (e.g. `-test2`) |
+| `-WhatIf` | `false` | Dry run — shows actions without executing |
+
+**Azure mode output**: Config files are written to `src/B2CMigrationKit.Console/azure-configs/` with names like `appsettings.master1.json`, `appsettings.user-worker1.json`, `appsettings.phone-worker1.json`. These can be uploaded to VMs via `Configure-Worker.sh --config-file`.
+
+### Validate-MigrationReadiness.ps1
+
+Pre-flight checker — run before starting any migration to verify connectivity, permissions, and storage.
+
+```powershell
+.\scripts\Validate-MigrationReadiness.ps1                                    # default (simple mode)
+.\scripts\Validate-MigrationReadiness.ps1 -Mode worker                       # validate worker mode prerequisites
+.\scripts\Validate-MigrationReadiness.ps1 -ConfigFile "appsettings.worker1.json"  # custom config
+```
+
+| Check | What it validates |
+|---|---|
+| Config | JSON valid, tenant IDs and secrets not placeholders |
+| Graph auth | OAuth2 client_credentials flow to both tenants |
+| Permissions | User.Read and Directory access on each tenant |
+| Extensions | Extension app and properties exist in EEID |
+| Storage | Queue Storage reachable (Advanced Mode). Table Storage checked only if `AuditMode="Table"` |
+| Tools | .NET SDK installed, PowerShell 7+ |
+
+### Running Migrations Locally
+
+> ⚠️ **Azurite must be running** before starting. Start via VS Code: `Ctrl+Shift+P` → `Azurite: Start Service`
+
+#### Simple Mode (Export → Import)
+
+For smaller tenants, no MFA phone migration needed.
+
+```powershell
+# Step 1: Export B2C users to local JSON files
+.\scripts\Start-LocalExport.ps1
+
+# Step 2: Import users to External ID
+.\scripts\Start-LocalImport.ps1
+```
+
+**Config:** `appsettings.export-import.example.json`
+
+#### Advanced Mode (Harvest → Workers)
+
+For large tenants, supports MFA phone migration and parallel processing.
+
+```powershell
+# Step 1: Harvest (run once)
+.\scripts\Start-LocalHarvest.ps1
+
+# Step 2a: Worker Migrate (run N in parallel, each with different config)
+.\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker1.json
+.\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker2.json
+
+# Step 2b: Phone Registration (run alongside step 2a)
+.\scripts\Start-LocalPhoneRegistration.ps1 -ConfigFile appsettings.worker1.json
+```
+
+**Requirements:** Each worker needs a dedicated app registration for independent throttle quotas.
+
+#### Common Parameters
+
+| Parameter | Description |
+|-----------|-------------|
+| `-ConfigFile <path>` | Configuration file (defaults per script) |
+| `-VerboseLogging` | Enable detailed debug output |
+| `-SkipAzurite` | Skip local storage checks (for cloud) |
+
+### Test Utilities
+
+#### New-TestUser.ps1
+
+Creates test users in External ID with `RequiresMigration` flag for JIT testing.
+
+```powershell
+.\scripts\New-TestUser.ps1 -Email "testuser@domain.com"             # single user
+.\scripts\New-TestUser.ps1 -Prefix "testjit" -Count 10              # bulk: testjit1..10
+.\scripts\New-TestUser.ps1 -Prefix "testjit" -Count 5 -WhatIf      # dry run
+```
+
+#### Manage-MigrationFlag.ps1
+
+Queries and updates the `RequiresMigration` flag on External ID users.
+
+```powershell
+.\scripts\Manage-MigrationFlag.ps1                          # list users pending migration
+.\scripts\Manage-MigrationFlag.ps1 -Filter all              # list all users
+.\scripts\Manage-MigrationFlag.ps1 -Filter true -SetFlag false   # clear flag for pending users
+.\scripts\Manage-MigrationFlag.ps1 -Discover                # list extension attributes
+```
+
 ---
 
-## Full Deployment (Deploy-All)
+## ☁️ Azure Production
+
+Scripts for deploying and managing the migration infrastructure on Azure VMs.
 
 ### Deploy-All.ps1
 
@@ -154,26 +289,6 @@ bash /opt/b2c-migration/repo/scripts/Setup-Worker.sh my-branch
 
 After this, run `Configure-Worker.sh` to generate `appsettings.json`.
 
-### Connect-Worker.ps1
-
-Opens a Bastion SSH tunnel to a worker VM for secure access.
-
-```powershell
-# Terminal 1: Open tunnel
-.\scripts\Connect-Worker.ps1 -WorkerIndex 1
-
-# Terminal 2: SSH through tunnel
-ssh -p 2201 -i .\scripts\b2c-mig-deploy azureuser@localhost
-```
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `-WorkerIndex` | `1` | Worker number (1–16). Maps to port 2200+N |
-| `-ResourceGroup` | `rg-b2c-eeid-mig-test1` | Resource group name |
-| `-SshPrivateKeyFile` | `scripts/b2c-mig-deploy` | Path to SSH private key |
-
-The script auto-installs the Azure CLI bastion extension if not present.
-
 ### Configure-Worker.sh
 
 Script that runs **on the VM** to generate `appsettings.json`. Supports two modes:
@@ -201,108 +316,29 @@ bash /opt/b2c-migration/repo/scripts/Configure-Worker.sh --config-file /tmp/apps
 
 Both modes write to `/opt/b2c-migration/app/appsettings.json` with `chmod 600` and run `validate` automatically.
 
----
+### Connect-Worker.ps1
 
-## Prerequisites
-
-1. **.NET 8.0 SDK** — `dotnet --version` (8.0+)
-2. **Azurite VS Code Extension** — `ms-azuretools.vscode-azurite` (start with `Ctrl+Shift+P` → `Azurite: Start Service`)
-3. **Configuration files** — copy the relevant `.example.json` and fill in your tenant credentials (see [Developer Guide](../docs/DEVELOPER_GUIDE.md#configuration-guide))
-
-Additional for JIT testing: **PowerShell 7.0+**, **ngrok**, **Azure Function Core Tools v4**.
-
----
-
-## Readiness Validation
-
-Run the pre-flight check before starting any migration to verify connectivity, permissions, and storage.
-
-### Validate-MigrationReadiness.ps1
-
-Comprehensive readiness checker that validates Graph API connectivity, required permissions, extension attributes, and storage infrastructure. Prints a PASS/FAIL summary report.
+Opens a Bastion SSH tunnel to a worker VM for secure access.
 
 ```powershell
-.\scripts\Validate-MigrationReadiness.ps1                                    # default (simple mode)
-.\scripts\Validate-MigrationReadiness.ps1 -Mode worker                       # validate worker mode prerequisites
-.\scripts\Validate-MigrationReadiness.ps1 -ConfigFile "appsettings.worker1.json"  # custom config
-```
+# Terminal 1: Open tunnel
+.\scripts\Connect-Worker.ps1 -WorkerIndex 1
 
-| Check | What it validates |
-|---|---|
-| Config | JSON valid, tenant IDs and secrets not placeholders |
-| Graph auth | OAuth2 client_credentials flow to both tenants |
-| Permissions | User.Read and Directory access on each tenant |
-| Extensions | Extension app and properties exist in EEID |
-| Storage | Queue Storage reachable (Advanced Mode). Table Storage checked only if `AuditMode="Table"` |
-| Tools | .NET SDK installed, PowerShell 7+ |
-
-### Watch-Migration.ps1
-
-Live monitoring dashboard that tails JSONL telemetry files and shows running counters (users migrated, phones registered, errors, throttles). Refreshes every few seconds; press Ctrl+C for a final summary.
-
-```powershell
-.\scripts\Watch-Migration.ps1                                # default (5 workers, 3s refresh)
-.\scripts\Watch-Migration.ps1 -WorkerCount 8                 # monitor 8 workers
-.\scripts\Watch-Migration.ps1 -RefreshSeconds 2              # faster refresh
+# Terminal 2: SSH through tunnel
+ssh -p 2201 -i .\scripts\b2c-mig-deploy azureuser@localhost
 ```
 
 | Parameter | Default | Description |
-|---|---|---|
-| `WorkerCount` | 5 | Number of migrate + phone workers to monitor |
-| `ConsoleDir` | `../src/B2CMigrationKit.Console` | Directory with telemetry JSONL files |
-| `RefreshSeconds` | 3 | Seconds between dashboard refreshes |
+|-----------|---------|-------------|
+| `-WorkerIndex` | `1` | Worker number (1–16). Maps to port 2200+N |
+| `-ResourceGroup` | `rg-b2c-eeid-mig-test1` | Resource group name |
+| `-SshPrivateKeyFile` | `scripts/b2c-mig-deploy` | Path to SSH private key |
+
+The script auto-installs the Azure CLI bastion extension if not present.
 
 ---
 
-## Migration Modes
-
-Choose between Simple (export/import) or Advanced (queue-based workers) migration modes.
-
-> ⚠️ **Prerequisites:** Azurite must be running. Start via VS Code: `Ctrl+Shift+P` → `Azurite: Start Service`
-
-### Simple Mode (Export → Import)
-
-For tenants <500K users, no MFA phone migration needed.
-
-```powershell
-# Step 1: Export B2C users to local JSON files
-.\scripts\Start-LocalExport.ps1
-
-# Step 2: Import users to External ID
-.\scripts\Start-LocalImport.ps1
-```
-
-**Config:** `appsettings.export-import.example.json`
-
-### Advanced Mode (Harvest → Workers)
-
-For large tenants, supports MFA phone migration and parallel processing.
-
-```powershell
-# Step 1: Harvest (run once)
-.\scripts\Start-LocalHarvest.ps1
-
-# Step 2a: Worker Migrate (run N in parallel, each with different config)
-.\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker1.json
-.\scripts\Start-LocalWorkerMigrate.ps1 -ConfigFile appsettings.worker2.json
-
-# Step 2b: Phone Registration (run alongside step 2a)
-.\scripts\Start-LocalPhoneRegistration.ps1 -ConfigFile appsettings.worker1.json
-```
-
-**Requirements:** Each worker needs dedicated app registration for independent throttle quotas.
-
-### Common Parameters
-
-| Parameter | Description |
-|-----------|-------------|
-| `-ConfigFile <path>` | Configuration file (defaults per script) |
-| `-VerboseLogging` | Enable detailed debug output |
-| `-SkipAzurite` | Skip local storage checks (for cloud) |
-
----
-
-## JIT Password Migration Setup
+## 🔐 JIT Password Migration
 
 After bulk migration (either mode), configure JIT so passwords migrate seamlessly on each user's first login.
 
@@ -365,7 +401,23 @@ Test the JIT flow via Azure Portal → User flows → Run user flow.
 
 ---
 
-## Telemetry Analysis
+## 📊 Analysis & Monitoring
+
+### Watch-Migration.ps1
+
+Live monitoring dashboard that tails JSONL telemetry files and shows running counters (users migrated, phones registered, errors, throttles). Refreshes every few seconds; press Ctrl+C for a final summary.
+
+```powershell
+.\scripts\Watch-Migration.ps1                                # default (5 workers, 3s refresh)
+.\scripts\Watch-Migration.ps1 -WorkerCount 8                 # monitor 8 workers
+.\scripts\Watch-Migration.ps1 -RefreshSeconds 2              # faster refresh
+```
+
+| Parameter | Default | Description |
+|---|---|---|
+| `WorkerCount` | 5 | Number of migrate + phone workers to monitor |
+| `ConsoleDir` | `../src/B2CMigrationKit.Console` | Directory with telemetry JSONL files |
+| `RefreshSeconds` | 3 | Seconds between dashboard refreshes |
 
 ### Download-Telemetry.ps1
 
@@ -390,6 +442,10 @@ Downloads audit and telemetry JSONL files from all worker VMs via Bastion tunnel
 | `SubscriptionId` | *(current)* | Azure subscription ID (uses current `az` context if not specified) |
 
 Files are prefixed with the VM name (e.g., `vm-b2c-worker1_migration-audit.jsonl`) to avoid collisions.
+
+### Upload-Telemetry.ps1
+
+Uploads local telemetry files to Azure Blob Storage for archival or shared analysis.
 
 ### Analyze-Telemetry.ps1
 
@@ -437,72 +493,7 @@ The script only analyzes the **last run** per file (ignores events before the la
 
 ---
 
-## Utility Scripts
-
-### New-TestUser.ps1
-
-Creates test users in External ID with `RequiresMigration` flag for JIT testing.
-
-```powershell
-.\scripts\New-TestUser.ps1 -Email "testuser@domain.com"             # single user
-.\scripts\New-TestUser.ps1 -Prefix "testjit" -Count 10              # bulk: testjit1..10
-.\scripts\New-TestUser.ps1 -Prefix "testjit" -Count 5 -WhatIf      # dry run
-```
-
-### Manage-MigrationFlag.ps1
-
-Queries and updates the `RequiresMigration` flag on External ID users.
-
-```powershell
-.\scripts\Manage-MigrationFlag.ps1                          # list users pending migration
-.\scripts\Manage-MigrationFlag.ps1 -Filter all              # list all users
-.\scripts\Manage-MigrationFlag.ps1 -Filter true -SetFlag false   # clear flag for pending users
-.\scripts\Manage-MigrationFlag.ps1 -Discover                # list extension attributes
-```
-
-### Initialize-MigrationEnvironment.ps1
-
-Initializes the migration environment: creates (or reuses) app registrations, ensures extension properties exist on the EEID ExtensionApp, and generates config files. Fully idempotent — safe to re-run.
-
-Supports two modes:
-
-- **Local mode** (default): generates `appsettings.workerN.json` files for local development using `-StartWorker`/`-EndWorker`.
-- **Azure mode**: activated when any role count (`-MasterCount`, `-UserWorkerCount`, `-PhoneWorkerCount`) is greater than 0. Generates role-specific config files in `azure-configs/` subdirectory, using the config templates from `_Common.ps1` (`New-MasterConfigContent`, `New-UserWorkerConfigContent`, `New-PhoneWorkerConfigContent`).
-
-```powershell
-# Local mode: workers 1-3
-.\scripts\Initialize-MigrationEnvironment.ps1 -StartWorker 1 -EndWorker 3 -Force
-
-# Local mode: EEID only (B2C apps already exist)
-.\scripts\Initialize-MigrationEnvironment.ps1 -SkipB2C -Force
-
-# Local mode: extension props + configs only
-.\scripts\Initialize-MigrationEnvironment.ps1 -SkipB2C -SkipEEID -Force
-
-# Azure mode: 1 master + 3 user workers + 10 phone workers
-.\scripts\Initialize-MigrationEnvironment.ps1 -MasterCount 1 -UserWorkerCount 3 -PhoneWorkerCount 10 -StorageAccountName stb2cmig123 -Force
-
-# Preview only (either mode)
-.\scripts\Initialize-MigrationEnvironment.ps1 -WhatIf
-```
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `-StartWorker` | `5` | First worker number (local mode) |
-| `-EndWorker` | `8` | Last worker number (local mode) |
-| `-ConfigFile` | `appsettings.worker1.json` | Source config for tenant IDs and shared settings |
-| `-SecretExpiryYears` | `2` | Client secret validity period |
-| `-Force` | `false` | Overwrite existing config files |
-| `-SkipB2C` | `false` | Skip B2C app registration creation |
-| `-SkipEEID` | `false` | Skip EEID app registration creation |
-| `-MasterCount` | `0` | Number of master (harvest) workers — activates Azure mode when > 0 |
-| `-UserWorkerCount` | `0` | Number of user-migrate workers (Azure mode) |
-| `-PhoneWorkerCount` | `0` | Number of phone-registration workers (Azure mode) |
-| `-StorageAccountName` | — | Azure storage account name (required in Azure mode) |
-| `-UpnSuffix` | — | UPN suffix for user-worker Import config (e.g. `-test2`) |
-| `-WhatIf` | `false` | Dry run — shows actions without executing |
-
-**Azure mode output**: Config files are written to `src/B2CMigrationKit.Console/azure-configs/` with names like `appsettings.master1.json`, `appsettings.user-worker1.json`, `appsettings.phone-worker1.json`. These can be uploaded to VMs via `Configure-Worker.sh --config-file`.
+## Shared Helpers
 
 ### _Common.ps1
 
@@ -525,5 +516,3 @@ Shared helper module dot-sourced by all scripts. Not meant to be run directly.
 | `New-UserWorkerConfigContent` | Generates appsettings JSON for user-worker (migrate) role |
 | `New-PhoneWorkerConfigContent` | Generates appsettings JSON for phone-worker role |
 | `New-WorkerAppSettingsContent` | Generates appsettings JSON for local mode (generic worker) |
-
-The `New-*ConfigContent` functions are used by `Initialize-MigrationEnvironment.ps1` in Azure mode to generate role-specific configs with correct storage URIs, managed identity settings, and role-appropriate permissions.

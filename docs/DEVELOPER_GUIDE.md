@@ -614,11 +614,12 @@ Infrastructure deploys via `Deploy-All.ps1`. See [`infra/README.md`](../infra/RE
 
 1. Generate SSH key: `ssh-keygen -t ed25519 -f scripts/b2c-mig-deploy -C "b2c-migration"`
 2. Create app registrations per worker: `.\scripts\Setup-Migration.ps1` (or manually)
-3. Deploy infra + VMs: `.\scripts\Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -SshPublicKeyFile .\scripts\b2c-mig-deploy.pub`
-4. Connect via Bastion: `.\scripts\Connect-Worker.ps1 -WorkerIndex 1`
-5. SSH: `ssh -p 2201 -i .\scripts\b2c-mig-deploy azureuser@localhost`
-6. Edit config on each VM: `nano /opt/b2c-migration/app/appsettings.json`
-7. Run migration (see [Runbook](RUNBOOK.md))
+3. Generate Azure configs: `.\scripts\Initialize-MigrationEnvironment.ps1 -MasterCount 1 -UserWorkerCount 2 -PhoneWorkerCount 2 -StorageAccountName <name> -Force`
+4. Deploy infra + VMs: `.\scripts\Deploy-All.ps1 -ResourceGroup rg-b2c-eeid-mig-test1 -SshPublicKeyFile .\scripts\b2c-mig-deploy.pub`
+5. Connect via Bastion: `.\scripts\Connect-Worker.ps1 -WorkerIndex 1`
+6. SSH: `ssh -p 2201 -i .\scripts\b2c-mig-deploy azureuser@localhost`
+7. Configure each VM: `bash /opt/b2c-migration/repo/scripts/Configure-Worker.sh` (interactive) or `--config-file` (non-interactive)
+8. Run migration (see [Runbook](RUNBOOK.md))
 
 ## Operations & Monitoring
 

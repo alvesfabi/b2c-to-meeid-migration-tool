@@ -257,10 +257,10 @@ Worker N  (App Reg B2C-N / EEID-N)  ──► queue: phone-reg-wN  ──► Pho
 | Principle | Details |
 |-----------|---------|
 | **Modular Architecture** | Shared Core Library (business logic) + Console (CLI) + Azure Functions (JIT). Zero hosting-specific dependencies in Core. |
-| **Security First** | Target: Private Endpoints, Managed Identity, Key Vault. Current v1.0: client secrets for local dev. Encryption at rest + in transit (TLS 1.2+). Least privilege permissions. |
+| **Security First** | Private Endpoints, Managed Identity, optional Key Vault integration. Encryption at rest + in transit (TLS 1.2+). Least privilege permissions. |
 | **Observability** | Structured logging (console + local JSONL audit by default, optional Table Storage), run summaries, JSONL telemetry files. |
 | **Reliability** | Idempotent operations, graceful degradation, checkpoint/resume via queue visibility timeouts, Polly exponential backoff + jitter on 429s. |
-| **Scalability** | Multi-app parallelization via per-worker-pair queues (see [§2.1](#21-end-to-end-pipeline-narrative)). Each worker pair has dedicated app registrations (B2C + EEID) and a per-pair phone-registration queue. Two scaling axes: add more worker pairs (linear throughput), or increase `MaxConcurrency` within a worker (sweet spot: 8). |
+| **Scalability** | Multi-app parallelization via per-worker-pair queues (see [§2.1](#21-end-to-end-pipeline-narrative)). Each worker pair has dedicated app registrations (B2C + EEID) and a per-pair phone-registration queue. Two scaling axes: add more worker pairs (linear throughput), or increase `MaxConcurrency` within a worker. |
 
 ---
 
@@ -309,7 +309,7 @@ JIT enables seamless password validation on first External ID login:
 
 1. User logs in → EEID checks `RequiresMigration = true`
 2. Custom Authentication Extension calls Azure Function with encrypted password + UPN
-3. Function decrypts password (RSA private key from Key Vault)
+3. Function decrypts password (RSA private key from Key Vault or inline configuration)
 4. Function reverses UPN transform: `user@externalid.com` → `user@b2c.com`
 5. Function validates via ROPC against B2C
 6. If valid → `MigratePassword` (EEID sets password, clears flag). If invalid → `BlockSignIn`
@@ -324,7 +324,7 @@ JIT:     user@externalid.com → user@b2c.com  (reverse using same local part)
 
 | Layer | Control |
 |-------|---------|
-| **Encryption at rest** | RSA private key in Key Vault (Function MI with `Get Secret` only). Passwords never stored/logged. |
+| **Encryption at rest** | RSA private key in Key Vault (recommended) or inline configuration. Passwords never stored/logged. |
 | **Encryption in transit** | Password field RSA-encrypted by Custom Extension. All traffic TLS 1.2+. |
 | **AuthN: EEID → Function** | Azure AD bearer token, audience = Custom Extension app ID URI |
 | **AuthN: Function → B2C** | ROPC flow (ClientId + ClientSecret). No Graph permissions needed. |
@@ -355,16 +355,16 @@ JIT:     user@externalid.com → user@b2c.com  (reverse using same local part)
 
 ### Data Protection
 
-- **At rest**: Azure Storage Service Encryption (SSE), Key Vault for sensitive configuration
+- **At rest**: Azure Storage Service Encryption (SSE). Optional Key Vault integration for sensitive configuration (secrets, RSA keys)
 - **In transit**: TLS 1.2+ for all connections, strict certificate validation
-- **Secrets**: Configuration files with gitignored credentials or Key Vault integration
+- **Secrets**: Configuration files with gitignored credentials (default) or Key Vault integration (optional, enabled via `Migration:KeyVault:Enabled`)
 
 ### Audit & Compliance
 
-- Key Vault audit logs (all secret access tracked)
 - Function invocation logs (correlation IDs, user IDs, results)
 - External ID sign-in audit logs (30-day retention, export for long-term)
 - Migration audit: local JSONL files (default) or Azure Table Storage (optional, queryable)
+- Optional: Key Vault audit logs when Key Vault integration is enabled
 
 ---
 
@@ -431,11 +431,11 @@ All resources deploy via Bicep (`infra/`) and the Deploy-All.ps1 script. No publ
 
 - **5× Ubuntu 22.04 VMs** (Standard_B2s) — 1 master (harvest) + 2 user-workers (worker-migrate) + 2 phone-workers (phone-registration)
 - **Storage Account** — Queue Storage (work item coordination for Advanced Mode). Audit defaults to local JSONL files; optionally use Table Storage (`AuditMode="Table"`). All via Private Endpoints.
-- **Key Vault** — stores `appsettings` per worker. RBAC-only, PE access.
+- **Key Vault** (optional) — can store client secrets and RSA keys per worker. RBAC-only, PE access. When not enabled, secrets are stored in local `appsettings` files.
 - **Azure Bastion** (Standard, tunneling enabled) — SSH access without public IPs. Optional; can be stopped to save cost.
 - **NAT Gateway** — controlled outbound for Graph API calls.
 
-**VM Managed Identity roles**: Storage Queue Data Contributor, Key Vault Secrets User. Add Storage Table Data Contributor only if using `AuditMode="Table"`.
+**VM Managed Identity roles**: Storage Queue Data Contributor. Add Key Vault Secrets User if using Key Vault integration. Add Storage Table Data Contributor if using `AuditMode="Table"`.
 
 ### Deployment Workflow
 

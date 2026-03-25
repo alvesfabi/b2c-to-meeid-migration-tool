@@ -32,8 +32,8 @@ The CLI supports two migration modes:
 
 | Orchestrator | Command | Description |
 |---|---|---|
-| `ExportOrchestrator` | `export` | Pages B2C users, writes JSON files to Blob Storage |
-| `ImportOrchestrator` | `import` | Reads blobs, creates users in EEID with attribute mapping + JIT flag |
+| `ExportOrchestrator` | `export` | Pages B2C users, writes local JSON files |
+| `ImportOrchestrator` | `import` | Reads local JSON files, creates users in EEID with attribute mapping + JIT flag |
 
 **Advanced Mode — Workers** (full MFA, parallel scaling):
 
@@ -47,7 +47,7 @@ The CLI supports two migration modes:
 
 | Orchestrator | Command | Description |
 |---|---|---|
-| `ValidateOrchestrator` | `validate` | Checks connectivity to B2C, EEID, Queue Storage, and Blob Storage |
+| `ValidateOrchestrator` | `validate` | Checks connectivity to B2C, EEID, and Queue Storage (Advanced Mode) |
 
 **Both modes**: `JitMigrationService` *(Azure Function)* — Validates B2C credentials on first login, returns `MigratePassword` action.
 
@@ -142,7 +142,7 @@ Admin consent required. `Directory.ReadWrite.All` is **NOT** required. `Extensio
 | `MaxUsers` | 0 (unlimited) | Cap for smoke tests (e.g., `20`). `0` = export all. |
 | `FilterPattern` | *(empty)* | OData `$filter` expression to subset users. |
 
-Storage sections used by export: `ExportContainerName`, `ErrorContainerName`, `ExportBlobPrefix`.
+Export writes to local JSON files — no Azure storage configuration needed for Simple Mode.
 
 ### Import Configuration (Simple Mode)
 
@@ -168,7 +168,7 @@ Storage sections used by export: `ExportContainerName`, `ErrorContainerName`, `E
 | `OverwriteExtensionAttributes` | `false` | If `true`, overwrites existing extension values |
 | `SkipPhoneRegistration` | `true` | Simple Mode skips MFA phone migration (use Advanced Mode if needed) |
 
-Storage sections used by import: `ExportContainerName` (reads from), `ImportAuditContainerName`, `AuditTableName`.
+Import reads from local JSON files exported in Step 1. Audit defaults to local JSONL (`AuditMode="File"`).
 
 ### Harvest Configuration
 
@@ -204,20 +204,20 @@ Storage sections used by import: `ExportContainerName` (reads from), `ImportAudi
 
 ```json
 "Storage": {
-  "ConnectionStringOrUri": "https://yourstorage.blob.core.windows.net",
+  "ConnectionStringOrUri": "UseDevelopmentStorage=true",
   "AuditTableName": "migrationAudit",
-  "UseManagedIdentity": true,
-  "AuditMode": "Table"
+  "UseManagedIdentity": false,
+  "AuditMode": "File"
 }
 ```
 
 | AuditMode | Backend | Notes |
 |---|---|---|
-| `Table` | Azure Table Storage / Azurite | **Default.** Production-grade, queryable. |
-| `File` | Local JSONL file (`AuditFilePath`) | Dev use when Azurite unavailable. Thread-safe. |
+| `File` | Local JSONL file (`AuditFilePath`) | **Default.** Thread-safe, no Azure dependency. |
+| `Table` | Azure Table Storage / Azurite | Optional. Queryable, production-grade. Requires `Storage Table Data Contributor` role. |
 | `None` | No-op | Smoke tests only. |
 
-Required roles (Table mode): `Storage Queue Data Contributor`, `Storage Table Data Contributor`.
+Required roles (Advanced Mode): `Storage Queue Data Contributor`. Add `Storage Table Data Contributor` only if using `AuditMode="Table"`.
 
 ### Retry Configuration
 
@@ -274,14 +274,14 @@ Config patterns: **Local** → `ClientSecret` with actual value. **Production** 
 
 Two commands, no queues. Best for small & medium tenant, < 1 million users without MFA phone migration.
 
-**1. Export** — pages B2C users to Blob Storage JSON files.
+**1. Export** — pages B2C users to local JSON files.
 ```powershell
 dotnet run -- export --config appsettings.export-import.json
 
 # Smoke test: set Export.MaxUsers to 20 in config first
 ```
 
-**2. Import** — reads exported blobs, creates users in EEID.
+**2. Import** — reads exported local JSON files, creates users in EEID.
 ```powershell
 dotnet run -- import --config appsettings.export-import.json
 ```
@@ -572,9 +572,9 @@ All identity `issuer` fields updated from B2C to EEID domain. Standard fields (`
 
 Create target custom attributes in External ID (**Azure Portal → External Identities → Custom user attributes**) before import. Full attribute name format: `extension_{ExtensionAppId}_{attributeName}`.
 
-## Migration Audit Table
+## Migration Audit
 
-Every user processed is recorded in Azure Table Storage (`migrationAudit`):
+Every user processed is recorded in the audit trail. By default, audit records are written to local JSONL files (`AuditMode="File"`). Optionally, set `AuditMode="Table"` to write to Azure Table Storage (`migrationAudit`) for queryable audit:
 
 | Column | Description |
 |---|---|
@@ -623,11 +623,11 @@ Infrastructure deploys via `Deploy-All.ps1`. See [`infra/README.md`](../infra/RE
 
 ## Operations & Monitoring
 
-### Audit Table
+### Audit
 
-The primary observability source is the `MigrationAudit` table in Azure Table Storage. Each row tracks one user migration with status, timestamps, and error details.
+The primary observability source is the local JSONL audit files (default `AuditMode="File"`). Each line tracks one user migration with status, timestamps, and error details.
 
-Query via CLI:
+If using `AuditMode="Table"` (Azure Table Storage), query via CLI:
 ```bash
 az storage entity query --table-name MigrationAudit \
   --account-name <storage> --auth-mode login \

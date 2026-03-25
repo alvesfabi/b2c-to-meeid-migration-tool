@@ -140,18 +140,18 @@ Key values to fill in:
 | `Migration.Storage` | `ConnectionStringOrUri` | `https://<STORAGE_ACCOUNT>.blob.core.windows.net` |
 | `Migration.Storage` | `UseManagedIdentity` | `true` (VMs have RBAC on the storage account) |
 
-**Storage config example** — the VMs already have managed identity with Blob/Queue/Table Contributor roles:
+**Storage config example** — the VMs already have managed identity with Queue Data Contributor role:
 
 ```json
 "Storage": {
-  "ConnectionStringOrUri": "https://strgb2ceeidmigtewkpji0.blob.core.windows.net",
+  "ConnectionStringOrUri": "https://strgb2ceeidmigtewkpji0.queue.core.windows.net",
   "UseManagedIdentity": true,
   "AuditTableName": "migrationAudit",
-  "AuditMode": "Table"
+  "AuditMode": "File"
 }
 ```
 
-> Replace `strgb2ceeidmigtewkpji0` with your actual storage account name (check the Deploy-All output or run `az storage account list -g <RG> --query "[].name" -o tsv`).
+> Replace `strgb2ceeidmigtewkpji0` with your actual storage account name (check the Deploy-All output or run `az storage account list -g <RG> --query "[].name" -o tsv`). Audit defaults to local JSONL files (`AuditMode="File"`). Set `AuditMode="Table"` only if you need queryable Azure Table Storage audit.
 
 **Important**: Each worker VM must have a **dedicated app registration** with its own client ID/secret for independent Graph API throttle quotas.
 
@@ -173,9 +173,7 @@ cd /opt/b2c-migration/app
 This checks connectivity to:
 - B2C Graph API
 - Entra External ID Graph API (skipped for master/harvest VMs)
-- Azure Queue Storage
-- Azure Blob Storage
-- Azure Table Storage
+- Azure Queue Storage (required for Advanced Mode)
 
 All applicable checks must pass (✓) before starting migration.
 

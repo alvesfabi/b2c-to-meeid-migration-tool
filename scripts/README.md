@@ -233,7 +233,7 @@ Comprehensive readiness checker that validates Graph API connectivity, required 
 | Graph auth | OAuth2 client_credentials flow to both tenants |
 | Permissions | User.Read and Directory access on each tenant |
 | Extensions | Extension app and properties exist in EEID |
-| Storage | Azurite ports or cloud storage reachable, containers/queues/tables |
+| Storage | Queue Storage reachable (Advanced Mode). Table Storage checked only if `AuditMode="Table"` |
 | Tools | .NET SDK installed, PowerShell 7+ |
 
 ### Watch-Migration.ps1
@@ -265,7 +265,7 @@ Choose between Simple (export/import) or Advanced (queue-based workers) migratio
 For tenants <500K users, no MFA phone migration needed.
 
 ```powershell
-# Step 1: Export B2C users to blob storage
+# Step 1: Export B2C users to local JSON files
 .\scripts\Start-LocalExport.ps1
 
 # Step 2: Import users to External ID

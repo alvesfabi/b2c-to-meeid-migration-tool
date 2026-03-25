@@ -25,8 +25,8 @@ The **B2C Migration Kit** migrates user identities from **Azure AD B2C** to **Mi
 The kit has two independent concerns:
 
 1. **Bulk user migration** — export/import user profiles from B2C to External ID, with two modes:
-   - **Simple Mode — Export/Import**: Simple blob-based pipeline (`export` → Blob Storage → `import`). Best for small tenants, no MFA phone migration needed.
-   - **Advanced Mode — Workers**: Queue-based parallel pipeline (`harvest` → `worker-migrate` → `phone-registration`). Best for large tenants, full MFA phone migration, parallel scaling.
+   - **Simple Mode — Export/Import**: Simple local-file pipeline (`export` → local JSON files → `import`). Best for small tenants, no MFA phone migration needed. No Azure storage infrastructure required.
+   - **Advanced Mode — Workers**: Queue-based parallel pipeline (`harvest` → `worker-migrate` → `phone-registration`). Best for large tenants, full MFA phone migration, parallel scaling. Requires Azure Queue Storage for worker coordination.
 2. **JIT Password Migration** — Seamless password validation on first login via Custom Authentication Extension. Works independently of which bulk mode you choose — it runs as an Azure Function triggered on each user's first login after bulk migration.
 
 ### Choose Your Bulk Migration Mode
@@ -34,7 +34,7 @@ The kit has two independent concerns:
 | Factor | Simple Mode (Export/Import) | Advanced Mode (Workers) |
 |--------|----------------------|-------------------|
 | **Best for** | Small/medium tenants <500K users, no MFA phones | Large tenants, MFA phone migration |
-| **Infrastructure** | Blob Storage only | Queue + Table Storage |
+| **Infrastructure** | Local JSON files only (no Azure storage) | Queue Storage (+ optional Table Storage for audit) |
 | **Parallelism** | Single-threaded | N worker pairs, configurable concurrency |
 | **MFA phones** | ❌ Not supported | ✅ Full phone method migration |
 | **Commands** | `export` → `import` (2 steps) | `harvest` → `worker-migrate` → `phone-registration` (3 steps) |
@@ -62,10 +62,11 @@ The kit has two independent concerns:
 │  │   (Services, Models, Orchestrators, Abstractions)   │       │
 │  └──────┬───────────┬───────────┬──────────┬──────────┘       │
 │         ▼           ▼           ▼          ▼                   │
-│  ┌──────────┐ ┌─────────┐ ┌──────────┐                        │
-│  │ Storage  │ │ Table   │ │Key Vault │                        │
-│  │Queue/Blob│ │ Storage │ │          │                        │
-│  └──────────┘ └─────────┘ └──────────┘                        │
+│  ┌──────────┐ ┌──────────┐                                    │
+│  │ Queue    │ │Key Vault │                                    │
+│  │ Storage  │ │          │                                    │
+│  │(Adv Mode)│ │          │                                    │
+│  └──────────┘ └──────────┘                                    │
 └─────────────────────────────────────────────────────────────────┘
          │                           │
          ▼                           ▼
@@ -83,41 +84,41 @@ The kit supports two migration pipelines. Choose based on your scenario (see [Ch
 
 ### Simple Mode — Export/Import Pipeline
 
-A simple two-step blob-based pipeline for straightforward migrations without MFA phone migration.
+A simple two-step local-file pipeline for straightforward migrations without MFA phone migration. No Azure storage infrastructure required.
 
 #### Step 1 — `export` (run once)
 
 ```
 B2C Tenant → GET /users?$select={fields}&$top={pageSize}
   └─ ExportOrchestrator
-     └─► Blob Storage: b2c-export/{blobPrefix}page-{N}.json
+     └─► Local file: exports/page-{N}.json
 ```
 
-Pages all B2C users with configurable `$select` fields, writes each page as a JSON blob. Supports optional client-side filtering by `displayName`/`userPrincipalName` pattern. Exits when all pages are processed.
+Pages all B2C users with configurable `$select` fields, writes each page as a local JSON file. Supports optional client-side filtering by `displayName`/`userPrincipalName` pattern. Exits when all pages are processed.
 
-- **Config**: `Export.SelectFields`, `Export.FilterPattern` (optional), `Storage.ExportContainerName`, `Storage.ExportBlobPrefix`
+- **Config**: `Export.SelectFields`, `Export.FilterPattern` (optional)
 - **Permissions**: B2C `User.Read.All` (Application)
 
 #### Step 2 — `import` (run once)
 
 ```
-Blob Storage: b2c-export/*.json
+Local files: exports/*.json
   └─ ImportOrchestrator
-     ├─ Read user JSON from each blob
+     ├─ Read user JSON from each file
      ├─ Transform: UPN domain rewrite, extension attrs, email identity, random password
      ├─ POST /users → EEID
      │   ├─ 201 Created  → audit(Created)
      │   ├─ 409 Conflict → audit(Duplicate)
      │   └─ Other error  → audit(Failed)
-     └─► Blob Storage: b2c-import-audit/import-audit-{blob}.json
+     └─► Local audit JSONL file (default) or Azure Table Storage (optional)
 ```
 
-Reads exported blobs sequentially, transforms each user profile, creates in EEID. Audit results written as JSON blobs. Single-threaded — no queue coordination needed.
+Reads exported files sequentially, transforms each user profile, creates in EEID. Audit results written to local JSONL files by default (`AuditMode="File"`). Single-threaded — no queue coordination needed.
 
-- **Config**: `Import.ExtensionAttributes`, `Storage.ImportAuditContainerName`
+- **Config**: `Import.ExtensionAttributes`
 - **Permissions**: B2C `User.Read.All` (for export), EEID `User.ReadWrite.All` (Application)
 
-> **Limitations**: No MFA phone migration, no parallel scaling, no Table Storage audit trail. For large tenants or MFA scenarios, use Advanced Mode.
+> **Limitations**: No MFA phone migration, no parallel scaling. For large tenants or MFA scenarios, use Advanced Mode.
 
 ---
 
@@ -146,7 +147,7 @@ Queue: user-ids-to-process
    │   ├─ 201 Created  → audit(Created)   + enqueue phone task
    │   ├─ 409 Conflict → audit(Duplicate) + enqueue phone task
    │   └─ Other error  → audit(Failed, errorCode, errorMessage)
-   ├─► Table Storage: migration-audit
+   ├─► Audit: local JSONL file (default) or Azure Table Storage (optional)
    └─► Queue: phone-registration  ({ B2CUserId, EEIDUpn } — no phone number stored)
 ```
 
@@ -188,10 +189,10 @@ This section walks through both migration pipelines from start to finish, explai
 
 Simple Mode is a straightforward two-step pipeline:
 
-1. **Export** pages all B2C users and writes full profiles to Blob Storage as JSON files. Each page becomes one blob (~999 users). Optional client-side filtering (`FilterPattern`) limits export to matching users.
-2. **Import** reads each blob sequentially, transforms user profiles (UPN rewrite, extension attribute mapping, email identity, random password with `RequiresMigration` flag), and creates each user in EEID via `POST /users`. Results are written to audit blobs.
+1. **Export** pages all B2C users and writes full profiles to local JSON files. Each page becomes one file (~999 users). Optional client-side filtering (`FilterPattern`) limits export to matching users.
+2. **Import** reads each file sequentially, transforms user profiles (UPN rewrite, extension attribute mapping, email identity, random password with `RequiresMigration` flag), and creates each user in EEID via `POST /users`. Audit results are written to local JSONL files by default.
 
-**Why blobs?** For small tenants, the overhead of queues and Table Storage is unnecessary. Blobs provide a simple checkpoint — if import fails mid-blob, re-run skips duplicates (409 = idempotent). Export blobs also serve as a backup of the source data.
+**Why local files?** For small tenants, the overhead of queues and cloud storage is unnecessary. Local files provide a simple checkpoint — if import fails mid-file, re-run skips duplicates (409 = idempotent). Export files also serve as a backup of the source data. No Azure storage infrastructure is needed.
 
 ### Advanced Mode — Worker Pipeline Narrative
 
@@ -218,7 +219,7 @@ The worker runs with `ThrottleDelayMs` (default 400 ms) to stay under the `phone
 
 ### Stage 4 — Telemetry & Audit
 
-All workers emit structured JSONL telemetry to local files (`worker{N}-telemetry.jsonl`, `phone-registration{N}-telemetry.jsonl`) and write audit records to Azure Table Storage (`migration-audit`). This enables post-run analysis via `Analyze-Telemetry.ps1` and full traceability of every user processed.
+All workers emit structured JSONL telemetry to local files (`worker{N}-telemetry.jsonl`, `phone-registration{N}-telemetry.jsonl`). Audit records default to local JSONL files (`AuditMode="File"`); optionally, set `AuditMode="Table"` to write to Azure Table Storage for queryable audit. This enables post-run analysis via `Analyze-Telemetry.ps1` and full traceability of every user processed.
 
 ### Stage 5 — Scaling
 
@@ -258,7 +259,7 @@ Worker N  (App Reg B2C-N / EEID-N)  ──► queue: phone-reg-wN  ──► Pho
 |-----------|---------|
 | **Modular Architecture** | Shared Core Library (business logic) + Console (CLI) + Azure Functions (JIT). Zero hosting-specific dependencies in Core. |
 | **Security First** | Target: Private Endpoints, Managed Identity, Key Vault. Current v1.0: client secrets for local dev. Encryption at rest + in transit (TLS 1.2+). Least privilege permissions. |
-| **Observability** | Structured logging (console + Table Storage audit), run summaries, JSONL telemetry files. |
+| **Observability** | Structured logging (console + local JSONL audit by default, optional Table Storage), run summaries, JSONL telemetry files. |
 | **Reliability** | Idempotent operations, graceful degradation, checkpoint/resume via queue visibility timeouts, Polly exponential backoff + jitter on 429s. |
 | **Scalability** | Multi-app parallelization via per-worker-pair queues (see [§2.1](#21-end-to-end-pipeline-narrative)). Each worker pair has dedicated app registrations (B2C + EEID) and a per-pair phone-registration queue. Two scaling axes: add more worker pairs (linear throughput), or increase `MaxConcurrency` within a worker (sweet spot: 8). |
 
@@ -305,15 +306,15 @@ public class WorkerMigrateOrchestrator : IOrchestrator
 
 ### 5.0 Simple Mode — Export
 
-Pages B2C users with configurable `$select` fields, writes each page as a JSON blob to `ExportContainerName`. Supports optional `FilterPattern` for client-side filtering by `displayName`/`userPrincipalName`.
+Pages B2C users with configurable `$select` fields, writes each page as a local JSON file. Supports optional `FilterPattern` for client-side filtering by `displayName`/`userPrincipalName`.
 
 - **Permissions**: B2C `User.Read.All` (Application)
 - **Config**: `Export.SelectFields`, `Export.FilterPattern`, `PageSize` (default: 999)
-- **Output**: `{ExportContainerName}/{ExportBlobPrefix}page-{N}.json`
+- **Output**: Local JSON files (`exports/page-{N}.json`)
 
 ### 5.0b Simple Mode — Import
 
-Reads exported blobs sequentially, transforms user profiles (UPN domain rewrite, extension attribute mapping, email identity, random password + `RequiresMigration` JIT flag), creates users in EEID. Audit results written as JSON blobs to `ImportAuditContainerName`.
+Reads exported local JSON files sequentially, transforms user profiles (UPN domain rewrite, extension attribute mapping, email identity, random password + `RequiresMigration` JIT flag), creates users in EEID. Audit results written to local JSONL files by default (`AuditMode="File"`); optionally to Azure Table Storage (`AuditMode="Table"`).
 
 - **Permissions**: EEID `User.ReadWrite.All` (Application)
 - **Config**: `Import.ExtensionAttributes` (source → target attribute mapping)
@@ -332,7 +333,7 @@ Consumes harvest queue, fetches full profiles via `$batch`, transforms and creat
 
 **Per-message flow**: Dequeue (20 IDs) → `$batch` fetch from B2C → Transform (UPN, attrs, email identity, random password) → `POST /users` to EEID → Audit → Enqueue phone task → Delete message.
 
-**Audit trail** (Azure Table `migration-audit`):
+**Audit trail** (local JSONL by default; optional Azure Table `migration-audit` when `AuditMode="Table"`):
 
 | Field | Description |
 |---|---|
@@ -424,7 +425,7 @@ JIT:     user@externalid.com → user@b2c.com  (reverse using same local part)
 - Key Vault audit logs (all secret access tracked)
 - Function invocation logs (correlation IDs, user IDs, results)
 - External ID sign-in audit logs (30-day retention, export for long-term)
-- Table Storage migration audit (permanent, queryable)
+- Migration audit: local JSONL files (default) or Azure Table Storage (optional, queryable)
 
 ---
 
@@ -491,7 +492,7 @@ All resources deploy via Bicep (`infra/`) and the Deploy-All.ps1 script. No publ
 │                                                                  │
 │  workers (10.0.1.0/24)          private-endpoints (10.0.2.0/24) │
 │  ┌──────────┐ ┌──────────┐     ┌─────────────────────────────┐  │
-│  │ worker-1 │ │ worker-2 │     │ PE: Queue, Blob, Table      │  │
+│  │ worker-1 │ │ worker-2 │     │ PE: Queue Storage            │  │
 │  │ worker-3 │ │ worker-4 │     │ PE: Key Vault               │  │
 │  └────┬─────┘ └────┬─────┘     └─────────────────────────────┘  │
 │       │             │                                            │
@@ -507,12 +508,12 @@ All resources deploy via Bicep (`infra/`) and the Deploy-All.ps1 script. No publ
 **Components**:
 
 - **5× Ubuntu 22.04 VMs** (Standard_B2s) — 1 master (harvest) + 2 user-workers (worker-migrate) + 2 phone-workers (phone-registration)
-- **Storage Account** — Queue (work items), Table (audit records), Blob (export data + app artifact). All via Private Endpoints.
+- **Storage Account** — Queue Storage (work item coordination for Advanced Mode). Audit defaults to local JSONL files; optionally use Table Storage (`AuditMode="Table"`). All via Private Endpoints.
 - **Key Vault** — stores `appsettings` per worker. RBAC-only, PE access.
 - **Azure Bastion** (Standard, tunneling enabled) — SSH access without public IPs. Optional; can be stopped to save cost.
 - **NAT Gateway** — controlled outbound for Graph API calls.
 
-**VM Managed Identity roles**: Storage Queue Data Contributor, Storage Blob Data Contributor, Storage Table Data Contributor, Key Vault Secrets User.
+**VM Managed Identity roles**: Storage Queue Data Contributor, Key Vault Secrets User. Add Storage Table Data Contributor only if using `AuditMode="Table"`.
 
 ### Deployment Workflow
 
@@ -533,7 +534,7 @@ See [`infra/README.md`](../infra/README.md) for the full runbook.
 
 No App Insights dependency. Workers use two telemetry channels:
 
-- **Table Storage** (`MigrationAudit`) — structured audit records per user (status, timestamps, errors). Primary observability source.
+- **Local JSONL files** — structured audit records per user (status, timestamps, errors). Default and primary observability source (`AuditMode="File"`). Optionally use Azure Table Storage (`AuditMode="Table"`) for queryable audit.
 - **Console logging** (`ILogger`) — stdout for real-time debugging via Bastion SSH.
 
 Query audit records via Azure Storage Explorer or `az storage entity query`.

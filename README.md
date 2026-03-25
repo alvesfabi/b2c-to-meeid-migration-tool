@@ -26,7 +26,7 @@ Both modes handle bulk user export/import. JIT password migration works independ
 |---|---|---|
 | **Commands** | `export` → `import` | `harvest` → `worker-migrate` + `phone-registration` |
 | **Best for** | Small or Medium tenants < 1 million users, no MFA phones | Large tenants, MFA phone migration |
-| **Azure infra** | Blob Storage only | Blob + Queue + Table Storage |
+| **Azure infra** | None (local files) | Queue Storage only |
 | **Parallelism** | Single process | N workers in parallel |
 | **MFA phones** | ❌ Not implemented | ✅ Available |
 | **Complexity** | Low — 2 sequential commands | Medium — 3 commands, parallel workers |
@@ -44,8 +44,8 @@ Both modes handle bulk user export/import. JIT password migration works independ
 ```mermaid
 graph LR
     B2C[(Azure AD B2C)] -->|Page users| Export[1. export]
-    Export -->|JSON files| Blob[(Blob Storage)]
-    Blob -->|Read users| Import[2. import]
+    Export -->|JSON files| Local[(Local Files)]
+    Local -->|Read users| Import[2. import]
     Import -->|Create users| ExtID[(Entra External ID)]
 
     style Export fill:#0078d4,color:#fff
@@ -70,17 +70,17 @@ graph TB
         ExtID[(Entra External ID<br/>Target Tenant)]
         Queue2[(Azure Queue<br/>phone-registration)]
         PhoneWorker[2b. phone-registration × N<br/>Register MFA phones — throttled]
-        AuditTable[(Azure Table<br/>migrationAudit)]
+        Audit[(JSONL Audit Log)]
 
         Queue1 -->|Dequeue ID batch| Worker
         Worker -->|Fetch full profile| B2C
         Worker -->|Create user| ExtID
         Worker -->|Enqueue phone task| Queue2
-        Worker -->|Audit record| AuditTable
+        Worker -->|Audit record| Audit
         Queue2 -->|Dequeue phone task| PhoneWorker
         PhoneWorker -->|GET /authentication/phoneMethods| B2C
         PhoneWorker -->|POST /authentication/phoneMethods| ExtID
-        PhoneWorker -->|Audit record| AuditTable
+        PhoneWorker -->|Audit record| Audit
     end
 
     style Harvest fill:#0078d4,color:#fff
@@ -108,10 +108,10 @@ graph LR
 
 ### ✅ Currently Available
 
-- **Simple Mode: Export/Import** — Simple two-step bulk migration via Blob Storage; ideal for smaller tenants without MFA phone migration needs
+- **Simple Mode: Export/Import** — Simple two-step bulk migration via local JSON files; ideal for smaller tenants without MFA phone migration needs
 - **Advanced Mode: Harvest + Worker Migrate** — Harvest phase enqueues user IDs; N parallel worker-migrate instances fetch full B2C profiles and create users directly in EEID
 - **Async Phone Registration** (Advanced Mode) — MFA phone numbers fetched from B2C and registered in EEID at a throttle-safe rate 
-- **Audit Trail** — Every user operation (Created, Duplicate, Failed, PhoneRegistered, PhoneSkipped) written to Azure Table Storage (`migrationAudit`)
+- **Audit Trail** — Every user operation (Created, Duplicate, Failed, PhoneRegistered, PhoneSkipped) written to local JSONL by default (Azure Table Storage optional)
 - **JIT Password Migration** via Custom Authentication Extension
 - **UPN Domain Transformation** preserving local-part identifiers as a workaround to enable [sign-in alias](https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-sign-in-alias) functionality
 - **Built-in Retry Logic** with exponential backoff

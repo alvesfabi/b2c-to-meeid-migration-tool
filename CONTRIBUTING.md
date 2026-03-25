@@ -26,7 +26,7 @@ This project is currently a **preview/sample implementation** showcasing Just-In
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/alvesfabi/b2c-to-meeid-migration-tool.git
+   git clone https://github.com/microsoft/b2c-to-meeid-migration-tool.git
    cd b2c-to-meeid-migration-tool
    ```
 

@@ -80,7 +80,7 @@ for ($p = 1; $p -le $PhoneWorkerCount; $p++) {
 if (-not $GitRepo) {
     $GitRepo = git remote get-url origin 2>$null
     if (-not $GitRepo) {
-        $GitRepo = 'https://github.com/alvesfabi/b2c-to-meeid-migration-tool.git'
+        $GitRepo = 'https://github.com/microsoft/b2c-to-meeid-migration-tool.git'
     }
 }
 if (-not $GitBranch) {
